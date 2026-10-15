@@ -14,8 +14,10 @@
 | with_binding | 112 |
 | value_constants | 768 |
 | value_enums | 10 |
+| value_blocks | 49 |
 | orphan_bindings | 3 |
 | binding_slots | 12 |
+| binding_slot_placeholders | 1 |
 | nv47_modules | 6 |
 | shader_facets | 275 |
 | clusters | 14 |

@@ -22,6 +22,11 @@ generator (`generate.py`) is the source of truth for *facts*; humans/agents own 
 Supporting extractions: dispatch table (`rsx_methods.cpp`), argument-table slots
 (`VK/vkutils/pipeline_binding_table.h`), NV47/HW modules.
 
+Every VALUE row carries a `block` column — the `gcm_enums.h:<line>` of the `enum`
+it came from — so an anonymous `enum {}` has a stable identity even though it has
+no C++ name. A slot row carries `placeholder`: the source marks such a field
+invalid/derived (re-initialized at runtime), so it owns no slot.
+
 ## 2. Stable IDs
 
 | prefix | meaning | example |

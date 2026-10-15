@@ -17,7 +17,7 @@ M_NV4097_SET_VERTEX_DATA2S_M,emulate,"transient MTL::Buffer attribute ring @ slo
 M_NV4097_SET_VERTEX_DATA4UB_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
 M_NV4097_SET_VERTEX_DATA4S_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
 M_NV4097_SET_VERTEX_DATA4F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
-M_NV4097_SET_INDEXED_CONSTANT_READ_LIMITS,na,none,,low,[U],,"no reader in the tree; question: does it bound the indexed-constant load range?"
+M_NV4097_SET_INDEXED_CONSTANT_READ_LIMITS,na,none,,low,[U],rsx_methods.cpp:1464,"no reader in the tree; question: does it bound the indexed-constant load range?"
 M_NV4097_SET_VERTEX_DATA1F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
 M_NV4097_SET_TRANSFORM_EXECUTION_MODE,na,none,,low,[V],rsx_methods.cpp:1484,"nullptr handler; hw/ucode mode is never consulted"
 M_NV4097_SET_TRANSFORM_PROGRAM_LOAD,na,none,,low,[V],rsx_methods.cpp:1486,"write cursor for ucode upload; not shader/GPU state"

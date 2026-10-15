@@ -165,6 +165,11 @@ def _eval(expr: str) -> int | None:
     return v >> shift
 
 
+def _line_of(text: str, offset: int) -> int:
+    """1-based line number of `offset` in `text`."""
+    return text.count("\n", 0, offset) + 1
+
+
 def parse_gcm_enums(path: Path) -> tuple[dict[str, int], list[dict]]:
     """Return (method name -> word index, list of value-space enum entries)."""
     methods: dict[str, int] = {}
@@ -174,6 +179,7 @@ def parse_gcm_enums(path: Path) -> tuple[dict[str, int], list[dict]]:
     text = path.read_text(errors="replace")
     for em in _ENUM_BLOCK_RE.finditer(text):
         enum_name = em.group(1) or ""
+        block = f"{path.name}:{_line_of(text, em.start())}"
         brace = text.find("{", em.start())
         end = _brace_match(text, brace)
         if brace < 0 or end < 0:
@@ -195,7 +201,8 @@ def parse_gcm_enums(path: Path) -> tuple[dict[str, int], list[dict]]:
                 continue
             last = v
             values.append({"enum": enum_name, "name": name, "value": v,
-                           "value_hex": f"0x{v:x}", "source": path.name})
+                           "value_hex": f"0x{v:x}", "source": path.name,
+                           "block": block})
             if name.startswith(METHOD_PREFIXES) or name.startswith(METHOD_EXTRA):
                 methods.setdefault(name, v)
     return methods, values
@@ -302,10 +309,16 @@ def parse_bindings(path: Path, methods: dict[str, int]) -> dict[str, Binding]:
 
 
 _BINDING_SLOT_RE = re.compile(r"\bu8\s+([A-Za-z_]\w*)\s*=\s*(\d+)\s*;")
+_PLACEHOLDER_RE = re.compile(r"//\s*(?:invalid|derived)", re.I)
 _FUNC_RE = re.compile(r"^\s*(?:void|bool|u32|s32|u8|u16)\s+([A-Za-z_]\w*)\s*\(")
 
 
 def parse_binding_table(path: Path) -> list[dict]:
+    """Return the argument-table slot fields.
+
+    A field whose source comment marks its initializer invalid or derived is a
+    *placeholder*: it is re-initialized at runtime and does not own a slot.
+    """
     slots = []
     if not path.exists():
         return slots
@@ -313,7 +326,8 @@ def parse_binding_table(path: Path) -> list[dict]:
         m = _BINDING_SLOT_RE.search(line)
         if m:
             slots.append({"name": m.group(1), "slot": int(m.group(2)),
-                          "source": f"{path.name}:{n}"})
+                          "source": f"{path.name}:{n}",
+                          "placeholder": int(bool(_PLACEHOLDER_RE.search(line)))})
     return slots
 
 
@@ -508,6 +522,8 @@ def check(model: dict) -> list[str]:
         errs.append(f"only {nb} registers have a binding (expected >= 40)")
     if len(model["values"]) < 400:
         errs.append(f"only {len(model['values'])} value-space constants (expected >= 400)")
+    if any(not v["block"] for v in model["values"]):
+        errs.append("value-space constant without a source block id")
     if len(model["slots"]) < 10:
         errs.append("binding table too small")
     if len(model["shader_facets"]) < 80:
@@ -556,8 +572,9 @@ def emit(model: dict, out: Path) -> dict:
     write_csv(out / "rsx_state_space.csv", spine, list(spine[0].keys()))
     write_csv(out / "rsx_decode_fields.csv", fields, list(fields[0].keys()))
     write_csv(out / "rsx_value_space.csv", model["values"],
-              ["enum", "name", "value", "value_hex", "source"])
-    write_csv(out / "rsx_binding_slots.csv", model["slots"], ["name", "slot", "source"])
+              ["enum", "name", "value", "value_hex", "source", "block"])
+    write_csv(out / "rsx_binding_slots.csv", model["slots"],
+              ["name", "slot", "source", "placeholder"])
     write_csv(out / "rsx_shader_facets.csv", model["shader_facets"],
               ["id", "kind", "name", "value", "source"])
 
@@ -583,8 +600,10 @@ def emit(model: dict, out: Path) -> dict:
         "binding_kinds": _count(regs, lambda r: r.binding.kind if r.binding else "unbound"),
         "value_constants": len(model["values"]),
         "value_enums": len({v["enum"] for v in model["values"]}),
+        "value_blocks": len({v["block"] for v in model["values"]}),
         "orphan_bindings": len(model["orphan_bindings"]),
         "binding_slots": len(model["slots"]),
+        "binding_slot_placeholders": sum(1 for s in model["slots"] if s["placeholder"]),
         "nv47_modules": len(model["nv47"]),
         "shader_facets": len(model["shader_facets"]),
         "clusters": len(clusters),
@@ -618,8 +637,9 @@ def emit_summary(out: Path, spine: list[dict], fields: list[dict], stats: dict,
     A("| metric | value |")
     A("|---|---|")
     for k in ("registers", "with_decoder", "decoder_fields", "with_binding",
-              "value_constants", "value_enums", "orphan_bindings", "binding_slots",
-              "nv47_modules", "shader_facets", "clusters"):
+              "value_constants", "value_enums", "value_blocks", "orphan_bindings",
+              "binding_slots", "binding_slot_placeholders", "nv47_modules",
+              "shader_facets", "clusters"):
         A(f"| {k} | {stats[k]} |")
     A("")
     A(f"Binding kinds: " + ", ".join(f"`{k}`={v}" for k, v in stats["binding_kinds"].items()))

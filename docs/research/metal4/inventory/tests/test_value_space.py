@@ -3,8 +3,12 @@
 Value-space contract tests: every constant a register can carry.
 
 One case per constant (`V_`-family dial, 768 at this revision) plus one case per
-enum domain (10).  Mirrors `design/LLD-value-space.md` (the exhaustive
-format/blend/compare table) and the VALUE space of `inventory/SCHEMA.md`.
+enum domain (10) and per source block (49: 10 named enums and 39 anonymous
+`enum {}` blocks).  Mirrors the format/blend tables in `design/LLD-texture.md`
+§3.1 and `design/LLD-blend.md` §3.2–3.3, and the VALUE space of
+`inventory/SCHEMA.md`.  A
+constant's block id is validated against the header, so an anonymous enum still
+has a stable identity.
 """
 from __future__ import annotations
 
@@ -25,11 +29,16 @@ class TestValueSpace(_corpus.DialTest):
             self.assertContract(enum or "(anonymous)", _corpus.enum_violations(enum),
                                 _corpus.ENUM_DEVIATIONS.get(enum, ()))
 
-    def test_anonymous_bucket_is_a_lump(self):
+    def test_anonymous_constants_have_block_identity(self):
         anon = [v for v in _corpus.values() if v.enum == _corpus.ANONYMOUS_ENUM]
         self.assertGreater(len(anon), 0)
+        self.assertGreater(len(_corpus.anonymous_blocks()), 1)
+        self.assertTrue(_corpus.anonymous_blocks() <= _corpus.enum_block_ids())
         self.assertEqual(len({v.name for v in anon}), len(anon))
-        self.assertLess(len({v.value for v in anon}), len(anon))
+
+    def test_value_blocks_anchor_to_source(self):
+        self.assertTrue({v.block for v in _corpus.values()}
+                        <= _corpus.enum_block_ids())
 
     def test_counts_match_stats(self):
         self.assertEqual(len(_corpus.values()), _corpus.stats()["value_constants"])

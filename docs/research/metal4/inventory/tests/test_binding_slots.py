@@ -4,7 +4,9 @@ Binding-slot contract tests: the argument-table layout.
 
 One case per slot (`S_*` dial, 12 at this revision) plus the layout invariants.
 Mirrors `design/HLD-04` §3.3 / `design/HLD-05` §3.2 and the binding extraction
-from `VK/vkutils/pipeline_binding_table.h`.
+from `VK/vkutils/pipeline_binding_table.h`.  A field the source marks invalid or
+derived (the vertex-texture placeholder) owns no slot and is declared, not
+counted as a duplicate.
 """
 from __future__ import annotations
 
@@ -20,9 +22,13 @@ class TestBindingSlots(_corpus.DialTest):
                                 _corpus.SLOT_DEVIATIONS.get(slot.name, ()))
 
     def test_indices_contiguous_modulo_reserved_gaps(self):
-        idx = sorted({s.slot for s in _corpus.slots()})
+        idx = sorted({s.slot for s in _corpus.slots() if not s.placeholder})
         self.assertEqual(idx, [i for i in range(max(idx) + 1)
                                if i not in _corpus.SLOT_GAPS])
+
+    def test_placeholders_are_declared(self):
+        observed = frozenset(s.name for s in _corpus.slots() if s.placeholder)
+        self.assertEqual(observed, _corpus.SLOT_PLACEHOLDERS)
 
     def test_declared_kinds_are_valid(self):
         for slot in _corpus.slots():

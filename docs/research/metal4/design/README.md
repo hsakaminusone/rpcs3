@@ -46,7 +46,6 @@ shard under `../inventory/out/dispositions/<cluster>.csv`.
 | [`LLD-nv2d-surface.md`](LLD-nv2d-surface.md) | `nv2d-surface` | 13 |
 | [`LLD-nv308a-image.md`](LLD-nv308a-image.md) | `nv308a-image` | 16 |
 | [`LLD-nv3089-image.md`](LLD-nv3089-image.md) | `nv3089-image` | 21 |
-| [`LLD-value-space.md`](LLD-value-space.md) | *(value space)* | 768 constants |
 
 ## Conventions
 
