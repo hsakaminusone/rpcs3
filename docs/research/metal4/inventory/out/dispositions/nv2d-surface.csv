@@ -1,0 +1,14 @@
+id,disposition,metal4_target,difficulty,risk,confidence,doc_ref,notes
+M_NV3062_SET_OBJECT,na,none (inert subchannel handle),,low,[V],rsx_methods.cpp:1527,stored with default 0x313371c3 and never read
+M_NV3062_SET_CONTEXT_DMA_NOTIFIES,na,none (inert notify context),,low,[V],rsx_methods.cpp:1528,never read by the blit path
+M_NV3062_SET_CONTEXT_DMA_IMAGE_SOURCE,na,none (source DMA comes from NV3089),,low,[V],nv3089.cpp:209,blit_engine_input_location() reads NV3089_SET_CONTEXT_DMA_IMAGE instead
+M_NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN,reshape,MTL::Buffer (guest window) surface2d destination base,2,med,[I],HLD-02 §2.1,output_dma selects the destination allocation
+M_NV3062_SET_COLOR_FORMAT,reshape,MTLPixelFormat operand of the copy/convert encoder,2,med,[I],04 §2.6,transfer_dest_fmt in a8r8g8b8/y32/r5g6b5
+M_NV3062_SET_PITCH,reshape,destination rowBytes / host copy pitch,2,low,[I],HLD-02 §2.3,alignment bits 0-15 and pitch bits 16-31
+M_NV3062_SET_OFFSET_SOURCE,na,none (source offset comes from NV3089),,low,[V],nv3089.cpp:189,blit_engine_input_offset() reads NV3089_IMAGE_IN_OFFSET instead
+M_NV3062_SET_OFFSET_DESTIN,reshape,MTL::Buffer destination offset,2,low,[I],HLD-02 §2.1,output_offset
+M_NV309E_SET_OBJECT,na,none (inert subchannel handle),,low,[V],rsx_methods.cpp:1537,no decode and no handler
+M_NV309E_SET_CONTEXT_DMA_NOTIFIES,na,none (inert notify context),,low,[V],rsx_methods.cpp:1538,never read by the blit path
+M_NV309E_SET_CONTEXT_DMA_IMAGE,reshape,MTL::Buffer (guest window) swizzle2d destination base,2,med,[I],HLD-02 §2.1,context_dma for the swizzled target
+M_NV309E_SET_FORMAT,emulate,MTL4ComputeCommandEncoder running the MSL swizzle kernel,4,high,[I],HLD-02 §2.4,format bits 0-15 plus sw_width_log2 bits 16-23 and sw_height_log2 bits 24-31
+M_NV309E_SET_OFFSET,reshape,MTL::Buffer swizzle destination offset,2,med,[I],HLD-02 §2.1,offset into the swizzled region

@@ -1,0 +1,3993 @@
+{
+  "nv47": [
+    {
+      "file": "common.cpp",
+      "functions": [
+        "is_volatile_TIU",
+        "push_vertex_data",
+        "push_draw_parameter_change",
+        "get_report_data_impl",
+        "set_fragment_texture_dirty_bit",
+        "set_vertex_texture_dirty_bit"
+      ],
+      "module": "common",
+      "n_functions": 6
+    },
+    {
+      "file": "nv0039.cpp",
+      "functions": [
+        "buffer_notify"
+      ],
+      "module": "nv0039",
+      "n_functions": 1
+    },
+    {
+      "file": "nv3089.cpp",
+      "functions": [
+        "linear_copy",
+        "swizzled_copy_2",
+        "image_in"
+      ],
+      "module": "nv3089",
+      "n_functions": 3
+    },
+    {
+      "file": "nv308a.cpp",
+      "functions": [],
+      "module": "nv308a",
+      "n_functions": 0
+    },
+    {
+      "file": "nv406e.cpp",
+      "functions": [
+        "set_reference",
+        "semaphore_acquire",
+        "semaphore_release"
+      ],
+      "module": "nv406e",
+      "n_functions": 3
+    },
+    {
+      "file": "nv4097.cpp",
+      "functions": [
+        "set_shader_program_dirty",
+        "set_surface_dirty_bit",
+        "set_zmin_max_control",
+        "set_surface_format",
+        "set_surface_options_dirty_bit",
+        "set_color_mask",
+        "set_stencil_op",
+        "set_aa_control",
+        "set_array_element16",
+        "set_array_element32",
+        "draw_arrays",
+        "draw_index_array",
+        "draw_inline_array",
+        "set_transform_program_start",
+        "set_vertex_attribute_output_mask",
+        "set_vertex_base_offset",
+        "set_index_base_offset",
+        "check_index_array_dma",
+        "set_begin_end",
+        "clear",
+        "clear_zcull",
+        "set_face_property",
+        "set_blend_equation",
+        "set_blend_factor",
+        "set_transform_constant_load",
+        "get_report",
+        "clear_report_value",
+        "set_render_mode",
+        "set_shading_mode",
+        "set_zcull_render_enable",
+        "set_zcull_stats_enable",
+        "set_zcull_pixel_count_enable",
+        "set_notify",
+        "texture_read_semaphore_release",
+        "back_end_write_semaphore_release",
+        "sync"
+      ],
+      "module": "nv4097",
+      "n_functions": 36
+    }
+  ],
+  "orphan_bindings": [
+    {
+      "count": 1,
+      "handler": "trace_method",
+      "kind": "bind",
+      "register": "0x2100 >> 2",
+      "step": 1
+    },
+    {
+      "count": 1,
+      "handler": "trace_method",
+      "kind": "bind",
+      "register": "0x171c >> 2",
+      "step": 1
+    },
+    {
+      "count": 1,
+      "handler": "fifo::draw_barrier",
+      "kind": "bind",
+      "register": "FIFO::FIFO_DRAW_BARRIER >> 2",
+      "step": 1
+    }
+  ],
+  "registers": [
+    {
+      "addr": 0,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_OBJECT",
+      "name": "NV4097_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 80,
+      "binding": {
+        "count": 1,
+        "handler": "nv406e::set_reference",
+        "kind": "bind",
+        "register": "NV406E_SET_REFERENCE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV406E_SET_REFERENCE",
+      "name": "NV406E_SET_REFERENCE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 96,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV406E_SET_CONTEXT_DMA_SEMAPHORE",
+      "name": "NV406E_SET_CONTEXT_DMA_SEMAPHORE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 100,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV406E_SEMAPHORE_OFFSET",
+      "name": "NV406E_SEMAPHORE_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 104,
+      "binding": {
+        "count": 1,
+        "handler": "nv406e::semaphore_acquire",
+        "kind": "bind",
+        "register": "NV406E_SEMAPHORE_ACQUIRE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV406E_SEMAPHORE_ACQUIRE",
+      "name": "NV406E_SEMAPHORE_ACQUIRE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 108,
+      "binding": {
+        "count": 1,
+        "handler": "nv406e::semaphore_release",
+        "kind": "bind",
+        "register": "NV406E_SEMAPHORE_RELEASE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV406E_SEMAPHORE_RELEASE",
+      "name": "NV406E_SEMAPHORE_RELEASE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 256,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_NO_OPERATION",
+      "name": "NV4097_NO_OPERATION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 260,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_notify",
+        "kind": "bind",
+        "register": "NV4097_NOTIFY",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_NOTIFY",
+      "name": "NV4097_NOTIFY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 272,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::sync",
+        "kind": "bind",
+        "register": "NV4097_WAIT_FOR_IDLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_WAIT_FOR_IDLE",
+      "name": "NV4097_WAIT_FOR_IDLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 320,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_PM_TRIGGER",
+      "name": "NV4097_PM_TRIGGER",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 384,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV4097_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 388,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_A",
+      "name": "NV4097_SET_CONTEXT_DMA_A",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 392,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_B",
+      "name": "NV4097_SET_CONTEXT_DMA_B",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 396,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_CONTEXT_DMA_COLOR_B",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_COLOR_B",
+      "name": "NV4097_SET_CONTEXT_DMA_COLOR_B",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 400,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_STATE",
+      "name": "NV4097_SET_CONTEXT_DMA_STATE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 404,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_CONTEXT_DMA_COLOR_A",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_COLOR_A",
+      "name": "NV4097_SET_CONTEXT_DMA_COLOR_A",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 408,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_CONTEXT_DMA_ZETA",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_ZETA",
+      "name": "NV4097_SET_CONTEXT_DMA_ZETA",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 412,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_VERTEX_A",
+      "name": "NV4097_SET_CONTEXT_DMA_VERTEX_A",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 416,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_VERTEX_B",
+      "name": "NV4097_SET_CONTEXT_DMA_VERTEX_B",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 420,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_SEMAPHORE",
+      "name": "NV4097_SET_CONTEXT_DMA_SEMAPHORE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 424,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_REPORT",
+      "name": "NV4097_SET_CONTEXT_DMA_REPORT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 428,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_CLIP_ID",
+      "name": "NV4097_SET_CONTEXT_DMA_CLIP_ID",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 432,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CONTEXT_DMA_CULL_DATA",
+      "name": "NV4097_SET_CONTEXT_DMA_CULL_DATA",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 436,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_CONTEXT_DMA_COLOR_C",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_COLOR_C",
+      "name": "NV4097_SET_CONTEXT_DMA_COLOR_C",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 440,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_CONTEXT_DMA_COLOR_D",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTEXT_DMA_COLOR_D",
+      "name": "NV4097_SET_CONTEXT_DMA_COLOR_D",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 512,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_CLIP_HORIZONTAL",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "origin_x",
+          "offset": 0,
+          "register": "NV4097_SET_SURFACE_CLIP_HORIZONTAL",
+          "width": 16
+        },
+        {
+          "method": "width",
+          "offset": 16,
+          "register": "NV4097_SET_SURFACE_CLIP_HORIZONTAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_CLIP_HORIZONTAL",
+      "name": "NV4097_SET_SURFACE_CLIP_HORIZONTAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 516,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_CLIP_VERTICAL",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "origin_y",
+          "offset": 0,
+          "register": "NV4097_SET_SURFACE_CLIP_VERTICAL",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV4097_SET_SURFACE_CLIP_VERTICAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_CLIP_VERTICAL",
+      "name": "NV4097_SET_SURFACE_CLIP_VERTICAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 520,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_format",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_FORMAT",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "color_fmt_raw",
+          "offset": 0,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 5
+        },
+        {
+          "method": "depth_fmt_raw",
+          "offset": 5,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 3
+        },
+        {
+          "method": "type_raw",
+          "offset": 8,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 4
+        },
+        {
+          "method": "antialias_raw",
+          "offset": 12,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 4
+        },
+        {
+          "method": "log2width",
+          "offset": 16,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 8
+        },
+        {
+          "method": "log2height",
+          "offset": 24,
+          "register": "NV4097_SET_SURFACE_FORMAT",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_FORMAT",
+      "name": "NV4097_SET_SURFACE_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 524,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_PITCH_A",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_PITCH_A",
+      "name": "NV4097_SET_SURFACE_PITCH_A",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 528,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_COLOR_AOFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_COLOR_AOFFSET",
+      "name": "NV4097_SET_SURFACE_COLOR_AOFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 532,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_ZETA_OFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_ZETA_OFFSET",
+      "name": "NV4097_SET_SURFACE_ZETA_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 536,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_COLOR_BOFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_COLOR_BOFFSET",
+      "name": "NV4097_SET_SURFACE_COLOR_BOFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 540,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_PITCH_B",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_PITCH_B",
+      "name": "NV4097_SET_SURFACE_PITCH_B",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 544,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_COLOR_TARGET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_COLOR_TARGET",
+      "name": "NV4097_SET_SURFACE_COLOR_TARGET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 556,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_PITCH_Z",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_PITCH_Z",
+      "name": "NV4097_SET_SURFACE_PITCH_Z",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 564,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_INVALIDATE_ZCULL",
+      "name": "NV4097_INVALIDATE_ZCULL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 568,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CYLINDRICAL_WRAP",
+      "name": "NV4097_SET_CYLINDRICAL_WRAP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 572,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CYLINDRICAL_WRAP1",
+      "name": "NV4097_SET_CYLINDRICAL_WRAP1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 640,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_PITCH_C",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_PITCH_C",
+      "name": "NV4097_SET_SURFACE_PITCH_C",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 644,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_PITCH_D",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_PITCH_D",
+      "name": "NV4097_SET_SURFACE_PITCH_D",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 648,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_COLOR_COFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_COLOR_COFFSET",
+      "name": "NV4097_SET_SURFACE_COLOR_COFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 652,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_SURFACE_COLOR_DOFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SURFACE_COLOR_DOFFSET",
+      "name": "NV4097_SET_SURFACE_COLOR_DOFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 696,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_WINDOW_OFFSET",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "window_offset_x",
+          "offset": 0,
+          "register": "NV4097_SET_WINDOW_OFFSET",
+          "width": 16
+        },
+        {
+          "method": "window_offset_y",
+          "offset": 16,
+          "register": "NV4097_SET_WINDOW_OFFSET",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_WINDOW_OFFSET",
+      "name": "NV4097_SET_WINDOW_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 700,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_WINDOW_CLIP_TYPE",
+      "name": "NV4097_SET_WINDOW_CLIP_TYPE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 704,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_WINDOW_CLIP_HORIZONTAL",
+      "name": "NV4097_SET_WINDOW_CLIP_HORIZONTAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 708,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_WINDOW_CLIP_VERTICAL",
+      "name": "NV4097_SET_WINDOW_CLIP_VERTICAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 768,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DITHER_ENABLE",
+      "name": "NV4097_SET_DITHER_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 772,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ALPHA_TEST_ENABLE",
+      "name": "NV4097_SET_ALPHA_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 776,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ALPHA_FUNC",
+      "name": "NV4097_SET_ALPHA_FUNC",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 780,
+      "binding": null,
+      "fields": [
+        {
+          "method": "alpha_ref8",
+          "offset": 0,
+          "register": "NV4097_SET_ALPHA_REF",
+          "width": 8
+        },
+        {
+          "method": "alpha_ref16",
+          "offset": 0,
+          "register": "NV4097_SET_ALPHA_REF",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ALPHA_REF",
+      "name": "NV4097_SET_ALPHA_REF",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 784,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_ENABLE",
+      "name": "NV4097_SET_BLEND_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 788,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_blend_factor",
+        "kind": "bind",
+        "register": "NV4097_SET_BLEND_FUNC_SFACTOR",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "src_blend_rgb_raw",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_FUNC_SFACTOR",
+          "width": 16
+        },
+        {
+          "method": "src_blend_a_raw",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_FUNC_SFACTOR",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_FUNC_SFACTOR",
+      "name": "NV4097_SET_BLEND_FUNC_SFACTOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 792,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_blend_factor",
+        "kind": "bind",
+        "register": "NV4097_SET_BLEND_FUNC_DFACTOR",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "dst_blend_rgb_raw",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_FUNC_DFACTOR",
+          "width": 16
+        },
+        {
+          "method": "dst_blend_a_raw",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_FUNC_DFACTOR",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_FUNC_DFACTOR",
+      "name": "NV4097_SET_BLEND_FUNC_DFACTOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 796,
+      "binding": null,
+      "fields": [
+        {
+          "method": "red16",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 16
+        },
+        {
+          "method": "green16",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 16
+        },
+        {
+          "method": "blue8",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 8
+        },
+        {
+          "method": "green8",
+          "offset": 8,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 8
+        },
+        {
+          "method": "red8",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 8
+        },
+        {
+          "method": "alpha8",
+          "offset": 24,
+          "register": "NV4097_SET_BLEND_COLOR",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_COLOR",
+      "name": "NV4097_SET_BLEND_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 800,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_blend_equation",
+        "kind": "bind",
+        "register": "NV4097_SET_BLEND_EQUATION",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "blend_rgb_raw",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_EQUATION",
+          "width": 16
+        },
+        {
+          "method": "blend_a_raw",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_EQUATION",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_EQUATION",
+      "name": "NV4097_SET_BLEND_EQUATION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 804,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_color_mask",
+        "kind": "bind",
+        "register": "NV4097_SET_COLOR_MASK",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_COLOR_MASK",
+      "name": "NV4097_SET_COLOR_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 808,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_STENCIL_TEST_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_TEST_ENABLE",
+      "name": "NV4097_SET_STENCIL_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 812,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_STENCIL_MASK",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "stencil_mask",
+          "offset": 0,
+          "register": "NV4097_SET_STENCIL_MASK",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_MASK",
+      "name": "NV4097_SET_STENCIL_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 816,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_FUNC",
+      "name": "NV4097_SET_STENCIL_FUNC",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 820,
+      "binding": null,
+      "fields": [
+        {
+          "method": "stencil_func_ref",
+          "offset": 0,
+          "register": "NV4097_SET_STENCIL_FUNC_REF",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_FUNC_REF",
+      "name": "NV4097_SET_STENCIL_FUNC_REF",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 824,
+      "binding": null,
+      "fields": [
+        {
+          "method": "stencil_func_mask",
+          "offset": 0,
+          "register": "NV4097_SET_STENCIL_FUNC_MASK",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_FUNC_MASK",
+      "name": "NV4097_SET_STENCIL_FUNC_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 828,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_STENCIL_OP_FAIL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_OP_FAIL",
+      "name": "NV4097_SET_STENCIL_OP_FAIL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 832,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_STENCIL_OP_ZFAIL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_OP_ZFAIL",
+      "name": "NV4097_SET_STENCIL_OP_ZFAIL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 836,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_STENCIL_OP_ZPASS",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_STENCIL_OP_ZPASS",
+      "name": "NV4097_SET_STENCIL_OP_ZPASS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 840,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE",
+      "name": "NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 844,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_BACK_STENCIL_MASK",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "back_stencil_mask",
+          "offset": 0,
+          "register": "NV4097_SET_BACK_STENCIL_MASK",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_MASK",
+      "name": "NV4097_SET_BACK_STENCIL_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 848,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_FUNC",
+      "name": "NV4097_SET_BACK_STENCIL_FUNC",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 852,
+      "binding": null,
+      "fields": [
+        {
+          "method": "back_stencil_func_ref",
+          "offset": 0,
+          "register": "NV4097_SET_BACK_STENCIL_FUNC_REF",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_FUNC_REF",
+      "name": "NV4097_SET_BACK_STENCIL_FUNC_REF",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 856,
+      "binding": null,
+      "fields": [
+        {
+          "method": "back_stencil_func_mask",
+          "offset": 0,
+          "register": "NV4097_SET_BACK_STENCIL_FUNC_MASK",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_FUNC_MASK",
+      "name": "NV4097_SET_BACK_STENCIL_FUNC_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 860,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_BACK_STENCIL_OP_FAIL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_OP_FAIL",
+      "name": "NV4097_SET_BACK_STENCIL_OP_FAIL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 864,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_BACK_STENCIL_OP_ZFAIL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_OP_ZFAIL",
+      "name": "NV4097_SET_BACK_STENCIL_OP_ZFAIL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 868,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_stencil_op",
+        "kind": "bind",
+        "register": "NV4097_SET_BACK_STENCIL_OP_ZPASS",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_STENCIL_OP_ZPASS",
+      "name": "NV4097_SET_BACK_STENCIL_OP_ZPASS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 872,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_shading_mode",
+        "kind": "bind",
+        "register": "NV4097_SET_SHADE_MODE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SHADE_MODE",
+      "name": "NV4097_SET_SHADE_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 876,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_ENABLE_MRT",
+      "name": "NV4097_SET_BLEND_ENABLE_MRT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 880,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_COLOR_MASK_MRT",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_COLOR_MASK_MRT",
+      "name": "NV4097_SET_COLOR_MASK_MRT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 884,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_LOGIC_OP_ENABLE",
+      "name": "NV4097_SET_LOGIC_OP_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 888,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_LOGIC_OP",
+      "name": "NV4097_SET_LOGIC_OP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 892,
+      "binding": null,
+      "fields": [
+        {
+          "method": "blue",
+          "offset": 0,
+          "register": "NV4097_SET_BLEND_COLOR2",
+          "width": 16
+        },
+        {
+          "method": "alpha",
+          "offset": 16,
+          "register": "NV4097_SET_BLEND_COLOR2",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BLEND_COLOR2",
+      "name": "NV4097_SET_BLEND_COLOR2",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 896,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_BOUNDS_TEST_ENABLE",
+      "name": "NV4097_SET_DEPTH_BOUNDS_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 900,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_BOUNDS_MIN",
+      "name": "NV4097_SET_DEPTH_BOUNDS_MIN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 904,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_BOUNDS_MAX",
+      "name": "NV4097_SET_DEPTH_BOUNDS_MAX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 916,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CLIP_MIN",
+      "name": "NV4097_SET_CLIP_MIN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 920,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CLIP_MAX",
+      "name": "NV4097_SET_CLIP_MAX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 944,
+      "binding": null,
+      "fields": [
+        {
+          "method": "depth_float",
+          "offset": 12,
+          "register": "NV4097_SET_CONTROL0",
+          "width": 1
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CONTROL0",
+      "name": "NV4097_SET_CONTROL0",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 952,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_LINE_WIDTH",
+      "name": "NV4097_SET_LINE_WIDTH",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 956,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_LINE_SMOOTH_ENABLE",
+      "name": "NV4097_SET_LINE_SMOOTH_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 960,
+      "binding": {
+        "count": 16,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_ANISO_SPREAD",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ANISO_SPREAD",
+      "name": "NV4097_SET_ANISO_SPREAD",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2240,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_x",
+          "offset": 0,
+          "register": "NV4097_SET_SCISSOR_HORIZONTAL",
+          "width": 16
+        },
+        {
+          "method": "width",
+          "offset": 16,
+          "register": "NV4097_SET_SCISSOR_HORIZONTAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SCISSOR_HORIZONTAL",
+      "name": "NV4097_SET_SCISSOR_HORIZONTAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2244,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_y",
+          "offset": 0,
+          "register": "NV4097_SET_SCISSOR_VERTICAL",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV4097_SET_SCISSOR_VERTICAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SCISSOR_VERTICAL",
+      "name": "NV4097_SET_SCISSOR_VERTICAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2252,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_FOG_MODE",
+      "name": "NV4097_SET_FOG_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2256,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_FOG_PARAMS",
+      "name": "NV4097_SET_FOG_PARAMS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2276,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_shader_program_dirty",
+        "kind": "bind",
+        "register": "NV4097_SET_SHADER_PROGRAM",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "shader_program_address",
+          "offset": 0,
+          "register": "NV4097_SET_SHADER_PROGRAM",
+          "width": 31
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SHADER_PROGRAM",
+      "name": "NV4097_SET_SHADER_PROGRAM",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2304,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_OFFSET",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_OFFSET",
+      "name": "NV4097_SET_VERTEX_TEXTURE_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2308,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_FORMAT",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_FORMAT",
+      "name": "NV4097_SET_VERTEX_TEXTURE_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2312,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_ADDRESS",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_ADDRESS",
+      "name": "NV4097_SET_VERTEX_TEXTURE_ADDRESS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2316,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_CONTROL0",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_CONTROL0",
+      "name": "NV4097_SET_VERTEX_TEXTURE_CONTROL0",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2320,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_CONTROL3",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_CONTROL3",
+      "name": "NV4097_SET_VERTEX_TEXTURE_CONTROL3",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2324,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_FILTER",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_FILTER",
+      "name": "NV4097_SET_VERTEX_TEXTURE_FILTER",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2328,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_IMAGE_RECT",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_IMAGE_RECT",
+      "name": "NV4097_SET_VERTEX_TEXTURE_IMAGE_RECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2332,
+      "binding": {
+        "count": 4,
+        "handler": "nv4097::set_vertex_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_TEXTURE_BORDER_COLOR",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_TEXTURE_BORDER_COLOR",
+      "name": "NV4097_SET_VERTEX_TEXTURE_BORDER_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2560,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_x",
+          "offset": 0,
+          "register": "NV4097_SET_VIEWPORT_HORIZONTAL",
+          "width": 16
+        },
+        {
+          "method": "width",
+          "offset": 16,
+          "register": "NV4097_SET_VIEWPORT_HORIZONTAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VIEWPORT_HORIZONTAL",
+      "name": "NV4097_SET_VIEWPORT_HORIZONTAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2564,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_y",
+          "offset": 0,
+          "register": "NV4097_SET_VIEWPORT_VERTICAL",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV4097_SET_VIEWPORT_VERTICAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VIEWPORT_VERTICAL",
+      "name": "NV4097_SET_VIEWPORT_VERTICAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2572,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_POINT_CENTER_MODE",
+      "name": "NV4097_SET_POINT_CENTER_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2588,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_ZCULL_SYNC",
+      "name": "NV4097_ZCULL_SYNC",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2592,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VIEWPORT_OFFSET",
+      "name": "NV4097_SET_VIEWPORT_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2608,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VIEWPORT_SCALE",
+      "name": "NV4097_SET_VIEWPORT_SCALE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2656,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLY_OFFSET_POINT_ENABLE",
+      "name": "NV4097_SET_POLY_OFFSET_POINT_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2660,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLY_OFFSET_LINE_ENABLE",
+      "name": "NV4097_SET_POLY_OFFSET_LINE_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2664,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLY_OFFSET_FILL_ENABLE",
+      "name": "NV4097_SET_POLY_OFFSET_FILL_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2668,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_DEPTH_FUNC",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_FUNC",
+      "name": "NV4097_SET_DEPTH_FUNC",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2672,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_DEPTH_MASK",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_MASK",
+      "name": "NV4097_SET_DEPTH_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2676,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_surface_options_dirty_bit",
+        "kind": "bind",
+        "register": "NV4097_SET_DEPTH_TEST_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_DEPTH_TEST_ENABLE",
+      "name": "NV4097_SET_DEPTH_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2680,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR",
+      "name": "NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2684,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLYGON_OFFSET_BIAS",
+      "name": "NV4097_SET_POLYGON_OFFSET_BIAS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2688,
+      "binding": {
+        "count": 32,
+        "handler": "nv4097::set_vertex_data_scaled4s_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA_SCALED4S_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA_SCALED4S_M",
+      "name": "NV4097_SET_VERTEX_DATA_SCALED4S_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2816,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_CONTROL2",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_CONTROL2",
+      "name": "NV4097_SET_TEXTURE_CONTROL2",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2880,
+      "binding": {
+        "count": 10,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_TEX_COORD_CONTROL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEX_COORD_CONTROL",
+      "name": "NV4097_SET_TEX_COORD_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 2944,
+      "binding": {
+        "count": 32,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_TRANSFORM_PROGRAM",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TRANSFORM_PROGRAM",
+      "name": "NV4097_SET_TRANSFORM_PROGRAM",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5160,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_SPECULAR_ENABLE",
+      "name": "NV4097_SET_SPECULAR_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5164,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_TWO_SIDE_LIGHT_EN",
+      "name": "NV4097_SET_TWO_SIDE_LIGHT_EN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5176,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::clear_zcull",
+        "kind": "bind",
+        "register": "NV4097_CLEAR_ZCULL_SURFACE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_CLEAR_ZCULL_SURFACE",
+      "name": "NV4097_CLEAR_ZCULL_SURFACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5200,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_PERFORMANCE_PARAMS",
+      "name": "NV4097_SET_PERFORMANCE_PARAMS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5204,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_FLAT_SHADE_OP",
+      "name": "NV4097_SET_FLAT_SHADE_OP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5212,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_EDGE_FLAG",
+      "name": "NV4097_SET_EDGE_FLAG",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5240,
+      "binding": null,
+      "fields": [
+        {
+          "method": "clip_plane0_raw",
+          "offset": 0,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        },
+        {
+          "method": "clip_plane1_raw",
+          "offset": 4,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        },
+        {
+          "method": "clip_plane2_raw",
+          "offset": 8,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        },
+        {
+          "method": "clip_plane3_raw",
+          "offset": 12,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        },
+        {
+          "method": "clip_plane4_raw",
+          "offset": 16,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        },
+        {
+          "method": "clip_plane5_raw",
+          "offset": 20,
+          "register": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+          "width": 4
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_USER_CLIP_PLANE_CONTROL",
+      "name": "NV4097_SET_USER_CLIP_PLANE_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5244,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLYGON_STIPPLE",
+      "name": "NV4097_SET_POLYGON_STIPPLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5248,
+      "binding": {
+        "count": 32,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_POLYGON_STIPPLE_PATTERN",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_POLYGON_STIPPLE_PATTERN",
+      "name": "NV4097_SET_POLYGON_STIPPLE_PATTERN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5376,
+      "binding": {
+        "count": 64,
+        "handler": "nv4097::set_vertex_data3f_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA3F_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA3F_M",
+      "name": "NV4097_SET_VERTEX_DATA3F_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5760,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_vertex_array_offset",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA_ARRAY_OFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA_ARRAY_OFFSET",
+      "name": "NV4097_SET_VERTEX_DATA_ARRAY_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5904,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_INVALIDATE_VERTEX_CACHE_FILE",
+      "name": "NV4097_INVALIDATE_VERTEX_CACHE_FILE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5908,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_INVALIDATE_VERTEX_FILE",
+      "name": "NV4097_INVALIDATE_VERTEX_FILE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5912,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_PIPE_NOP",
+      "name": "NV4097_PIPE_NOP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5944,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_vertex_base_offset",
+        "kind": "bind",
+        "register": "NV4097_SET_VERTEX_DATA_BASE_OFFSET",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VERTEX_DATA_BASE_OFFSET",
+      "name": "NV4097_SET_VERTEX_DATA_BASE_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5948,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_index_base_offset",
+        "kind": "bind",
+        "register": "NV4097_SET_VERTEX_DATA_BASE_INDEX",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VERTEX_DATA_BASE_INDEX",
+      "name": "NV4097_SET_VERTEX_DATA_BASE_INDEX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 5952,
+      "binding": {
+        "count": 16,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_VERTEX_DATA_ARRAY_FORMAT",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA_ARRAY_FORMAT",
+      "name": "NV4097_SET_VERTEX_DATA_ARRAY_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6088,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::clear_report_value",
+        "kind": "bind",
+        "register": "NV4097_CLEAR_REPORT_VALUE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_CLEAR_REPORT_VALUE",
+      "name": "NV4097_CLEAR_REPORT_VALUE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6092,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_zcull_pixel_count_enable",
+        "kind": "bind",
+        "register": "NV4097_SET_ZPASS_PIXEL_COUNT_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ZPASS_PIXEL_COUNT_ENABLE",
+      "name": "NV4097_SET_ZPASS_PIXEL_COUNT_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6144,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::get_report",
+        "kind": "bind",
+        "register": "NV4097_GET_REPORT",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_GET_REPORT",
+      "name": "NV4097_GET_REPORT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6148,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_zcull_stats_enable",
+        "kind": "bind",
+        "register": "NV4097_SET_ZCULL_STATS_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ZCULL_STATS_ENABLE",
+      "name": "NV4097_SET_ZCULL_STATS_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6152,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_begin_end",
+        "kind": "bind",
+        "register": "NV4097_SET_BEGIN_END",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BEGIN_END",
+      "name": "NV4097_SET_BEGIN_END",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6156,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_array_element16",
+        "kind": "bind",
+        "register": "NV4097_ARRAY_ELEMENT16",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_ARRAY_ELEMENT16",
+      "name": "NV4097_ARRAY_ELEMENT16",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6160,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_array_element32",
+        "kind": "bind",
+        "register": "NV4097_ARRAY_ELEMENT32",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_ARRAY_ELEMENT32",
+      "name": "NV4097_ARRAY_ELEMENT32",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6164,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::draw_arrays",
+        "kind": "bind",
+        "register": "NV4097_DRAW_ARRAYS",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "count_raw",
+          "offset": 24,
+          "register": "NV4097_DRAW_ARRAYS",
+          "width": 8
+        },
+        {
+          "method": "start",
+          "offset": 0,
+          "register": "NV4097_DRAW_ARRAYS",
+          "width": 24
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_DRAW_ARRAYS",
+      "name": "NV4097_DRAW_ARRAYS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6168,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::draw_inline_array",
+        "kind": "bind",
+        "register": "NV4097_INLINE_ARRAY",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_INLINE_ARRAY",
+      "name": "NV4097_INLINE_ARRAY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6172,
+      "binding": null,
+      "fields": [
+        {
+          "method": "index_array_offset",
+          "offset": 0,
+          "register": "NV4097_SET_INDEX_ARRAY_ADDRESS",
+          "width": 29
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_INDEX_ARRAY_ADDRESS",
+      "name": "NV4097_SET_INDEX_ARRAY_ADDRESS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6176,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::check_index_array_dma",
+        "kind": "bind",
+        "register": "NV4097_SET_INDEX_ARRAY_DMA",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "type_raw",
+          "offset": 4,
+          "register": "NV4097_SET_INDEX_ARRAY_DMA",
+          "width": 8
+        },
+        {
+          "method": "index_dma",
+          "offset": 0,
+          "register": "NV4097_SET_INDEX_ARRAY_DMA",
+          "width": 4
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_INDEX_ARRAY_DMA",
+      "name": "NV4097_SET_INDEX_ARRAY_DMA",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6180,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::draw_index_array",
+        "kind": "bind",
+        "register": "NV4097_DRAW_INDEX_ARRAY",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "start",
+          "offset": 0,
+          "register": "NV4097_DRAW_INDEX_ARRAY",
+          "width": 24
+        },
+        {
+          "method": "count",
+          "offset": 24,
+          "register": "NV4097_DRAW_INDEX_ARRAY",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_DRAW_INDEX_ARRAY",
+      "name": "NV4097_DRAW_INDEX_ARRAY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6184,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_FRONT_POLYGON_MODE",
+      "name": "NV4097_SET_FRONT_POLYGON_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6188,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_BACK_POLYGON_MODE",
+      "name": "NV4097_SET_BACK_POLYGON_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6192,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_face_property",
+        "kind": "bind",
+        "register": "NV4097_SET_CULL_FACE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CULL_FACE",
+      "name": "NV4097_SET_CULL_FACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6196,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_face_property",
+        "kind": "bind",
+        "register": "NV4097_SET_FRONT_FACE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_FRONT_FACE",
+      "name": "NV4097_SET_FRONT_FACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6200,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POLY_SMOOTH_ENABLE",
+      "name": "NV4097_SET_POLY_SMOOTH_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6204,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CULL_FACE_ENABLE",
+      "name": "NV4097_SET_CULL_FACE_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6208,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_CONTROL3",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_CONTROL3",
+      "name": "NV4097_SET_TEXTURE_CONTROL3",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6272,
+      "binding": {
+        "count": 32,
+        "handler": "nv4097::set_vertex_data2f_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA2F_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA2F_M",
+      "name": "NV4097_SET_VERTEX_DATA2F_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6400,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_vertex_data2s_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA2S_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA2S_M",
+      "name": "NV4097_SET_VERTEX_DATA2S_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6464,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_vertex_data4ub_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA4UB_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA4UB_M",
+      "name": "NV4097_SET_VERTEX_DATA4UB_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6528,
+      "binding": {
+        "count": 32,
+        "handler": "nv4097::set_vertex_data4s_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA4S_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA4S_M",
+      "name": "NV4097_SET_VERTEX_DATA4S_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6656,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_OFFSET",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_OFFSET",
+      "name": "NV4097_SET_TEXTURE_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6660,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_FORMAT",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_FORMAT",
+      "name": "NV4097_SET_TEXTURE_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6664,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_ADDRESS",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_ADDRESS",
+      "name": "NV4097_SET_TEXTURE_ADDRESS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6668,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_CONTROL0",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_CONTROL0",
+      "name": "NV4097_SET_TEXTURE_CONTROL0",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6672,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_CONTROL1",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_CONTROL1",
+      "name": "NV4097_SET_TEXTURE_CONTROL1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6676,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_FILTER",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_FILTER",
+      "name": "NV4097_SET_TEXTURE_FILTER",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6680,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_IMAGE_RECT",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_IMAGE_RECT",
+      "name": "NV4097_SET_TEXTURE_IMAGE_RECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 6684,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_fragment_texture_dirty_bit",
+        "kind": "bind_range",
+        "register": "NV4097_SET_TEXTURE_BORDER_COLOR",
+        "step": 8
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TEXTURE_BORDER_COLOR",
+      "name": "NV4097_SET_TEXTURE_BORDER_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7168,
+      "binding": {
+        "count": 64,
+        "handler": "nv4097::set_vertex_data4f_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA4F_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA4F_M",
+      "name": "NV4097_SET_VERTEX_DATA4F_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7424,
+      "binding": {
+        "count": 16,
+        "handler": "nullptr",
+        "kind": "bind_array",
+        "register": "NV4097_SET_COLOR_KEY_COLOR",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_COLOR_KEY_COLOR",
+      "name": "NV4097_SET_COLOR_KEY_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7520,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SHADER_CONTROL",
+      "name": "NV4097_SET_SHADER_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7524,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_INDEXED_CONSTANT_READ_LIMITS",
+      "name": "NV4097_SET_INDEXED_CONSTANT_READ_LIMITS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7532,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SEMAPHORE_OFFSET",
+      "name": "NV4097_SET_SEMAPHORE_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7536,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::back_end_write_semaphore_release",
+        "kind": "bind",
+        "register": "NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE",
+      "name": "NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7540,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::texture_read_semaphore_release",
+        "kind": "bind",
+        "register": "NV4097_TEXTURE_READ_SEMAPHORE_RELEASE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_TEXTURE_READ_SEMAPHORE_RELEASE",
+      "name": "NV4097_TEXTURE_READ_SEMAPHORE_RELEASE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7544,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_zmin_max_control",
+        "kind": "bind",
+        "register": "NV4097_SET_ZMIN_MAX_CONTROL",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ZMIN_MAX_CONTROL",
+      "name": "NV4097_SET_ZMIN_MAX_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7548,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_aa_control",
+        "kind": "bind",
+        "register": "NV4097_SET_ANTI_ALIASING_CONTROL",
+        "step": 1
+      },
+      "fields": [
+        {
+          "method": "msaa_sample_mask",
+          "offset": 16,
+          "register": "NV4097_SET_ANTI_ALIASING_CONTROL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ANTI_ALIASING_CONTROL",
+      "name": "NV4097_SET_ANTI_ALIASING_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7552,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_SURFACE_COMPRESSION",
+      "name": "NV4097_SET_SURFACE_COMPRESSION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7556,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_zcull_render_enable",
+        "kind": "bind",
+        "register": "NV4097_SET_ZCULL_EN",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ZCULL_EN",
+      "name": "NV4097_SET_ZCULL_EN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7560,
+      "binding": null,
+      "fields": [
+        {
+          "method": "window_shader_origin_raw",
+          "offset": 12,
+          "register": "NV4097_SET_SHADER_WINDOW",
+          "width": 4
+        },
+        {
+          "method": "window_shader_pixel_center_raw",
+          "offset": 16,
+          "register": "NV4097_SET_SHADER_WINDOW",
+          "width": 4
+        },
+        {
+          "method": "window_shader_height",
+          "offset": 0,
+          "register": "NV4097_SET_SHADER_WINDOW",
+          "width": 12
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SHADER_WINDOW",
+      "name": "NV4097_SET_SHADER_WINDOW",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7564,
+      "binding": null,
+      "fields": [
+        {
+          "method": "clear_z24",
+          "offset": 8,
+          "register": "NV4097_SET_ZSTENCIL_CLEAR_VALUE",
+          "width": 24
+        },
+        {
+          "method": "clear_stencil",
+          "offset": 0,
+          "register": "NV4097_SET_ZSTENCIL_CLEAR_VALUE",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_ZSTENCIL_CLEAR_VALUE",
+      "name": "NV4097_SET_ZSTENCIL_CLEAR_VALUE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7568,
+      "binding": null,
+      "fields": [
+        {
+          "method": "blue",
+          "offset": 0,
+          "register": "NV4097_SET_COLOR_CLEAR_VALUE",
+          "width": 8
+        },
+        {
+          "method": "green",
+          "offset": 8,
+          "register": "NV4097_SET_COLOR_CLEAR_VALUE",
+          "width": 8
+        },
+        {
+          "method": "red",
+          "offset": 16,
+          "register": "NV4097_SET_COLOR_CLEAR_VALUE",
+          "width": 8
+        },
+        {
+          "method": "alpha",
+          "offset": 24,
+          "register": "NV4097_SET_COLOR_CLEAR_VALUE",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_COLOR_CLEAR_VALUE",
+      "name": "NV4097_SET_COLOR_CLEAR_VALUE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7572,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::clear",
+        "kind": "bind",
+        "register": "NV4097_CLEAR_SURFACE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_CLEAR_SURFACE",
+      "name": "NV4097_CLEAR_SURFACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7576,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_x",
+          "offset": 0,
+          "register": "NV4097_SET_CLEAR_RECT_HORIZONTAL",
+          "width": 16
+        },
+        {
+          "method": "width",
+          "offset": 16,
+          "register": "NV4097_SET_CLEAR_RECT_HORIZONTAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CLEAR_RECT_HORIZONTAL",
+      "name": "NV4097_SET_CLEAR_RECT_HORIZONTAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7580,
+      "binding": null,
+      "fields": [
+        {
+          "method": "origin_y",
+          "offset": 0,
+          "register": "NV4097_SET_CLEAR_RECT_VERTICAL",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV4097_SET_CLEAR_RECT_VERTICAL",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_CLEAR_RECT_VERTICAL",
+      "name": "NV4097_SET_CLEAR_RECT_VERTICAL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7588,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_CLIP_ID_TEST_ENABLE",
+      "name": "NV4097_SET_CLIP_ID_TEST_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7596,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_RESTART_INDEX_ENABLE",
+      "name": "NV4097_SET_RESTART_INDEX_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7600,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_RESTART_INDEX",
+      "name": "NV4097_SET_RESTART_INDEX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7604,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_LINE_STIPPLE",
+      "name": "NV4097_SET_LINE_STIPPLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7608,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_LINE_STIPPLE_PATTERN",
+      "name": "NV4097_SET_LINE_STIPPLE_PATTERN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7744,
+      "binding": {
+        "count": 16,
+        "handler": "nv4097::set_vertex_data1f_m",
+        "kind": "bind_range",
+        "register": "NV4097_SET_VERTEX_DATA1F_M",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_VERTEX_DATA1F_M",
+      "name": "NV4097_SET_VERTEX_DATA1F_M",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7828,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TRANSFORM_EXECUTION_MODE",
+      "name": "NV4097_SET_TRANSFORM_EXECUTION_MODE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7832,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_render_mode",
+        "kind": "bind",
+        "register": "NV4097_SET_RENDER_ENABLE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_RENDER_ENABLE",
+      "name": "NV4097_SET_RENDER_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7836,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_TRANSFORM_PROGRAM_LOAD",
+      "name": "NV4097_SET_TRANSFORM_PROGRAM_LOAD",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7840,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_transform_program_start",
+        "kind": "bind",
+        "register": "NV4097_SET_TRANSFORM_PROGRAM_START",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_TRANSFORM_PROGRAM_START",
+      "name": "NV4097_SET_TRANSFORM_PROGRAM_START",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7844,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ZCULL_CONTROL0",
+      "name": "NV4097_SET_ZCULL_CONTROL0",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7848,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ZCULL_CONTROL1",
+      "name": "NV4097_SET_ZCULL_CONTROL1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7852,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_SCULL_CONTROL",
+      "name": "NV4097_SET_SCULL_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7904,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POINT_SIZE",
+      "name": "NV4097_SET_POINT_SIZE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7908,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_POINT_PARAMS_ENABLE",
+      "name": "NV4097_SET_POINT_PARAMS_ENABLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7912,
+      "binding": null,
+      "fields": [
+        {
+          "method": "texcoord_mask",
+          "offset": 8,
+          "register": "NV4097_SET_POINT_SPRITE_CONTROL",
+          "width": 10
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_POINT_SPRITE_CONTROL",
+      "name": "NV4097_SET_POINT_SPRITE_CONTROL",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7928,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TRANSFORM_TIMEOUT",
+      "name": "NV4097_SET_TRANSFORM_TIMEOUT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7932,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_transform_constant_load",
+        "kind": "bind",
+        "register": "NV4097_SET_TRANSFORM_CONSTANT_LOAD",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_TRANSFORM_CONSTANT_LOAD",
+      "name": "NV4097_SET_TRANSFORM_CONSTANT_LOAD",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 7936,
+      "binding": {
+        "count": 32,
+        "handler": "nv4097::set_transform_constant::impl",
+        "kind": "bind_array",
+        "register": "NV4097_SET_TRANSFORM_CONSTANT",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TRANSFORM_CONSTANT",
+      "name": "NV4097_SET_TRANSFORM_CONSTANT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8128,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_FREQUENCY_DIVIDER_OPERATION",
+      "name": "NV4097_SET_FREQUENCY_DIVIDER_OPERATION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8132,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ATTRIB_COLOR",
+      "name": "NV4097_SET_ATTRIB_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8136,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ATTRIB_TEX_COORD",
+      "name": "NV4097_SET_ATTRIB_TEX_COORD",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8140,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ATTRIB_TEX_COORD_EX",
+      "name": "NV4097_SET_ATTRIB_TEX_COORD_EX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8144,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ATTRIB_UCLIP0",
+      "name": "NV4097_SET_ATTRIB_UCLIP0",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8148,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_ATTRIB_UCLIP1",
+      "name": "NV4097_SET_ATTRIB_UCLIP1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8152,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_shader_program_dirty",
+        "kind": "bind",
+        "register": "NV4097_INVALIDATE_L2",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_INVALIDATE_L2",
+      "name": "NV4097_INVALIDATE_L2",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8160,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_REDUCE_DST_COLOR",
+      "name": "NV4097_SET_REDUCE_DST_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8168,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_NO_PARANOID_TEXTURE_FETCHES",
+      "name": "NV4097_SET_NO_PARANOID_TEXTURE_FETCHES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8172,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_SHADER_PACKER",
+      "name": "NV4097_SET_SHADER_PACKER",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8176,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VERTEX_ATTRIB_INPUT_MASK",
+      "name": "NV4097_SET_VERTEX_ATTRIB_INPUT_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8180,
+      "binding": {
+        "count": 1,
+        "handler": "nv4097::set_vertex_attribute_output_mask",
+        "kind": "bind",
+        "register": "NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK",
+      "name": "NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8184,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV4097_SET_TRANSFORM_BRANCH_BITS",
+      "name": "NV4097_SET_TRANSFORM_BRANCH_BITS",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8192,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV0039_SET_OBJECT",
+      "name": "NV0039_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8576,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV0039_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV0039_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8580,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_SET_CONTEXT_DMA_BUFFER_IN",
+      "name": "NV0039_SET_CONTEXT_DMA_BUFFER_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8584,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_SET_CONTEXT_DMA_BUFFER_OUT",
+      "name": "NV0039_SET_CONTEXT_DMA_BUFFER_OUT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8972,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_OFFSET_IN",
+      "name": "NV0039_OFFSET_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8976,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_OFFSET_OUT",
+      "name": "NV0039_OFFSET_OUT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8980,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_PITCH_IN",
+      "name": "NV0039_PITCH_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8984,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_PITCH_OUT",
+      "name": "NV0039_PITCH_OUT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8988,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_LINE_LENGTH_IN",
+      "name": "NV0039_LINE_LENGTH_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8992,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV0039_LINE_COUNT",
+      "name": "NV0039_LINE_COUNT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 8996,
+      "binding": null,
+      "fields": [
+        {
+          "method": "input_format",
+          "offset": 0,
+          "register": "NV0039_FORMAT",
+          "width": 8
+        },
+        {
+          "method": "output_format",
+          "offset": 8,
+          "register": "NV0039_FORMAT",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV0039_FORMAT",
+      "name": "NV0039_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 9000,
+      "binding": {
+        "count": 1,
+        "handler": "nv0039::buffer_notify",
+        "kind": "bind",
+        "register": "NV0039_BUFFER_NOTIFY",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV0039_BUFFER_NOTIFY",
+      "name": "NV0039_BUFFER_NOTIFY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 24576,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3062_SET_OBJECT",
+      "name": "NV3062_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 24960,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3062_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV3062_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 24964,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3062_SET_CONTEXT_DMA_IMAGE_SOURCE",
+      "name": "NV3062_SET_CONTEXT_DMA_IMAGE_SOURCE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 24968,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN",
+      "name": "NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 25344,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3062_SET_COLOR_FORMAT",
+      "name": "NV3062_SET_COLOR_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 25348,
+      "binding": null,
+      "fields": [
+        {
+          "method": "alignment",
+          "offset": 0,
+          "register": "NV3062_SET_PITCH",
+          "width": 16
+        },
+        {
+          "method": "pitch",
+          "offset": 16,
+          "register": "NV3062_SET_PITCH",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3062_SET_PITCH",
+      "name": "NV3062_SET_PITCH",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 25352,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3062_SET_OFFSET_SOURCE",
+      "name": "NV3062_SET_OFFSET_SOURCE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 25356,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3062_SET_OFFSET_DESTIN",
+      "name": "NV3062_SET_OFFSET_DESTIN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 32768,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV309E_SET_OBJECT",
+      "name": "NV309E_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 33152,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV309E_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV309E_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 33156,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV309E_SET_CONTEXT_DMA_IMAGE",
+      "name": "NV309E_SET_CONTEXT_DMA_IMAGE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 33536,
+      "binding": null,
+      "fields": [
+        {
+          "method": "sw_height_log2",
+          "offset": 24,
+          "register": "NV309E_SET_FORMAT",
+          "width": 8
+        },
+        {
+          "method": "sw_width_log2",
+          "offset": 16,
+          "register": "NV309E_SET_FORMAT",
+          "width": 8
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV309E_SET_FORMAT",
+      "name": "NV309E_SET_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 33540,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV309E_SET_OFFSET",
+      "name": "NV309E_SET_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 40960,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_OBJECT",
+      "name": "NV308A_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41344,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV308A_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41348,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_COLOR_KEY",
+      "name": "NV308A_SET_CONTEXT_COLOR_KEY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41352,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_CLIP_RECTANGLE",
+      "name": "NV308A_SET_CONTEXT_CLIP_RECTANGLE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41356,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_PATTERN",
+      "name": "NV308A_SET_CONTEXT_PATTERN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41360,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_ROP",
+      "name": "NV308A_SET_CONTEXT_ROP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41364,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_BETA1",
+      "name": "NV308A_SET_CONTEXT_BETA1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41368,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_BETA4",
+      "name": "NV308A_SET_CONTEXT_BETA4",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41372,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_CONTEXT_SURFACE",
+      "name": "NV308A_SET_CONTEXT_SURFACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41720,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_COLOR_CONVERSION",
+      "name": "NV308A_SET_COLOR_CONVERSION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41724,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_OPERATION",
+      "name": "NV308A_SET_OPERATION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41728,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SET_COLOR_FORMAT",
+      "name": "NV308A_SET_COLOR_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41732,
+      "binding": null,
+      "fields": [
+        {
+          "method": "x",
+          "offset": 0,
+          "register": "NV308A_POINT",
+          "width": 16
+        },
+        {
+          "method": "y",
+          "offset": 16,
+          "register": "NV308A_POINT",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV308A_POINT",
+      "name": "NV308A_POINT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41736,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SIZE_OUT",
+      "name": "NV308A_SIZE_OUT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41740,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_SIZE_IN",
+      "name": "NV308A_SIZE_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 41984,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV308A_COLOR",
+      "name": "NV308A_COLOR",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49152,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_OBJECT",
+      "name": "NV3089_SET_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49536,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_CONTEXT_DMA_NOTIFIES",
+      "name": "NV3089_SET_CONTEXT_DMA_NOTIFIES",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49540,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_SET_CONTEXT_DMA_IMAGE",
+      "name": "NV3089_SET_CONTEXT_DMA_IMAGE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49544,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_CONTEXT_PATTERN",
+      "name": "NV3089_SET_CONTEXT_PATTERN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49548,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_CONTEXT_ROP",
+      "name": "NV3089_SET_CONTEXT_ROP",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49552,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_CONTEXT_BETA1",
+      "name": "NV3089_SET_CONTEXT_BETA1",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49556,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_CONTEXT_BETA4",
+      "name": "NV3089_SET_CONTEXT_BETA4",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49560,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_SET_CONTEXT_SURFACE",
+      "name": "NV3089_SET_CONTEXT_SURFACE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49916,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_NV3089_SET_COLOR_CONVERSION",
+      "name": "NV3089_SET_COLOR_CONVERSION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49920,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_SET_COLOR_FORMAT",
+      "name": "NV3089_SET_COLOR_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49924,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_SET_OPERATION",
+      "name": "NV3089_SET_OPERATION",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49928,
+      "binding": null,
+      "fields": [
+        {
+          "method": "clip_x",
+          "offset": 0,
+          "register": "NV3089_CLIP_POINT",
+          "width": 16
+        },
+        {
+          "method": "clip_y",
+          "offset": 16,
+          "register": "NV3089_CLIP_POINT",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_CLIP_POINT",
+      "name": "NV3089_CLIP_POINT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49932,
+      "binding": null,
+      "fields": [
+        {
+          "method": "clip_width",
+          "offset": 0,
+          "register": "NV3089_CLIP_SIZE",
+          "width": 16
+        },
+        {
+          "method": "clip_height",
+          "offset": 16,
+          "register": "NV3089_CLIP_SIZE",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_CLIP_SIZE",
+      "name": "NV3089_CLIP_SIZE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49936,
+      "binding": null,
+      "fields": [
+        {
+          "method": "x",
+          "offset": 0,
+          "register": "NV3089_IMAGE_OUT_POINT",
+          "width": 16
+        },
+        {
+          "method": "y",
+          "offset": 16,
+          "register": "NV3089_IMAGE_OUT_POINT",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_OUT_POINT",
+      "name": "NV3089_IMAGE_OUT_POINT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49940,
+      "binding": null,
+      "fields": [
+        {
+          "method": "width",
+          "offset": 0,
+          "register": "NV3089_IMAGE_OUT_SIZE",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV3089_IMAGE_OUT_SIZE",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_OUT_SIZE",
+      "name": "NV3089_IMAGE_OUT_SIZE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49944,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_DS_DX",
+      "name": "NV3089_DS_DX",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 49948,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_DT_DY",
+      "name": "NV3089_DT_DY",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 50176,
+      "binding": null,
+      "fields": [
+        {
+          "method": "width",
+          "offset": 0,
+          "register": "NV3089_IMAGE_IN_SIZE",
+          "width": 16
+        },
+        {
+          "method": "height",
+          "offset": 16,
+          "register": "NV3089_IMAGE_IN_SIZE",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_IN_SIZE",
+      "name": "NV3089_IMAGE_IN_SIZE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 50180,
+      "binding": null,
+      "fields": [
+        {
+          "method": "transfer_origin_raw",
+          "offset": 16,
+          "register": "NV3089_IMAGE_IN_FORMAT",
+          "width": 8
+        },
+        {
+          "method": "transfer_interpolator_raw",
+          "offset": 24,
+          "register": "NV3089_IMAGE_IN_FORMAT",
+          "width": 8
+        },
+        {
+          "method": "format",
+          "offset": 0,
+          "register": "NV3089_IMAGE_IN_FORMAT",
+          "width": 16
+        }
+      ],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_IN_FORMAT",
+      "name": "NV3089_IMAGE_IN_FORMAT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 50184,
+      "binding": null,
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_IN_OFFSET",
+      "name": "NV3089_IMAGE_IN_OFFSET",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 50188,
+      "binding": {
+        "count": 1,
+        "handler": "nv3089::image_in",
+        "kind": "bind",
+        "register": "NV3089_IMAGE_IN",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": true,
+      "id": "M_NV3089_IMAGE_IN",
+      "name": "NV3089_IMAGE_IN",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 57344,
+      "binding": null,
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_GCM_SET_DRIVER_OBJECT",
+      "name": "GCM_SET_DRIVER_OBJECT",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 59680,
+      "binding": {
+        "count": 2,
+        "handler": "gcm::driver_flip",
+        "kind": "bind_range",
+        "register": "GCM_FLIP_HEAD",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_GCM_FLIP_HEAD",
+      "name": "GCM_FLIP_HEAD",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 59712,
+      "binding": {
+        "count": 8,
+        "handler": "gcm::queue_flip",
+        "kind": "bind_range",
+        "register": "GCM_DRIVER_QUEUE",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_GCM_DRIVER_QUEUE",
+      "name": "GCM_DRIVER_QUEUE",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 60160,
+      "binding": {
+        "count": 2,
+        "handler": "user_command",
+        "kind": "bind_array",
+        "register": "GCM_SET_USER_COMMAND",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_GCM_SET_USER_COMMAND",
+      "name": "GCM_SET_USER_COMMAND",
+      "source": "gcm_enums.h"
+    },
+    {
+      "addr": 65196,
+      "binding": {
+        "count": 1,
+        "handler": "flip_command",
+        "kind": "bind",
+        "register": "GCM_FLIP_COMMAND",
+        "step": 1
+      },
+      "fields": [],
+      "has_decoder": false,
+      "id": "M_GCM_FLIP_COMMAND",
+      "name": "GCM_FLIP_COMMAND",
+      "source": "gcm_enums.h"
+    }
+  ],
+  "slots": [
+    {
+      "name": "vertex_params_bind_slot",
+      "slot": 0,
+      "source": "pipeline_binding_table.h:9"
+    },
+    {
+      "name": "vertex_constant_buffers_bind_slot",
+      "slot": 1,
+      "source": "pipeline_binding_table.h:10"
+    },
+    {
+      "name": "fragment_constant_buffers_bind_slot",
+      "slot": 2,
+      "source": "pipeline_binding_table.h:11"
+    },
+    {
+      "name": "fragment_state_bind_slot",
+      "slot": 3,
+      "source": "pipeline_binding_table.h:12"
+    },
+    {
+      "name": "fragment_texture_params_bind_slot",
+      "slot": 4,
+      "source": "pipeline_binding_table.h:13"
+    },
+    {
+      "name": "vertex_buffers_first_bind_slot",
+      "slot": 5,
+      "source": "pipeline_binding_table.h:14"
+    },
+    {
+      "name": "conditional_render_predicate_slot",
+      "slot": 8,
+      "source": "pipeline_binding_table.h:15"
+    },
+    {
+      "name": "rasterizer_env_bind_slot",
+      "slot": 9,
+      "source": "pipeline_binding_table.h:16"
+    },
+    {
+      "name": "instancing_lookup_table_bind_slot",
+      "slot": 10,
+      "source": "pipeline_binding_table.h:17"
+    },
+    {
+      "name": "instancing_constants_buffer_slot",
+      "slot": 11,
+      "source": "pipeline_binding_table.h:18"
+    },
+    {
+      "name": "textures_first_bind_slot",
+      "slot": 12,
+      "source": "pipeline_binding_table.h:19"
+    },
+    {
+      "name": "vertex_textures_first_bind_slot",
+      "slot": 12,
+      "source": "pipeline_binding_table.h:20"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+id,disposition,metal4_target,difficulty,risk,confidence,doc_ref,notes
+M_NV4097_SET_VERTEX_TEXTURE_OFFSET,reshape,"MTL::Texture via texture cache; MTL4ArgumentTable::setTexture(view, vertex_textures_first+id = 12+id)",3,med,[I],10 §4.2,"guest addr+location -> cache lookup; reuses the fragment-texture path"
+M_NV4097_SET_VERTEX_TEXTURE_FORMAT,reshape,"MTLPixelFormat + MTLTextureType in texture cache; setTexture(12+id)",3,med,[I],04 §2.3,"format/dimension/cubemap select the cache entry; 4 VTF units (register stride 8)"
+M_NV4097_SET_VERTEX_TEXTURE_ADDRESS,reshape,"MTLSamplerDescriptor/MTLSamplerState; setSamplerState(12+id)",2,low,[I],10 §4.2,
+M_NV4097_SET_VERTEX_TEXTURE_CONTROL0,reshape,"MTLSamplerDescriptor (lodMinClamp/lodMaxClamp/lodBias/maxAnisotropy)",3,med,[I],04 R19,"lod bias has no exact MSL sampler field -> shader-side injection"
+M_NV4097_SET_VERTEX_TEXTURE_CONTROL3,reshape,"MTLSamplerDescriptor / texture-cache gamma decision",2,low,[I],04 §2.3,
+M_NV4097_SET_VERTEX_TEXTURE_FILTER,reshape,"MTLSamplerDescriptor minFilter/magFilter/mipFilter",2,low,[I],10 §4.2,
+M_NV4097_SET_VERTEX_TEXTURE_IMAGE_RECT,reshape,"MTLTexture width/height (texture cache)",2,low,[I],04 §2.3,"vertex-texture border always zero (RSXTexture.cpp:490)"
+M_NV4097_SET_VERTEX_TEXTURE_BORDER_COLOR,reshape,"MTLSamplerDescriptor::borderColor",3,med,[I],04 R18,"only 3 fixed colours; custom -> closest"
+M_NV4097_SET_VERTEX_DATA_SCALED4S_M,emulate,"transient MTL::Buffer attribute ring @ volatile stream slot 6",2,low,[V],RSXDrawCommands.cpp:238,"s16 register-value attribute; host materialises it"
+M_NV4097_SET_TRANSFORM_PROGRAM,reshape,"MTL4::Library (SPIRV-Cross MSL) keyed by ucode hash; MTL4::LibraryFunctionDescriptor",3,med,[V],10 §4.6,"ucode->GLSL->SPIR-V->MSL; 32-register upload window"
+M_NV4097_SET_VERTEX_DATA3F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,"f32x3 with 4-word register stride padding (R&C2)"
+M_NV4097_SET_VERTEX_DATA_ARRAY_OFFSET,reshape,"MTL::Buffer guest window; texture_buffer<uint> @ vertex_buffers_first=5",4,med,[V],10 §4.2,"guest-address -> buffer seam; software vertex pulling"
+M_NV4097_SET_VERTEX_DATA_ARRAY_FORMAT,reshape,"texture_buffer<uint> stream descriptor @ slot 5; NO MTLVertexDescriptor",3,med,[V],HLD-05 §3.5,"type/size/stride/frequency drive the pull shader, not MTLVertexDescriptor"
+M_NV4097_SET_VERTEX_DATA2F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_VERTEX_DATA2S_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_VERTEX_DATA4UB_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_VERTEX_DATA4S_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_VERTEX_DATA4F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_INDEXED_CONSTANT_READ_LIMITS,na,none,,low,[U],,"no reader in the tree; question: does it bound the indexed-constant load range?"
+M_NV4097_SET_VERTEX_DATA1F_M,emulate,"transient MTL::Buffer attribute ring @ slot 6",2,low,[V],RSXDrawCommands.cpp:238,
+M_NV4097_SET_TRANSFORM_EXECUTION_MODE,na,none,,low,[V],rsx_methods.cpp:1484,"nullptr handler; hw/ucode mode is never consulted"
+M_NV4097_SET_TRANSFORM_PROGRAM_LOAD,na,none,,low,[V],rsx_methods.cpp:1486,"write cursor for ucode upload; not shader/GPU state"
+M_NV4097_SET_TRANSFORM_PROGRAM_START,reshape,"MTL4::LibraryFunctionDescriptor::setName / program cache key",2,low,[V],10 §4.6,"entry offset selects the VS library function; marks ucode dirty"
+M_NV4097_SET_TRANSFORM_TIMEOUT,na,none,,low,[V],rsx_methods.cpp:1494,"execution watchdog/handshake; nullptr handler"
+M_NV4097_SET_TRANSFORM_CONSTANT_LOAD,na,none,,low,[V],nv4097.cpp:26,"write cursor consumed by compute_write_range; not shader-visible"
+M_NV4097_SET_TRANSFORM_CONSTANT,reshape,"MTL4ArgumentTable::setAddress @ vertex_constant_buffers_bind_slot=1 over MTL::Buffer",2,low,[V],HLD-05 §3.2,"468 vec4; instanced path swaps to slots 10/11"
+M_NV4097_SET_SHADER_PACKER,reshape,"MSL fragment epilogue (sRGB encode) + linear MTLPixelFormat attachment",2,low,[V],RSXThread.cpp:2467,"RSX_SHADER_CONTROL_SRGB_FRAMEBUFFER; part of the shader cache key"
+M_NV4097_SET_VERTEX_ATTRIB_INPUT_MASK,reshape,"attribute-stream set bound @ slots 5/6; drives the pull shader",3,med,[V],RSXDrawCommands.cpp:19,"selects live attributes; ANDed with program referenced-inputs mask"
+M_NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK,reshape,"MSL varyings [[user(locnN)]] / [[clip_distance]]; PSO cache key",3,med,[V],VKVertexProgram.cpp:276,"gates leaf VS outputs (diff/spec/fog/tc/clip/point size)"
+M_NV4097_SET_TRANSFORM_BRANCH_BITS,reshape,"vertex context buffer @ vertex_params=0 via setAddress",2,low,[V],VKGSRender.cpp:2136,"baked into MSL branch conditions (VertexProgramDecompiler.cpp:304)"

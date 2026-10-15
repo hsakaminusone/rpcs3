@@ -1,0 +1,13 @@
+id,disposition,metal4_target,difficulty,risk,confidence,doc_ref,notes
+M_NV0039_SET_OBJECT,na,none (inert subchannel handle),,low,[V],rsx_methods.cpp:1512,stored with default 0x313371c3 and never read by the transfer
+M_NV0039_SET_CONTEXT_DMA_NOTIFIES,na,none (inert notify context),,low,[V],rsx_methods.cpp:1514,notify value arrives as the BUFFER_NOTIFY argument instead
+M_NV0039_SET_CONTEXT_DMA_BUFFER_IN,reshape,MTL::Buffer (guest window) read base,2,low,[I],HLD-02 §2.1,input_dma is a CellGcmLocation selecting the shared guest allocation
+M_NV0039_SET_CONTEXT_DMA_BUFFER_OUT,reshape,MTL::Buffer (guest window) write base,2,low,[I],HLD-02 §2.1,output_dma selects the shared guest allocation
+M_NV0039_OFFSET_IN,reshape,MTL::Buffer read offset (host pointer),1,low,[I],nv0039.cpp:99,feeds get_address(src_offset; src_dma)
+M_NV0039_OFFSET_OUT,reshape,MTL::Buffer write offset (host pointer),1,low,[I],nv0039.cpp:100,feeds get_address(dst_offset; dst_dma)
+M_NV0039_PITCH_IN,reshape,source row stride of the host copy loop,1,low,[I],nv0039.cpp:71,row pitch in bytes
+M_NV0039_PITCH_OUT,reshape,destination row stride of the host copy loop,1,low,[I],nv0039.cpp:72,row pitch in bytes
+M_NV0039_LINE_LENGTH_IN,reshape,row byte width of the host copy loop,1,low,[I],nv0039.cpp:73,number of columns per row
+M_NV0039_LINE_COUNT,reshape,row count of the host copy loop,1,low,[I],nv0039.cpp:74,number of rows to copy
+M_NV0039_FORMAT,emulate,MSL compute kernel or host strided-gather loop,3,med,[I],nv0039.cpp:144,per-column byte strides 1..4 for input and output
+M_NV0039_BUFFER_NOTIFY,emulate,host memcpy/memmove + MTL4VisibilityOption barrier,2,med,[I],HLD-03 §2.3,trigger; guest memory is host memory so the CPU copy is canonical
