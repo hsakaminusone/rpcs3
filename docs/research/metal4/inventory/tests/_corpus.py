@@ -13,10 +13,11 @@ Violation codes
 ---------------
 register: `id-dup`, `addr-inconsistent`, `cluster-mismatch`, `disposition`,
           `difficulty`, `risk`, `confidence`, `target`, `doc-ref`, `decode`
-value:    `name-dup`, `value-range`, `group`, `source`, `prefix`
+value:    `name-dup`, `value-range`, `group`, `source`, `prefix`, `block`,
+          `block-dup`
 enum:     `alias`, `gap`
 facet:    `id-dup`, `name-dup`, `kind`, `source`
-slot:     `range`, `name`, `kind`, `index-dup`, `gap`
+slot:     `range`, `name`, `kind`, `index-dup`, `gap`, `placeholder`
 perm:     `member`, `no-target`, `impossible`, `undispositioned`, `no-fallback`
 
 Every code that is expected on the current tree is listed in a `*_DEVIATIONS`
@@ -87,6 +88,7 @@ class Value:
     value: int
     value_hex: str
     source: str
+    block: str
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,7 @@ class Slot:
     name: str
     slot: int
     source: str
+    placeholder: bool
 
 
 @dataclass(frozen=True)
@@ -172,7 +175,8 @@ def registers() -> tuple[Register, ...]:
 @lru_cache(maxsize=1)
 def values() -> tuple[Value, ...]:
     return tuple(Value(enum=r["enum"], name=r["name"], value=int(r["value"]),
-                       value_hex=r["value_hex"], source=r["source"])
+                       value_hex=r["value_hex"], source=r["source"],
+                       block=r["block"])
                  for r in _read_csv(OUT / "rsx_value_space.csv"))
 
 
@@ -185,7 +189,8 @@ def facets() -> tuple[Facet, ...]:
 
 @lru_cache(maxsize=1)
 def slots() -> tuple[Slot, ...]:
-    return tuple(Slot(name=r["name"], slot=int(r["slot"]), source=r["source"])
+    return tuple(Slot(name=r["name"], slot=int(r["slot"]), source=r["source"],
+                      placeholder=r["placeholder"] == "1")
                  for r in _read_csv(OUT / "rsx_binding_slots.csv"))
 
 
@@ -399,9 +404,7 @@ ANONYMOUS_ENUM = ""
 # Deviation registries (the contract on the current tree)
 # --------------------------------------------------------------------------- #
 
-REGISTER_DEVIATIONS: dict[str, tuple[str, ...]] = {
-    "M_NV4097_SET_INDEXED_CONSTANT_READ_LIMITS": ("doc-ref",),
-}
+REGISTER_DEVIATIONS: dict[str, tuple[str, ...]] = {}
 
 VALUE_DEVIATIONS: dict[str, tuple[str, ...]] = {}
 
@@ -409,10 +412,10 @@ ENUM_DEVIATIONS: dict[str, tuple[str, ...]] = {}
 
 FACET_DEVIATIONS: dict[str, tuple[str, ...]] = {}
 
-SLOT_DEVIATIONS: dict[str, tuple[str, ...]] = {
-    "textures_first_bind_slot": ("index-dup",),
-    "vertex_textures_first_bind_slot": ("index-dup",),
-}
+SLOT_DEVIATIONS: dict[str, tuple[str, ...]] = {}
+
+# A field the source marks invalid/derived: re-initialized at runtime, owns no slot.
+SLOT_PLACEHOLDERS: frozenset[str] = frozenset({"vertex_textures_first_bind_slot"})
 
 SLOT_GAPS: tuple[int, ...] = (6, 7)
 
@@ -447,9 +450,11 @@ def _facet_name_counts() -> dict[str, int]:
 
 @lru_cache(maxsize=1)
 def _slot_index_counts() -> dict[int, int]:
+    """Slot occupancy over the *real* fields; a placeholder owns no slot."""
     d: dict[int, int] = {}
     for s in slots():
-        d[s.slot] = d.get(s.slot, 0) + 1
+        if not s.placeholder:
+            d[s.slot] = d.get(s.slot, 0) + 1
     return d
 
 
@@ -493,6 +498,45 @@ def register_violations(reg: Register, expected_cluster: str | None = None) -> l
     return v
 
 
+def _line_of(text: str, offset: int) -> int:
+    """1-based line number of `offset` in `text`."""
+    return text.count("\n", 0, offset) + 1
+
+
+_ENUM_BLOCK_RE = re.compile(
+    r"\benum(?:\s+class)?\s*([A-Za-z_]\w*)?\s*(?::\s*[A-Za-z_][\w:]*\s*)?\{")
+
+
+@lru_cache(maxsize=1)
+def enum_block_ids() -> frozenset[str]:
+    """`gcm_enums.h:<line>` for every enum block in the source header.
+
+    Anchoring every value-space block id to a real `enum` in the header gives each
+    anonymous `enum {}` a stable identity and makes the id non-tautological.  The
+    header holds more blocks than the value space: the extra `enum class`
+    declarations alias existing constants and introduce no new ones.
+    """
+    src = REPO / "rpcs3" / "Emu" / "RSX" / "gcm_enums.h"
+    if not src.exists():
+        return frozenset(v.block for v in values())
+    text = src.read_text(errors="replace")
+    return frozenset(f"gcm_enums.h:{_line_of(text, m.start())}"
+                     for m in _ENUM_BLOCK_RE.finditer(text))
+
+
+@lru_cache(maxsize=1)
+def _names_in_multiple_blocks() -> frozenset[str]:
+    seen: dict[str, set[str]] = {}
+    for v in values():
+        seen.setdefault(v.name, set()).add(v.block)
+    return frozenset(n for n, blocks in seen.items() if len(blocks) > 1)
+
+
+def anonymous_blocks() -> frozenset[str]:
+    """Block ids of the constants that live in an unnamed `enum {}`."""
+    return frozenset(v.block for v in values() if v.enum == ANONYMOUS_ENUM)
+
+
 def value_violations(val: Value) -> list[str]:
     v: list[str] = []
     if val.enum not in VALUE_DOMAINS:
@@ -507,6 +551,10 @@ def value_violations(val: Value) -> list[str]:
         v.append("prefix")
     if _value_name_counts().get((val.enum, val.name), 0) > 1:
         v.append("name-dup")
+    if val.block not in enum_block_ids():
+        v.append("block")
+    if val.name in _names_in_multiple_blocks():
+        v.append("block-dup")
     return v
 
 
@@ -564,7 +612,9 @@ def slot_violations(s: Slot) -> list[str]:
         v.append("name")
     if SLOT_KINDS.get(s.name) not in BIND_KINDS:
         v.append("kind")
-    if _slot_index_counts().get(s.slot, 0) > 1:
+    if s.placeholder != (s.name in SLOT_PLACEHOLDERS):
+        v.append("placeholder")
+    if not s.placeholder and _slot_index_counts().get(s.slot, 0) > 1:
         v.append("index-dup")
     return v
 
@@ -780,6 +830,7 @@ def dial_counts() -> dict[str, int]:
         "facets": len(facets()),
         "slots": len(slots()),
         "enums": len({v.enum for v in values()}),
+        "value_blocks": len({v.block for v in values()}),
         "permutations": sum(space_size(s) for s in PERM_SPACES),
         "base_cases": len(registers()) + len(values()) + len(facets()) + len(slots()),
     }

@@ -3931,61 +3931,73 @@
   "slots": [
     {
       "name": "vertex_params_bind_slot",
+      "placeholder": 0,
       "slot": 0,
       "source": "pipeline_binding_table.h:9"
     },
     {
       "name": "vertex_constant_buffers_bind_slot",
+      "placeholder": 0,
       "slot": 1,
       "source": "pipeline_binding_table.h:10"
     },
     {
       "name": "fragment_constant_buffers_bind_slot",
+      "placeholder": 0,
       "slot": 2,
       "source": "pipeline_binding_table.h:11"
     },
     {
       "name": "fragment_state_bind_slot",
+      "placeholder": 0,
       "slot": 3,
       "source": "pipeline_binding_table.h:12"
     },
     {
       "name": "fragment_texture_params_bind_slot",
+      "placeholder": 0,
       "slot": 4,
       "source": "pipeline_binding_table.h:13"
     },
     {
       "name": "vertex_buffers_first_bind_slot",
+      "placeholder": 0,
       "slot": 5,
       "source": "pipeline_binding_table.h:14"
     },
     {
       "name": "conditional_render_predicate_slot",
+      "placeholder": 0,
       "slot": 8,
       "source": "pipeline_binding_table.h:15"
     },
     {
       "name": "rasterizer_env_bind_slot",
+      "placeholder": 0,
       "slot": 9,
       "source": "pipeline_binding_table.h:16"
     },
     {
       "name": "instancing_lookup_table_bind_slot",
+      "placeholder": 0,
       "slot": 10,
       "source": "pipeline_binding_table.h:17"
     },
     {
       "name": "instancing_constants_buffer_slot",
+      "placeholder": 0,
       "slot": 11,
       "source": "pipeline_binding_table.h:18"
     },
     {
       "name": "textures_first_bind_slot",
+      "placeholder": 0,
       "slot": 12,
       "source": "pipeline_binding_table.h:19"
     },
     {
       "name": "vertex_textures_first_bind_slot",
+      "placeholder": 1,
       "slot": 12,
       "source": "pipeline_binding_table.h:20"
     }

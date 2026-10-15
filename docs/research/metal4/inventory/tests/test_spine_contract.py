@@ -80,6 +80,7 @@ class TestSpineContract(unittest.TestCase):
         self.assertEqual(counts["values"], 768)
         self.assertEqual(counts["facets"], 275)
         self.assertEqual(counts["slots"], 12)
+        self.assertEqual(counts["value_blocks"], 49)
         self.assertEqual(counts["base_cases"], 1337)
         self.assertEqual(counts["permutations"], 9496)
 

@@ -99,11 +99,13 @@ nobody has decoded.
 
 ### 3.3 VALUE space — `out/rsx_value_space.csv`
 
-The enums registers can carry. At this revision: **768 constants across 10 enums**.
+The enums registers can carry. At this revision: **768 constants across 10 enum
+domains**, spread over **49 source blocks** (9 named enums and 40 anonymous
+`enum {}` blocks).
 
 | enum | constants | role |
 |---|---|---|
-| *(anonymous)* | 393 | unqualified `CELL_GCM_*`-family constants |
+| *(anonymous)* | 393 (40 blocks) | unqualified `CELL_GCM_*`-family constants |
 | `CellGcmMethod` | 282 | the method enum itself (mirror of COMMAND) |
 | `CellGcmTexture` | 31 | texture format constants |
 | `CellGcmLocation` | 26 | memory location constants |
@@ -114,10 +116,14 @@ The enums registers can carry. At this revision: **768 constants across 10 enums
 | `CellGcmSystemMode` | 2 | system mode |
 | `CellRescTableElement` | 2 | rescale table elements |
 
+Every row also records its `block` — the `gcm_enums.h:<line>` of the `enum` it came
+from — so an anonymous block has a stable identity. `enum class` declarations that
+alias existing constants are not duplicated here.
+
 The value space is where the *format/blend/compare* mapping lives. Every texture
 format, blend factor, blend equation and comparison function the guest can write
-becomes a row that must resolve to a Metal enum or a shader emulation. That
-exhaustive table is `design/LLD-value-space.md`.
+becomes a row that must resolve to a Metal enum or a shader emulation. Those
+tables are `design/LLD-texture.md` §3.1 and `design/LLD-blend.md` §3.2–3.3.
 
 ### 3.4 SHADER space — `out/rsx_shader_facets.csv`
 
@@ -308,8 +314,9 @@ To extend: add a shard, fill `out/dispositions/<cluster>.csv`, re-run
    over the corpus.
 3. **[I] Is the VALUE space complete?** Formats can arrive indirectly (e.g. via
    `SET_TEXTURE_FORMAT` decoded into a `color_format` subsystem) rather than as a
-   literal constant. The 393 anonymous constants suggest categories not yet
-   labelled. Experiment: cross-check `rsx_detail`/`utils` format tables against
+   literal constant. The 393 anonymous constants sit in 40 blocks, each now
+   identified by its `gcm_enums.h:<line>`, but their *categories* are still
+   unlabelled. Experiment: cross-check `rsx_detail`/`utils` format tables against
    `rsx_value_space.csv`.
 4. **[U] Cluster boundaries** are heuristic (name-substring rules). They are
    *good enough* to assign ownership but are not a hardware taxonomy. If a shard

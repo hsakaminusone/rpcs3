@@ -5,6 +5,7 @@
     "bind_range": 29,
     "unbound": 170
   },
+  "binding_slot_placeholders": 1,
   "binding_slots": 12,
   "clusters": 14,
   "decoder_fields": 93,
@@ -12,6 +13,7 @@
   "orphan_bindings": 3,
   "registers": 282,
   "shader_facets": 275,
+  "value_blocks": 49,
   "value_constants": 768,
   "value_enums": 10,
   "with_binding": 112,

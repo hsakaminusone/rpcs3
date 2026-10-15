@@ -34,9 +34,10 @@ The spine is a **finite, enumerable** checklist. At the current revision it cont
 - **282** method registers across **14** clusters
 - **158** with a bitfield decoder (**93** decoded fields)
 - **112** with a dispatch binding
-- **768** value-space constants across **10** enums
+- **768** value-space constants across **10** enum domains and **49** source blocks
+  (an anonymous `enum {}` is identified by its `gcm_enums.h:<line>` block)
 - **275** shader facets (VP/FP opcodes, register types/precisions, instruction bitfields, program fields)
-- **12** argument-table slots
+- **12** argument-table slots (**1** documented placeholder)
 
 Because the space is finite, "we have mapped RSX → Metal 4" becomes a *coverage
 statement* (every `id` has a disposition), not an assertion.
