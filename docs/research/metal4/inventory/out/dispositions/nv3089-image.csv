@@ -1,0 +1,22 @@
+id,disposition,metal4_target,difficulty,risk,confidence,doc_ref,notes
+M_NV3089_SET_OBJECT,na,-,,low,[V],10 §3.1,engine class object header; dispatched to nullptr and never read (rsx_methods.cpp:1562); only bounds the desync scan (RSXThread.cpp:3206)
+M_NV3089_SET_CONTEXT_DMA_NOTIFIES,na,-,,low,[V],10 §3.1,notify DMA pointer; dispatched to nullptr and never read by the blit path (rsx_methods.cpp:1563)
+M_NV3089_SET_CONTEXT_DMA_IMAGE,reshape,mtl_guest_window address resolution,3,med,[I],HLD-02 §2.1,CellGcmLocation selects main vs local guest window; feeds get_address for the source range (nv3089.cpp:88)
+M_NV3089_SET_CONTEXT_PATTERN,moot,-,,med,[V],10 §3.1,pattern-blit source; dispatched to nullptr and never read (rsx_methods.cpp:1565); only reachable for a non-srccopy op
+M_NV3089_SET_CONTEXT_ROP,moot,-,,med,[V],10 §3.1,ROP3 code; never read (rsx_methods.cpp:1566); srccopy is the only op RPCS3 accepts (nv3089.cpp:73-78)
+M_NV3089_SET_CONTEXT_BETA1,moot,-,,med,[V],10 §3.1,blend beta factor; never read (rsx_methods.cpp:1567); consumed only by blend_and/blend_premult
+M_NV3089_SET_CONTEXT_BETA4,moot,-,,med,[V],10 §3.1,4-term blend beta; never read (rsx_methods.cpp:1568); consumed only by blend_and/blend_premult
+M_NV3089_SET_CONTEXT_SURFACE,reshape,MTL4ComputeCommandEncoder path select,3,med,[I],HLD-02 §2.4,surface2d vs swizzle2d chooses the NV309E swizzled-destination path (nv3089.cpp:97-141)
+M_NV3089_SET_COLOR_CONVERSION,emulate,MTL4ComputeCommandEncoder uniform MTL::Buffer,4,high,[U],HLD-02 §2.7,YUV→RGB matrix; no decoder (has_decoder=0) and never read; required only if YUV source formats are enabled
+M_NV3089_SET_COLOR_FORMAT,reshape,MTLPixelFormat + compute decode branch,3,med,[I],HLD-02 §2.7,source pixel format; only r5g6b5 and a8r8g8b8 reach the pixel loop (nv3089.cpp:263-276)
+M_NV3089_SET_OPERATION,reshape,host op select before MTL4ComputeCommandEncoder,2,low,[I],10 §3.1,srccopy is mandatory; anything else drops the blit and calls recover_fifo (nv3089.cpp:73-78)
+M_NV3089_CLIP_POINT,reshape,MTL4ComputeCommandEncoder dispatchThreads origin,2,low,[I],10 §3.1,clip origin is forced back to 0 when the rect overruns the output surface (nv3089.cpp:59-60)
+M_NV3089_CLIP_SIZE,reshape,MTL4ComputeCommandEncoder dispatchThreads grid,2,low,[I],10 §3.1,clipped against the output extent; a zero dimension NOPs the operation (nv3089.cpp:39-47)
+M_NV3089_IMAGE_OUT_POINT,reshape,MTL4ComputeCommandEncoder dst region origin,2,low,[I],10 §3.1,destination byte origin out_x/out_y (nv3089.cpp:190)
+M_NV3089_IMAGE_OUT_SIZE,reshape,MTL4ComputeCommandEncoder dst region extent,2,low,[I],10 §3.1,output width/height; bounds the clip-fit test (nv3089.cpp:23-26,39)
+M_NV3089_DS_DX,reshape,MTL::SamplerState filter + UV-grid uniform,3,med,[I],10 §3.1,reciprocal 11.20 fixed-point horizontal scale; negative selects X mirror (nv3089.cpp:612-614)
+M_NV3089_DT_DY,reshape,MTL::SamplerState filter + UV-grid uniform,3,med,[I],10 §3.1,reciprocal 11.20 fixed-point vertical scale; negative selects Y mirror (nv3089.cpp:612-614)
+M_NV3089_IMAGE_IN_SIZE,reshape,MTL4ComputeCommandEncoder src region extent,2,low,[I],10 §3.1,zero input extent throws (nv3089.cpp:49-53); also derives src_line_length (nv3089.cpp:192)
+M_NV3089_IMAGE_IN_FORMAT,reshape,MTL::Texture src region + MTL::Buffer pitch uniform,3,high,[I],HLD-02 §2.1,low 16 bits are the source pitch not a pixel format (rsx_methods.h:1090-1093); bits 16-23 origin and 24-31 interpolator
+M_NV3089_IMAGE_IN_OFFSET,reshape,mtl_guest_window byte offset,2,low,[I],HLD-02 §2.1,byte offset into the source DMA; combined with subpixel x/y to form the final read address (nv3089.cpp:189,254)
+M_NV3089_IMAGE_IN,emulate,MTL4ComputeCommandEncoder dispatchThreads or copyFromTexture,4,high,[I],10 §3.1 / README §4,trigger; host selects same-format copy vs compute meta pass vs CPU path; today emits read_barrier and a reservation_lock over both ranges (nv3089.cpp:218-241,588)

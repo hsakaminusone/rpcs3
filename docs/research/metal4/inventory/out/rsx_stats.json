@@ -1,0 +1,19 @@
+{
+  "binding_kinds": {
+    "bind": 75,
+    "bind_array": 8,
+    "bind_range": 29,
+    "unbound": 170
+  },
+  "binding_slots": 12,
+  "clusters": 14,
+  "decoder_fields": 93,
+  "nv47_modules": 6,
+  "orphan_bindings": 3,
+  "registers": 282,
+  "shader_facets": 275,
+  "value_constants": 768,
+  "value_enums": 10,
+  "with_binding": 112,
+  "with_decoder": 158
+}

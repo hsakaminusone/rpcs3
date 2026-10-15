@@ -1,0 +1,13 @@
+{
+  "by_disposition": {
+    "direct": 25,
+    "emulate": 45,
+    "impossible": 4,
+    "moot": 14,
+    "na": 61,
+    "reshape": 133
+  },
+  "covered": 282,
+  "percent": 100.0,
+  "total": 282
+}

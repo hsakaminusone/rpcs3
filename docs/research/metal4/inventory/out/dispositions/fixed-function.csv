@@ -1,0 +1,5 @@
+id,disposition,metal4_target,difficulty,risk,confidence,doc_ref,notes
+M_NV4097_SET_FOG_MODE,emulate,"MTL4ArgumentTable.setAddress(fragment-state buffer, slot 3); MSL fetch_fog_value()",2,low,[V],"HLD-05 §2.6, §3.2; 10 §4.6","6-mode fog equation selector; consumed only when the guest FP reads fogc (in_fogc); rides the fragment-state payload, no Metal state setter exists"
+M_NV4097_SET_FOG_PARAMS,emulate,"MTL4ArgumentTable.setAddress(fragment-state buffer, slot 3); MSL fog_param0/fog_param1",2,low,[V],"HLD-05 §2.6, §3.2","two f32 params spanning FOG_PARAMS and FOG_PARAMS+1; default 0.0; same slot-3 fragment_context field pair"
+M_NV4097_SET_SPECULAR_ENABLE,moot,"none - write-only dead state, no Metal 4 object",,low,[V],"HLD-05 §2.6","has_decoder=0; no reader anywhere in the tree; methods[] = nullptr; the register exists but never affects output"
+M_NV4097_SET_TWO_SIDE_LIGHT_EN,emulate,"MSL [[front_facing]] select in FS; variant of MTL4Compiler::newRenderPipelineState",2,low,[V],"HLD-05 §2.6; 10 §4.6","selects front/back colour+specular outputs; feeds the FP cache key and VP config[3]; shader variant, not Metal state"

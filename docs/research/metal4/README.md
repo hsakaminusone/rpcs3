@@ -1,16 +1,24 @@
 # Native Apple Metal 4 RSX backend — master synthesis
 
-> **This is the master document for the `docs/research/metal4/` set.** It rolls up five
+> **This is the master document for the `docs/research/metal4/` set.** It rolls up eleven
 > independently-produced scoping documents into one coherent reference. It is a *merge*, not a
 > concatenation: overlapping rows are deduplicated, contradictions are reconciled or flagged,
 > and every claim carries provenance to the scope doc + section that supports it.
 >
+> The set is **two tiers**. **`01`–`05`** are the per-API *translation inventory* (Vulkan → Metal 4):
+> they own the unified mapping (§3) and most of the impossibility register (§6). **`06`–`11`** are
+> cross-cutting — build/deploy (`06`), verification, conformance & performance (`07`), the
+> `Emu/RSX/VK/**` port surface and effort (`08`), the draw path (`09`), the **RSX-native
+> architecture** (`10`), and the executable verification loop (`11`). They add draw-path mapping
+> rows (§3.7), a reconciled effort/phasing model (§7), and register deltas (§6.1–§6.2); their
+> headline conclusions are folded into §2 and §4 rather than re-listed.
+>
 > **Read-only research.** No RPCS3 source, CMake, test or `.ci` file was modified to produce this
 > set and no build was run. Peer docs were written in parallel and mostly blind to each other;
-> `file:line` references inside them are point-in-time on branch `kosmickrisp-integration` and an
-> agent may have concurrently edited `rpcs3/Emu/RSX/VK/**`, so **symbol names are the stable
-> reference; line numbers are advisory.** `[V]` = verified against a primary source; `[I]` =
-> inference; `[U]` = could not verify.
+> `file:line` references inside them are point-in-time on branch `kosmickrisp-integration` (01–05)
+> and `metal4` (06–11), and an agent may have concurrently edited `rpcs3/Emu/RSX/VK/**`, so
+> **symbol names are the stable reference; line numbers are advisory.** `[V]` = verified against a
+> primary source; `[I]` = inference; `[U]` = could not verify.
 
 ---
 
@@ -24,11 +32,24 @@
 | [`03-shaders-pipelines-descriptors.md`](03-shaders-pipelines-descriptors.md) | Shaders (SPIR-V→MSL), pipeline objects, descriptors/argument tables, dynamic state. |
 | [`04-images-formats-samplers-rtt.md`](04-images-formats-samplers-rtt.md) | Images, pixel formats, samplers, render targets, MSAA/resolve, copy/clear/blit. |
 | [`05-presentation-and-impossible-register.md`](05-presentation-and-impossible-register.md) | Presentation/window/swapchain; its original master register is now superseded by §6 here (see §6 and 05 §9). |
+| [`06-build-toolchain-deployment.md`](06-build-toolchain-deployment.md) | Cross-cutting: SPIRV-Cross vendoring, runtime vs offline MSL, the **macOS 26 / M1+ wall**, availability gating, the Metal-3-fallback question, CMake wiring, packaging, and what CI can/cannot verify. |
+| [`07-verification-and-performance.md`](07-verification-and-performance.md) | Cross-cutting: the correctness **oracle ladder**, the conformance levels, determinism & the divergence taxonomy, Metal debug tooling, the **performance model**, and the three-tier CI strategy. |
+| [`08-backend-port-surface.md`](08-backend-port-surface.md) | Cross-cutting: the **RSX backend contract** (`rsx::thread` + `backend_configuration`), the 112-file / 34,213-LOC `Emu/RSX/VK/**` port surface, the LOC/effort estimate, cost centres, and comparable-port evidence. |
+| [`09-draw-submission-and-batching.md`](09-draw-submission-and-batching.md) | Cross-cutting: the draw path traced end to end, the draw→Metal-4 mapping (§3.7 here), batching strategies (A–F), command-buffer construction, and the "is explicit encoding a win?" verdict. |
+| [`10-rsx-native-metal4-architecture.md`](10-rsx-native-metal4-architecture.md) | Cross-cutting: the **RSX-first** target architecture (resource/binding/pass/sync/draw/shader/present models), the delete/keep/reshape diff vs the Vulkan-derived plan, a revised effort estimate, and register deltas (§6.1). |
+| [`11-verification-loop.md`](11-verification-loop.md) | Cross-cutting: the **executable verification loop** — the RRC replay substrate, the H0–H7 harness ladder, the recording seam, differential goldens, per-command localisation, and the fast/slow iteration loop. |
+| [`12-rsx-state-space-inventory.md`](12-rsx-state-space-inventory.md) | The **completeness spine**: the mechanically-generated enumeration of the RSX state space (282 method registers in 14 clusters, 158 decoders, 768 value constants, 275 shader facets), the curated disposition layer, and the coverage gate. Backed by [`inventory/`](inventory/) (generator + tests + validator). |
+| [`design/`](design/) | The **design frame built on the spine**: `HLD-*` (architecture, resources, synchronization, command encoding, shaders/binding, presentation) and `LLD-<cluster>` (one per cluster, each carrying that cluster's disposition shard). |
 
 **How to read:** use this document for *what it means, what conflicts, what to build first, and
 what is impossible*; use the detail docs for the full `file:line` inventories and per-scope
-reasoning. Where this document and a detail doc disagree, **this document is authoritative** and
-the disagreement is called out inline. Background context (not part of this set, referenced):
+reasoning. `01`–`05` are the translation inventory; `06`–`11` are cross-cutting, and their
+conclusions are **folded into** §2 (headline verdicts), §4 (shifts), §5 (dependency graph), §6
+(register deltas), §7 (reconciled phasing) and §8 (questions) rather than duplicated. `12` +
+`design/` are the *RSX-first* working set: `12` is the completeness spine and the `HLD`/`LLD`
+docs are where each cluster's mapping is decided against it. Where this
+document and a detail doc disagree, **this document is authoritative** and the disagreement is
+called out inline. Background context (not part of this set, referenced):
 [`../03-rpcs3-backend-architecture.md`](../03-rpcs3-backend-architecture.md),
 [`../05-metal-backend-northstar.md`](../05-metal-backend-northstar.md).
 
@@ -36,13 +57,14 @@ the disagreement is called out inline. Background context (not part of this set,
 
 ## 2. Executive summary
 
-**What a native Metal 4 backend is.** RPCS3's Vulkan backend (`rpcs3/Emu/RSX/VK/`, ~33k LOC / 111
-files; `../03-rpcs3-backend-architecture.md`) currently reaches the GPU through MoltenVK or
-KosmicKrisp (a Vulkan driver whose backend *is* Metal 4). A native backend deletes that layer and
-talks to `MTL4CommandQueue`/`MTL4CommandBuffer`/`MTL4CommandEncoder` directly, keeping the shared
+**What a native Metal 4 backend is.** RPCS3's Vulkan backend (`rpcs3/Emu/RSX/VK/**`, **112 files /
+34,213 LOC** — `08` §6.1) currently reaches the GPU through MoltenVK or KosmicKrisp (a Vulkan
+driver whose backend *is* Metal 4). A native backend deletes that layer and talks to
+`MTL4CommandQueue`/`MTL4CommandBuffer`/`MTL4CommandEncoder` directly, keeping the shared
 ~55k LOC of RSX emulation unchanged behind the `rsx::thread` virtual contract and the
-`backend_configuration` capability struct. The new `MTL/` subsystem is estimated at ~25–30k LOC —
-effectively a second `VK/` (`../05-metal-backend-northstar.md`).
+`backend_configuration` capability struct. The new `MTL/` subsystem is estimated at **~20–30k LOC**
+(bottom-up `08` §8.1: ~20–30k, centre ~25k; RSX-first `10` §6.1: ~18–25k, centre ~21k) —
+effectively a second `VK/`.
 
 **Headline verdicts.**
 
@@ -59,24 +81,67 @@ effectively a second `VK/` (`../05-metal-backend-northstar.md`).
    `VkRenderPass`+`VkFramebuffer` → per-encoder `MTL4RenderPassDescriptor`; descriptor
    sets/layouts/push-constants → one argument table; the blit encoder → the compute encoder;
    implicit hazard tracking → explicit barriers; implicit residency → explicit residency sets.
-4. **Every difficulty rating across the five docs is 1–5 on the same scale** (1 rename → 5
+4. **Every difficulty rating across the set is 1–5 on the same scale** (1 rename → 5
    unknown/impossible). The single most common rating is **3–4**; genuinely impossible items are
    few and (with two exceptions) have **low RSX impact** because PS3 games cannot reach the
    missing features (geometry/tessellation/transform-feedback/pipeline-stats).
+5. **It is an Apple-silicon-only backend with a hard OS floor.** Metal 4 exists on **M1+ and
+   macOS 26+ only — never on Intel**; that is a hardware+OS wall, not a switch (`06` §3.1). The
+   recommended posture keeps `CMAKE_OSX_DEPLOYMENT_TARGET`/`LSMinimumSystemVersion` at **15.0**,
+   builds against the macOS 26 SDK (weak-linking later symbols), and runtime-gates on
+   `arm64 && macOS_major >= 26 && supportsFamily(MTLGPUFamilyMetal4)` (`06` §3.3–§3.4).
+   **A Metal 3 fallback is a second backend, not a build flag — do not build it; MoltenVK already
+   *is* the pre-26 fallback** (`06` §4). Intel keeps the MoltenVK-only build with the `MTL`
+   sources arch-excluded, mirroring `bundle_should_include(kosmickrisp)=arm64`.
+6. **The contract is tiny; the implementation is not.** A backend must satisfy **~4 pure virtuals +
+   ~25 hooks + a 16-bool `backend_configuration` + 5 ZCULL virtuals (~50 signatures)** (`08` §2.5).
+   The size lives in the three generic caches — `rsx::surface_store`, `rsx::texture_cache`,
+   `program_state_cache` — which the ~55k LOC of shared `Common/`/`Program/`/`NV47/` emulation
+   already drives.
+7. **The draw path is the conditional win.** A naive 1:1 port of the VK draw path is **roughly a
+   wash**; the win appears only if argument tables and indirect batching are exploited (`09` §7.2).
+   It is measurable today via `m_frame_stats.setup_time`/`draw_exec_time` (`09` §7.3).
+8. **RSX-first reshapes the estimate, it does not halve it.** Designing from the RSX contract
+   deletes ~5–7k LOC of Vulkan-only *middle scaffolding* (render-pass objects + packed `u64` key,
+   descriptor-set/layout machinery, loader/instance/extension layer, push-constant workaround) — a
+   **~15–20%** reduction (`10` §5–§6), not a re-architecture of the hard parts (texture-cache
+   traits, MSL correctness, per-title quirks all survive). Its make-or-break is a **hazard-derived
+   pass scheduler** (`10` §10).
+9. **Verification is the real project risk.** RPCS3 has **no golden-image GPU suite**, and
+   **GitHub-hosted macOS runners expose no dependable Metal device** (`07` §3.4, §9.4). The only
+   RSX-*objective* oracle is guest-observable readback (`07` §2.2 rung 3); everything else is
+   *differential* against the shipping backend and needs a self-hosted Apple-silicon runner.
+10. **The capture/replay substrate already *is* the harness.** Capture and replay live in
+    **backend-agnostic core** (`RSXThread.cpp:975,3478`; `RSXFIFO.cpp:833,836`) and the `.rrc`
+    format is **per-command annotated** — so a future `MTL` backend inherits a deterministic,
+    command-localisable test loop unchanged (`11` §3).
 
-**Overall feasibility / effort picture** (from `../05-metal-backend-northstar.md`, corroborated by
-the per-scope ratings):
+**Overall feasibility / effort picture.** Two independent bottom-up estimates now exist and
+corroborate each other:
 
 | Milestone | Scope | Rough effort |
 |---|---|---|
 | Bring-up | device/queue/swapchain, clear + present, overlay UI | weeks–low months |
-| MVP | VP/FP pipeline, textures, vertex upload, basic draws, a few bootable titles | ~6–12 person-months |
+| MVP | VP/FP pipeline, textures, vertex upload, basic draws, a few bootable titles | **~6–12 person-months**; **8–12k LOC** (`08` §8.2) → RSX-first **~7–10k** (`10` §6.1) |
 | Playable subset | render targets, MSAA resolve, texture-cache correctness, format/deswizzle compute | +12–24 person-months |
 | Parity with VK backend | all RSX quirks, async compute, ZCULL, savestate, FSR/upscalers, edge formats | multi-person-year |
+
+`08` §8.1 estimates **~20,000–30,000 LOC** of new `MTL/` (centre ~25,000) by bottom-up row count;
+`10` §6 revises that to **~18–25k (centre ~21k)** after the RSX-native deletions; `08` §8.3's
+phase mapping (~21–35k) brackets the same range. All three are order-of-magnitude, not schedules.
 
 **Biggest risks (consolidated):** (1) the RSX per-title quirk surface; (2) shader correctness via
 SPIR-V→MSL; (3) the render-pass→encoder redesign; (4) TBDR performance tuning; (5) long-term
 maintenance by few people — plus the inherited MSL/Metal compiler bug surface (§6, row R10).
+Added by the cross-cutting scopes: (6) **no local pixel oracle** — correctness is defined by
+agreement with another backend on a different rasteriser, so both false positives and false
+negatives are expected (`07` §2.1); (7) **CI cannot test the thing that matters** — no dependable
+Metal on hosted runners, so without a self-hosted Mac all GPU verification is manual (`07` §9.4);
+(8) **the availability gate cannot be enforced by the compiler under metal-cpp** — metal-cpp ships
+no `API_AVAILABLE`, so an unguarded `MTL4*` call compiles silently and crashes on macOS 15–25
+(`06` §3.4); (9) **the strategic gate itself** — the upside over KosmicKrisp, which already runs
+directly on Metal 4, is unmeasured, and Dolphin's precedent shows native Metal beating a *healthy*
+translator only narrowly (+23%/+30% after fixing a 45% MVK regression) (`10` §10.1).
 
 ---
 
@@ -85,12 +150,13 @@ maintenance by few people — plus the inherited MSL/Metal compiler bug surface 
 One merged, deduplicated table. The **Scope** column attributes each row to its owner doc; where
 two docs mapped the same construct the row lists both and the notes carry the discrepancy. Where
 two docs **rated the same construct differently**, both ratings appear as `a / b` and the row is
-marked **(diff disagree)**. Difficulty scale (identical in all five docs): **1** trivial rename ·
+marked **(diff disagree)**. Difficulty scale (identical across the set): **1** trivial rename ·
 **2** mechanical · **3** real work, well-trodden · **4** hard / needs design · **5** unknown or
 impossible.
 
 > Deduplicated from 32 (01) + 41 (02) + 47 (03) + 46 (04) + 24 (05) = **190 raw rows** to
-> **156 merged rows** below. Rows for the same construct appearing in multiple docs were collapsed
+> **156 merged rows** in §3.1–§3.6 (plus the **11 draw-path rows** in §3.7 from `09`). Rows for the
+> same construct appearing in multiple docs were collapsed
 > — and further bundled (e.g. the ~9 individual builtins in 03 #29-37 become one row; the ~11
 > sampler sub-features in 04 #9-19 become one row) — so 156 over-counts the true construct count but
 > under-counts the raw rows. `VkRenderPass`/`VkFramebuffer` collapsed from 02 #26, 04 #20 and 05's
@@ -284,7 +350,43 @@ impossible.
 
 **Count: 156 merged rows** (from 190 raw; duplicates collapsed and several bundled rows, e.g.
 sampler sub-features #115 and builtins #96, absorb multiple raw rows — so the raw count is higher
-than the sum of the five table lengths above suggests.). *(Rows are numbered continuously 1–156.)*
+than the sum of the six table lengths above suggests.). *(Rows are numbered continuously 1–156.)*
+
+### 3.7 Draw-path rows (`09`)
+
+`09` re-traverses the **draw path** at *draw-call* granularity (22 rows). **Eleven of them are not
+new constructs** — they re-map rows already above, so they are cross-referenced here rather than
+duplicated (`09` §3):
+
+| `09` row | Merges into | `09` row | Merges into |
+|---|---|---|---|
+| #7 trivial-instanced draw + `pass_count()` | §3 #90 + D2 below | #14 conditional rendering | §3 #56 (R6) |
+| #9 software-pulled vertex streams | §3 #83 (`usamplerBuffer`) | #15 occlusion query | §3 #64 |
+| #10 bind pipeline | §3 #37 | #17 primitive topology | §3 #90 |
+| #11 descriptor sets / argument table | §3 #38, #88 | #20 `update_draw_state` | §3 #94 |
+| #12 render-pass boundary | §3 #57, #60 | #21 push constants | §3 #87 (R15) |
+| #13 programmable blending | §3 #55, #86 | | |
+
+The remaining **eleven are genuinely new** — the draw-*dispatch* and batching constructs that
+§3.1–§3.6 never enumerated, because they are calls rather than objects:
+
+| # | Construct (exact symbol) | Metal 4 objects / methods | Diff | Scope | Notes |
+|---|---|---|---|---|---|
+| D1 | `vkCmdDraw(cmd,count,1,0,0)` (`VKDraw.cpp:1184`) | `drawPrimitives(type,vertexStart,vertexCount)` | 1 | 09 #1 | `vertexStart` = `upload_info.vertex_base` (`VKVertexBuffers.cpp:378`). |
+| D2 | `vkCmdDraw(...,pass_count())` (`:1180`) | `drawPrimitives(...,instanceCount)` | 1 | 09 #2, #7 | RSX "trivial instanced" maps 1:1 to native instancing — the cheapest batching win (strategy B). |
+| D3 | `vkCmdDrawIndexed(...)` (`:1216`) + `vkCmdBindIndexBuffer` (`:1208`) | `drawIndexedPrimitives(...,indexBuffer:indexBufferLength:)` | 2 | 09 #3 | The index buffer is an **argument (GPU address + length)**, not bound state; needs ≥2/4-byte alignment and a matching `MTL::IndexType`. |
+| D4 | `vkCmdDrawIndexed(...,baseVertex,baseInstance)` | `drawIndexedPrimitives(...,baseVertex:baseInstance:)` | 1 | 09 #4 | Usable because RSX index emulation is host-side. |
+| D5 | `_vkCmdDrawMultiEXT(subranges,...)` (`:1190`) | **no native multi-draw** → `drawPrimitives(indirectBuffer:)` else N× draw | 3 | 09 #5 | KK sets the precedent (fake multi-draw with indirect, `kk_cmd_draw.c:1464-1480`). |
+| D6 | `_vkCmdDrawMultiIndexedEXT(...)` (`:1240`) + `m_multidraw_parameters_buffer` (`:1224`) | `drawIndexedPrimitives(...,indirectBuffer:)` | 3 | 09 #6 | Arg layout = `MTLDrawIndexedPrimitivesIndirectArguments`; the host already builds the array. |
+| D7 | `draw_command_visitor` quad/fan/restart emulation (`VKVertexBuffers.cpp:70`,`:121`) | unchanged — output index GPU buffer + `MTL::IndexType` | 2 | 09 #8 | Fan/quads/restart are already host-side; nothing Metal-specific. |
+| D8 | `draw_clause::is_immediate_draw` / `inline_vertex_array` (`draw_call.hpp:75`,`:81`) | materialise stream, then D1/D3 | 2 | 09 #16 | The inline array is already copied into the attribute ring host-side. |
+| D9 | `draw_command_barriers` / primitive-restart barrier (`draw_call.hpp:25`,`:113`) | host-side index emulation (no GPU construct) | 2 | 09 #18 | Barriers are resolved on the CPU into index runs. |
+| D10 | `multidraw_support.max_batch_size` 65536 (`device.cpp:110`) | chunk the indirect-args array | 2 | 09 #19 | No explicit per-call cap; chunk for cache/argument-buffer sizing. |
+| D11 | MT `vkCmdDraw` sources its data from the `draw_parameters` SSBO index (`VKVertexProgram.cpp:87`,`:131`) | **stays a buffer** | 3 | 09 #22 | **The single most important affordance:** per-draw data is *not* in bind slots, so a batch can share one argument table — this is what makes indirect batching (strategy C) feasible at all. |
+
+> With §3.7 the merged mapping is **167 construct rows** (156 + 11). The draw-path **batching
+> strategies** (A–F) and the "explicit encoding is a wash unless batched" verdict live in `09`
+> §4/§7 and are summarised in §2 verdict 7 and §4 below; they are not mapping rows.
 
 ---
 
@@ -345,6 +447,42 @@ the cited docs.
 - **One `MTL4Compiler` per `MTLDevice`** (KK W11 heap corruption) constrains RPCS3's async
   pipeline-compile pool (03 §3.1 W11, 05 §7 Q10 [V]).
 
+**Cross-cutting shifts from the design scopes (`06`–`11`).** The inventory above is *Vulkan→Metal*;
+these are equally load-bearing and come from the engineering/architecture scopes:
+
+- **Metal 4 is arm64 + macOS 26+ only — never Intel.** The wall is hardware **and** OS, not a flag.
+  Recommended gate: keep app target/`LSMinimumSystemVersion` at **15.0**, build against the macOS 26
+  SDK (weak-linking later symbols), and runtime-gate on `arm64 && macOS_major >= 26 &&
+  supportsFamily(MTLGPUFamilyMetal4)`; arch-exclude the `MTL` sources on Intel, mirroring
+  `bundle_should_include(kosmickrisp)=arm64` (`06` §3.2–§3.5).
+- **Availability is not compiler-enforced.** metal-cpp carries **no `API_AVAILABLE` annotations** on
+  its `MTL4*` headers (verified: 0 files), so a `MTL4*` reference outside an explicit
+  `@available`/`__builtin_available` guard **compiles** and crashes at load on macOS 15–25. Every
+  entry point needs a manual guard (`06` §3.4).
+- **There is no Metal 3 fallback *build*.** Metal 3 and Metal 4 differ in the *command model*, not a
+  capability toggle; a fallback is a **second backend**. MoltenVK already serves pre-26, so do not
+  build a Metal 3 `MTL/` (`06` §4).
+- **The shader path inserts one vendored component, not a new backend.** `GLSL → SPIR-V →
+  SPIRV-Cross CompilerMSL → MSL → MTL4Compiler`; SPIRV-Cross is MIT, ~diff 2 to vendor like glslang,
+  and needs **no** Metal-4 awareness because the argument table indexes the classic
+  `[[buffer/texture/sampler(N)]]` spaces (`06` §2). Runtime MSL compilation is mandatory; binary
+  archives/`MTL4Archive` are **not** shipped (`06` §2.2–§2.4).
+- **Correctness is *relative*, not absolute, until guest readback exists.** With no golden-image
+  suite, the only RSX-*objective* oracle is guest-observable memory (RSX/`cellGcm` readback); every
+  pixel comparison is *differential* against KK/MVK and therefore inherits their bugs — both false
+  positives and false negatives are expected (`07` §2.1–§2.2).
+- **The draw path is a wash unless batched.** Explicit `MTL4` encoding only wins with argument tables
+  (shift 5 above) **plus** indirect batching; it is measurable today with `frame_statistics_t`
+  (`setup_time`/`draw_exec_time`), and RSX's `draw_parameters`-in-an-SSBO design is what makes
+  batch-shared argument tables possible (`09` §7, D11).
+- **The render-pass *scheduler* is the RSX-native design problem.** RSX has no render-pass object;
+  the backend must *synthesise* `MTL4RenderPassDescriptor`s from hazards while preserving TBDR tile
+  locality, rather than porting a VK-style render-pass cache. This is the make-or-break of the
+  RSX-first plan (`10` §5, §10).
+- **The verification harness is already in the tree.** Capture/replay is backend-agnostic core and
+  `.rrc` is per-command annotated, so a `MTL` backend inherits a deterministic, command-localisable
+  test loop for free once it is a `video_renderer` (`11` §3).
+
 ---
 
 ## 5. Cross-scope dependency graph
@@ -388,6 +526,20 @@ layer's dynamic residency set.
 - **Push-constant emulation.** 03 owns the transient-buffer/function-constant decision; 01 must
   allocate the bump buffer; 02 must emit the bind (03 #16/#43).
 
+**Cross-cutting dependencies (`06`–`11`).**
+- **`06` (build/toolchain) gates everything and is a *prerequisite*, not a peer.** No `MTL` target
+  compiles, and no runtime gate exists, until the macOS 26 SDK wiring, the SPIRV-Cross vendoring,
+  and the availability guards are in place. It is a build-layer prerequisite for `03` and a
+  packaging prerequisite for `05`.
+- **`10` (RSX-native architecture) sits *above* 01–05.** It consumes their inventories but re-orders
+  the implementation (hazard-derived scheduler replaces the render-pass cache; argument table
+  replaces descriptor sets), and should be read *before* Phase 1 is committed.
+- **`11` (verification loop) is orthogonal and parallel.** It depends only on the backend-agnostic
+  capture/replay substrate that already exists and should be built *with* Phases 0–1, not after,
+  because it is what makes Phase 1 measurable.
+- **`07` and `08` are cross-references.** `07` supplies the oracle ladder that `11` implements; `08`
+  supplies the row-level LOC that `10` re-baselines. Neither adds a build-order constraint.
+
 ---
 
 ## 6. Consolidated impossibility / not-recommended register
@@ -399,8 +551,10 @@ rank where applicable. Verdicts: **impossible** = no Metal API path; **not-recom
 expressible but a known trap; **hard** = real design needed; **opportunity** = optional upside.
 
 > Deduped from **77 raw register entries** — 01 §4 (7) + 02 §4 (9) + 03 §4 (12) + 04 §4 (11) +
-> 05 §4 (10) + 05 §9 (28 ranks) — to **37 merged rows** below. Where two docs disagreed the
-> corrected position is stated explicitly.
+> 05 §4 (10) + 05 §9 (28 ranks) — to **37 merged rows** (R1–R37) below. Where two docs disagreed
+> the corrected position is stated explicitly. **§6.1** records how the RSX-native frame (`10` §9)
+> re-scores those rows; **§6.2** adds the rows contributed by the engineering scopes (`06`–`11`:
+> R38–R47, RN1–RN3).
 
 | # | Item | Verdict | Owning scope | Corrected position / why | Best-known workaround | Provenance |
 |---|---|---|---|---|---|---|
@@ -441,6 +595,19 @@ expressible but a known trap; **hard** = real design needed; **opportunity** = o
 | R35 | **Explicit Vulkan memory model (`Coherent`/`Volatile`) reliance** | not-recommended | 02 (+01) | Metal 4 treats all resources untracked; coherency semantics differ; MSL has documented miscompiles (KK W6/W15). | Explicit barriers; don't rely on Vulkan memory-model guarantees. | 05 §4 item9, §9 rank4; 01 §1.5 |
 | R36 | **`VkAllocationCallbacks` / queue-family ownership transfers** | impossible / meaningless | 05/02 | Metal has no allocator hooks (MVK ignores); single queue family makes ownership transfers meaningless. | Delete. | 05 §4 item10; 02 §4 item5 |
 | R37 | **Pipeline-cache & shader-cache forward-compat; Xcode GPU capture; `MTL4Compiler` concurrency; ML encoder** | tricky / opportunity | 03 (+tooling) | `vk::shader_cache` keys on `"vulkan"`; needs a `"metal"` namespace. KK W8 Rosetta heap-size breaks capture. `MTL4MachineLearningCommandEncoder` is an unused opportunity. | New `"metal"` cache namespace + `MTL4PipelineDataSetSerializer`; one compiler per device; Metal capture in scheme. | 05 §9 rank20/rank25/rank27/rank28; 03 T7 |
+| R38 | **Metal 4 on Intel/x86_64, or on macOS ≤ 25** | impossible | 06 | Metal 4 was built Apple-silicon-first; the supported-hardware set excludes Intel entirely. A hardware+OS wall, not a switch. | Keep Intel on MoltenVK; arch-exclude the `MTL` sources (mirror `bundle_should_include(kosmickrisp)`). | 06 §3.1, §9.1 |
+| R39 | **Build-time precompilation of game shaders** | impossible | 06 | The shader set is generated at runtime from RSX ucode — per-title and unbounded. There is nothing to precompile ahead of time. | Runtime `MTL4Compiler` + the `"metal"` shader-cache namespace. | 06 §2.3, §9.2 |
+| R40 | **A "Metal 3 fallback" as a build flag** | not-recommended | 06 | Metal 3 and 4 differ in the *command model* (submission/sync/encoders/binding/compiler), not a capability toggle — a fallback is a **second backend**. | MoltenVK already *is* the pre-26 fallback; ship MVK on ≤ 25. | 06 §4, §9.3 |
+| R41 | **Dependable Metal execution on standard GitHub-hosted macOS runners** | impossible | 06/07 | Hosted runners expose no dependable `MTLDevice`; the whole GPU half of the verification loop is unavailable there. | Self-hosted Apple-silicon runner for the GPU tiers (07 §9.4); GPU-free rungs (H0/H1/H2 + null device) stay in hosted CI. | 06 §7.3; 07 §9.4 |
+| R42 | **Compiler-enforced availability gating under metal-cpp** | impossible | 06 | metal-cpp's `MTL4*` headers carry **no `API_AVAILABLE`** (verified: 0 files), so an unguarded `MTL4*` reference compiles and crashes at load on macOS 15–25. | A manual `@available`/`__builtin_available` guard on every entry point + one central `supportsFamily(MTLGPUFamilyMetal4)` check. | 06 §3.4 |
+| R43 | **A local pixel oracle / golden-image suite** | hard | 07 | RPCS3 has no golden-image GPU suite; cross-backend agreement is on a *different* rasteriser (TBDR vs not), so false positives **and** negatives are expected. | Differential goldens + a *classified* tolerance model + the rung-3 guest-readback spike. | 07 §2.1, §2.2, §3.4 |
+| R44 | **One call issuing N draws *with* per-draw argument-table binds (ICB for draws)** | impossible / not-recommended | 09 | ICBs carry no argument table (`MTLIndirectCommandEncoder.hpp`); indirect draws carry only draw args, not binds. Any "one call, N fully-different draws" design is not expressible. | Host-built indirect batches sharing **one** argument table (RN2 / strategy C). | 09 §9, §4 |
+| R45 | **Parallel per-draw encoding within a pass** | not-recommended | 09 | The encoder is stateful and order-sensitive, and RSX state is a serial FIFO; only *independent* command buffers may encode in parallel. | Parallelise only across independent CBs (transfer/compute), one allocator per thread. | 09 §9, §5.2 |
+| R46 | **GPU-driven culling / compute-generated draws as a first milestone** | not-recommended | 09 | No RSX scene-graph analogue; KK leaves it a TODO. No correctness payoff for MVP. | Defer; use GPU work only for the conditional-render predicate (R6). | 09 §9, §6.2 |
+| R47 | **Naively breaking the pass at every `vk::renderpass_op` boundary** | not-recommended | 09 | On TBDR each boundary is a store+reload of **all** attachments (a tile-memory flush). | Pass merge with suspend/resume, driven by the hazard scheduler (RN1). | 09 §9, §3 #12 |
+| RN1 | **Surface-hazard encoder scheduler** | hard | 10 | RSX has no render-pass object; the backend must synthesise `MTL4RenderPassDescriptor`s from `surface_store` R/W/cyclic hazards while preserving TBDR tile locality. `diff 4` — the plan's make-or-break. | Hazard-derived pass boundaries + barriers; explicitly **not** a VK-style render-pass cache. | 10 §4.3, §5, §9 |
+| RN2 | **Draw-clause indirect batcher** | hard | 10/09 | Needed for the `09` §7.2 win (`diff 3–4`). Requires a batch to share one argument table — a hard dependency on the binding-model decision. | `MTLDraw*IndirectArguments` + predicate patch + a shared frame-wide argument table. | 10 §9; 09 §4, §7 |
+| RN3 | **Constant-buffer substitution for the VS/FS push-constant blocks** | hard | 10 | Removes R15 (no `setBytes`): the VS 4B `draw_parameters_offset` and the FS 28B blend block move to constant-buffer entries. `diff 2`. | Constant-buffer entries in the argument table; must stay coherent with the `draw_parameters` SSBO lifetime. | 10 §9, §4.2 |
 
 **Not-recommended hygiene (kept out of the ranked table to avoid noise):** one render encoder per
 RPCS3 draw (02 §4 NR1 — TBDR flushes tile memory at each encoder boundary); `MTL4VisibilityOptionResourceAlias`
@@ -453,12 +620,55 @@ SPIR-V→MSL backend (03 §4 NR3); relying on `SEPARATE_SHADER_OBJECTS` (03 §4 
 **Impossible rows with low RSX impact** (R5, R32, R33): they matter for *helper* passes and for
 sharing code with MoltenVK, not for MVP.
 
+### 6.1 Register deltas under the RSX-native frame (`10` §9)
+
+Designing from the RSX contract rather than from Vulkan **creates no new API impossibilities, but it
+re-scores several R-rows**, because their difficulty was a property of the *Vulkan object*, not of
+RSX:
+
+- **Moot under RSX-first** (the construct never appears): **R5** (sparse binding), **R32**
+  (geometry/tess/TF/pipeline-stats), **R33** (fp64/atomics), **R36** (`VkAllocationCallbacks`/
+  queue-family), **R3** (descriptor sets/layouts → argument table), **R15** (push constants →
+  constant buffers, see RN3), **R9** (`DEPENDENCY_BY_REGION`/subpass self-deps), **R24** (dynamic
+  `LINE_WIDTH` — kept only as a clamp-to-1.0 loss, not a design item).
+- **Reshaped** (the RSX requirement survives; the Vulkan *shape* was the hard part): **R1** (the
+  encoder *is* the pass), **R6** (CPU skip → compute predicate-patch), **R7** (sync anchored on
+  surface hazards; the stage-gated wait need not be reproduced), **R8** (one monotonic
+  `MTLSharedEvent` + commit feedback; object-level vocabulary collapses), **R12** (visibility
+  buffer; the pass-spanning problem becomes a *scheduler* concern), **R13** (one serial FIFO; async
+  is upload-only, batched as CBs), **R14** (already software-pulling; only the texel-buffer binding
+  remains), **R4** (`passthrough_dma=false` + a shared `MTLBuffer`). **R17** is **likely moot** —
+  `setSamplerState` binds samplers outside argument-buffer accounting (`[U]`, needs the SDK spike).
+- **Unchanged** (framing-independent): R2, R10, R11, R16, R18–R23, R25–R31, R34, R35, R37 — MSL
+  correctness, per-title quirks, exploded MSAA, border/LOD/texel-views, drawable ring,
+  `CAMetalLayer`-from-Qt, pacing, blit/tiling, MetalFX, screenshots, savestate, stereo, sample mask,
+  memory model, pipeline/shader cache.
+
+**Net:** the register loses 8 rows wholesale and re-labels ~9, but **the rows that remain hard —
+R1/R6/R11/R12/R16, R10's workaround surface, R43/R44/R47 and RN1/RN2 — are exactly the ones the
+reorientation does *not* make easier.** That is why §2 verdict 8 calls RSX-first a ~15–20% *reshape*,
+not a halving.
+
+### 6.2 New rows from the engineering scopes (`06`–`11`)
+
+R38–R47 and RN1–RN3 are in the table above; grouped by kind:
+
+- **Platform walls (`06`):** R38 (no Metal 4 on Intel/≤ 25), R41 (no dependable Metal on hosted CI),
+  R42 (availability not compiler-enforced under metal-cpp). These are *constraints*, not defects —
+  they shape packaging and CI, not the backend body.
+- **Product posture (`06`):** R39 (no build-time shader precompile), R40 (no Metal 3 build).
+- **Verification (`07`):** R43 (no local pixel oracle) — the project risk.
+- **Encode / dispatch (`09`):** R44 (no ICB-for-draws), R45 (no parallel per-draw encoding), R46
+  (no GPU-driven first milestone), R47 (no naive pass breaks).
+- **Net-new RSX-native work (`10`):** RN1 (hazard scheduler), RN2 (indirect batcher), RN3 (constant
+  buffers) — the items the RSX-first plan *introduces* in exchange for the deletions in §4.
+
 ---
 
 ## 7. Suggested implementation phasing
 
-Derived from the difficulty ratings and §5's dependency graph. Effort estimates are
-order-of-magnitude from `../05-metal-backend-northstar.md`; they are not schedules.
+Derived from the difficulty ratings and §5's dependency graph, and **reconciled with `08` §8.3 and
+`10` §6.1**. Effort estimates are order-of-magnitude; they are not schedules.
 
 **Phase 0 — Bring-up (weeks–low months).** Device (`CreateSystemDefaultDevice`), one
 `MTL4CommandQueue` + allocator, `CAMetalLayer` creation on the `QWindow` (`setWantsLayer:YES`),
@@ -494,13 +704,35 @@ per-title quirks (R11), and the **KK workaround register** (R10).
 04 (RTT/MSAA/copies). 05 can proceed in parallel after 01. §4 shifts #1 (barriers) and #5 (push
 constants) are the two items most likely to stall Phase 1–2.
 
+**Reconciliation with the cross-cutting scopes (`06`–`11`).** Three independent bottoms-up estimates
+now exist and bracket the same range:
+
+| Source | Phase-1 / MVP figure | Whole-backend figure | Basis |
+|---|---|---|---|
+| `05` (northstar) | ~6–12 person-months | — | capability framing |
+| `08` §8.1–§8.2 (bottom-up rows) | **8–12k LOC** | **20–35k LOC** (centre ~25k) | 60 rows / 112 files / 34,213 VK LOC |
+| `10` §6.1 (RSX-first revision) | **~7–10k LOC** | **18–25k LOC** (centre ~21k) | `08` minus ~5–7k of deleted scaffolding |
+
+Three adjustments the cross-cutting scopes force on the phases above:
+
+1. **Phase 0 grows by `06`.** macOS 26 SDK wiring, SPIRV-Cross vendoring, availability guards, and
+   packaging/signing are a *prerequisite*, not a Phase-1 detail (`06` §5–§6).
+2. **The verification loop (`11`) is not a final phase — it starts in Phase 0.** The H0/H1 rungs
+   (GPU-free unit tests + `xcrun metal` shader-translate) and the recording seam should land with
+   Phases 0–1, because they are what makes Phase 1 measurable; the RRC-driven rungs (H3–H7) attach as
+   soon as the backend is a `video_renderer` (`11` §8).
+3. **If `10`'s RSX-first plan is adopted, the *shape* of Phases 1–3 changes** even though the order
+   does not: the render-pass cache is replaced by the hazard scheduler (RN1), descriptor-set work by
+   argument-table work, and the push-constant transient buffer by constant-buffer entries (RN3).
+
 ---
 
 ## 8. Open questions for the human
 
-Merged and deduplicated from the five docs' `## 7. Open questions` sections; only decisions a human
+Merged and deduplicated from all eleven docs' `## … Open questions` sections; only decisions a human
 genuinely must make are kept. *(05's "re-verify §9 provenance once 01–04 land" is now resolved by
-this merge and is dropped.)*
+this merge and is dropped; questions `06`–`11` raise that are *already answered* above — the
+push-constant `setBytes` surface (Q16) and the sampler-cap bypass (Q27) — are not repeated.)*
 
 **Product / target-scope decisions**
 1. **Intel/AMD Mac support.** Support the `Managed` storage-mode path (and `didModifyRange:`), or
@@ -592,12 +824,69 @@ this merge and is dropped.)*
 34. **`data_heap` shadow.** Keep the VRAM-shadow + blit design, or use persistent shared rings
     everywhere given unified memory (TBDR economics may differ)? (01 §7 Q6.)
 
+**Cross-cutting: build, platform & CI decisions (`06`–`07`)**
+
+35. **Native renderer floor: macOS 26 or 27?** The Metal 4 API floor is 26; the existing *KK* gate is
+    27. Pick one gate for both the native backend and KK. (06 §3.6)
+36. **Keep shipping the Intel build?** MoltenVK-only with the `MTL` sources arch-excluded, or drop
+    Intel entirely (macOS 27 reportedly ends Intel support)? (06 §3.5)
+37. **metal-cpp vs direct Obj-C++** — and the **license posture**: metal-cpp is Apache-2.0 compiled
+    *into* a GPLv2 binary, vs MoltenVK's *separately-loaded* dylib. SPIRV-Cross (MIT) is fine. (06 §5.1)
+38. **Runtime-only MSL, or offline-precompile the fixed helper shaders?** The latter pulls the ~700 MB
+    Metal toolchain into the build. (06 §2.3)
+39. **Should the macOS build be able to build *without* Vulkan** (`USE_VULKAN=OFF`) once a native
+    backend exists? (06 §5.3)
+40. **CI budget:** compile + MSL validation only, a self-hosted arm64/macOS-26 nightly, or a paid GPU
+    runner? (06 §7.4; 07 §9.4)
+
+**Cross-cutting: verification decisions (`07` + `11`)**
+
+41. **Is a self-hosted Apple-silicon runner acceptable** to unlock GPU CI, or must everything be
+    hosted (in which case GPU verification is permanently manual)? — the single biggest lever. (07 §9.4)
+42. **Do we adopt golden-image tests at all**, given driver/GPU-family drift and the re-baseline
+    burden, or keep verification to capture-replay + `frame_debug` diffs + human review? (07 §3.4)
+43. **Tolerance definition for rung 4:** exact metric, thresholds, per-region buckets? (07 §4.3)
+44. **Do we invest in rung 3** (guest-observable readback/MSAA/ZCULL correctness)? It is the only
+    objective oracle, but its scope is unknown. (07 §2.2; 11 Q3)
+45. **Capture corpus:** what set represents "enough" coverage, and where do the `.rrc.gz` files live
+    (repo size, licensing)? Who owns it, and what minimum gates a merge? (07 §3.3; 11 Q2)
+46. **Does the RRC format record enough for a *pixel-complete* replay** of every title (spilled
+    surfaces, MSAA resolve history)? H5/H6 depend on it. (11 Q3)
+47. **Is the null device worth building** to bring H2/H3 into hosted CI? (11 Q1)
+48. **Ship a Metal Performance HUD / timestamp overlay** in addition to the existing CPU overlay, or
+    keep the overlay CPU-only and use the HUD for GPU numbers? (07 §7.4)
+49. **`MTL_SHADER_VALIDATION` in Tier B:** always-on or per-pipeline? (07 §6.2)
+50. **Residency-set cap (32)** in the texture cache without per-frame residency churn? (07 §8.2)
+
+**Cross-cutting: architecture decisions (`08`–`10`)**
+
+51. **The strategic gate: is a native backend worth it at all**, versus a healthy KosmicKrisp (which
+    already runs directly on Metal 4), given that RPCS3 is CPU-limited and Dolphin's native-Metal win
+    over *healthy* MoltenVK was only +23%/+30%? Decide **before** any scheduler work. (10 §10.1) —
+    **the top decision in the whole set.**
+52. **Commit to a hazard-derived pass scheduler** (RSX-first) rather than a VK-style render-pass
+    cache? If declined, `10`'s savings evaporate and the plan degenerates to the `08` port. (10 §10.2; RN1)
+53. **Binding-model ceiling: one frame-wide argument table mutated per draw, or per-state tables?**
+    Strategy-C indirect batching needs a *batch* to share one table. (09 Q1; 10 Q3)
+54. **Uniformity vs fast path:** model *every* RSX draw as indirect (KK-style), or keep direct /
+    instanced on the fast path and go indirect only for subrange batches? (09 Q2)
+55. **Shading contract:** may we extend it with extra per-draw indirection (beyond the
+    `draw_parameters` SSBO) so indirect batches can share one argument table? (09 Q5)
+56. **`supports_last_provoking_vertex = false`:** which titles regress under the smooth-interpolation
+    fallback? (10 §10.6)
+57. **ICB research budget:** spike how ICB binds resolve under Metal 4, or declare ICBs out of scope
+    for draws and revisit only if a GPU-driven need appears? (09 Q7)
+58. **Profiling in milestone 1:** require `MTL4CounterHeap` timestamps, or is the CPU
+    `setup_time`/`draw_exec_time` overlay enough to judge the win/loss? (09 Q6)
+59. **Can the generic caches bind under ~2k LOC of `MTLTraits`?** A stub-compile spike decides whether
+    RN1 is diff-4 or diff-5. (08 §10.1)
+
 ---
 
 ## 9. Sources
 
-Merged and deduplicated from the five docs' `## 8. Sources` sections. *(Detail docs carry
-additional per-scope citations inline in their own §8; this is the consolidated URL list.)*
+Merged and deduplicated from all eleven docs' `## … Sources` sections. *(Detail docs carry
+additional per-scope citations inline in their own sources section; this is the consolidated list.)*
 
 **Apple — Metal 4 & core API**
 - Understanding the Metal 4 core API — <https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api>
@@ -777,6 +1066,21 @@ additional per-scope citations inline in their own §8; this is the consolidated
 - Dolphin Progress Report Jul–Aug 2022 — <https://dolphin-emu.org/blog/6I/>
 - brackeen/gltf-viewer (metal-cpp) — <https://github.com/brackeen/gltf-viewer>
 
+**Added by the cross-cutting scopes (`06`–`11`)**
+- Apple — `MTL4Compiler` — <https://developer.apple.com/documentation/metal/mtl4compiler>
+- Apple — `MTL4Archive` — <https://developer.apple.com/documentation/metal/mtl4archive>
+- Apple — `MTLIndirectCommandBuffer` — <https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer>
+- Apple — `MTLDrawPrimitivesIndirectArguments` — <https://developer.apple.com/documentation/metal/mtldrawprimitivesindirectarguments>
+- Apple — `MTLDevice.supportsFamily(_:)` / `MTLGPUFamily` — <https://developer.apple.com/documentation/metal/mtldevice/supportsfamily(_:)>
+- Apple — Monitoring your Metal app's graphics performance (HUD) — <https://developer.apple.com/documentation/xcode/monitoring-your-metal-apps-graphics-performance>
+- Apple — Metal developer tools: `MTL_DEBUG_LAYER`, `MTL_SHADER_VALIDATION`, `MTL_HUD_ENABLED`, `.gputrace` capture (see `06` §7, `07` §6–§7)
+- Apple — `MTL4PipelineDataSetSerializer`, `MTL4BinaryFunction`, `MTL4StaticLinkingDescriptor`, `MTL4SpecializedFunctionDescriptor` (metal-cpp headers, listed above; see `06` §2.5)
+- RPCS3 in-repo (build / packaging / CI) — `.ci/build-mac-homebrew.sh`, `.ci/deploy-mac-homebrew.sh`, `.github/workflows/rpcs3.yml`, `rpcs3/rpcs3.plist.in`, `3rdparty/CMakeLists.txt` (`06` §2–§7)
+- RPCS3 in-repo (capture / replay) — `rpcs3/Emu/RSX/Capture/rsx_replay.h`, `rsx_replay.cpp`; `rpcs3/Emu/RSX/RSXThread.cpp`; `RSXFIFO.cpp` (`11` §3)
+- Mesa KosmicKrisp — `src/kosmickrisp/kk_cmd_draw.c` (multi-draw-with-indirect precedent; `09` §3)
+- Comparable ports & scope discussions (`08` §9, `10` §10.1) — Dolphin native-Metal progress reports and Godot `drivers/metal` (both listed above); **PPSSPP**, **DuckStation**, **Ryujinx** (chose *patched MoltenVK* over a native backend); RPCS3 issue #11922
+- `actions/runner-images` (macOS runner GPU availability) — <https://github.com/actions/runner-images> (`07` §9.4)
+
 **RPCS3 in-repo (read-only)** — see each detail doc's §8 for the full `VK/` file list; the load-bearing
 subsystem inventory is in [`../03-rpcs3-backend-architecture.md`](../03-rpcs3-backend-architecture.md)
 and the northstar/effort framing in [`../05-metal-backend-northstar.md`](../05-metal-backend-northstar.md).
@@ -784,6 +1088,9 @@ and the northstar/effort framing in [`../05-metal-backend-northstar.md`](../05-m
 ---
 
 *End of master synthesis. Per-scope detail, full inventories, code sketches and per-scope
-references remain in the five `NN-*.md` docs. Unverified items are marked `[U]`; the three highest-
-risk `[U]` items are 03 §7 Q1 (push-constant `setBytes`), 03 §7 Q2 (MSL version), and 04 §7 Q6
-(argument-table sampler cap bypass).*
+references remain in the eleven `NN-*.md` docs. Unverified items are marked `[U]`; the highest-risk
+ones are 03 §7 Q1 (push-constant `setBytes` — made *non-blocking* by the RSX-first constant buffers,
+RN3), 03 §7 Q2 (MSL version), 04 §7 Q6 (`setSamplerState` vs the 1024-sampler cap), 08 §10.1 /
+10 §10.7 (whether `MTLTraits` binds the generic caches under ~2k LOC — decides RN1's difficulty),
+09 §4-D (how ICB binds resolve under Metal 4), and 11 Q3 (whether RRC records enough for a
+pixel-complete replay — H5/H6 depend on it).*

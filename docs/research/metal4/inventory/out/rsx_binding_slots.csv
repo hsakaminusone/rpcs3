@@ -1,0 +1,13 @@
+name,slot,source
+vertex_params_bind_slot,0,pipeline_binding_table.h:9
+vertex_constant_buffers_bind_slot,1,pipeline_binding_table.h:10
+fragment_constant_buffers_bind_slot,2,pipeline_binding_table.h:11
+fragment_state_bind_slot,3,pipeline_binding_table.h:12
+fragment_texture_params_bind_slot,4,pipeline_binding_table.h:13
+vertex_buffers_first_bind_slot,5,pipeline_binding_table.h:14
+conditional_render_predicate_slot,8,pipeline_binding_table.h:15
+rasterizer_env_bind_slot,9,pipeline_binding_table.h:16
+instancing_lookup_table_bind_slot,10,pipeline_binding_table.h:17
+instancing_constants_buffer_slot,11,pipeline_binding_table.h:18
+textures_first_bind_slot,12,pipeline_binding_table.h:19
+vertex_textures_first_bind_slot,12,pipeline_binding_table.h:20
