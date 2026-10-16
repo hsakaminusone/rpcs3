@@ -21,7 +21,7 @@ inert rows (`moot`, `impossible`, `na`) need no code.
 | `nv0039-dma` | 10 | `MTLNv0039Dma` | the transfer descriptor, the validity rule and the visibility point; the byte copy is the shared handler |
 | `nv2d-surface` | 7 | `MTLNv2dSurface` | the destination descriptor, the format map and the pitch rule; the copy and the swizzle kernel need the compute encoder |
 | `nv3089-image` | 15 | `MTLNv3089Image` | the source state, the format map, the clip rule, the interpolation and the mirror test; the copy needs the compute encoder |
-| `nv308a-image` | 6 | none | not started |
+| `nv308a-image` | 6 | `MTLNv308aImage` | the upload state, the store kind, the offset rule and the RGB565 rounding; the host store needs the guest window and the compute encoder |
 
 ## Reuse-only clusters
 

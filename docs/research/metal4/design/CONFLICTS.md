@@ -5,6 +5,10 @@ The rule: record the dial, both references, and move on.  Never rewrite either
 side silently.  The RSX tree wins on what the RSX does.  A design doc wins on how
 we re-express the RSX in Metal 4.
 
+A citation conflict is a place where a design doc points at the wrong line of the
+tree or of the inventory.  The register records it the same way, under the `X`
+prefix.  A citation conflict changes no design decision.
+
 ---
 
 ## C1 — the clear region
@@ -161,5 +165,20 @@ The LLD text is left unchanged for its author to correct.
 **Open.** Unverified against a title.  A quad strip is not a triangle strip in
 vertex order, so a title that draws one may show wrong triangles.  The tree's
 reading is consistent across both shipping backends, so this port follows it.
+
+---
+
+## X1 — the `nv308a.cpp` inventory citation
+
+**Design doc says.** `LLD-nv308a-image.md:32` and `:301` cite
+`inventory/out/SUMMARY.md:518` for the `nv308a.cpp` "0 functions" row.
+
+**The tree says.** The row is at `inventory/out/SUMMARY.md:520`.  Line 518 is
+`nv0039.cpp`.
+
+**Resolution.** The claim is correct: the generator does not count
+`nv308a::color::impl`, a nested static member, so `nv308a.cpp` reports 0.  Only
+the citation is off by two lines.  The LLD text is left unchanged for its author
+to correct.
 
 <!-- doc-end -->

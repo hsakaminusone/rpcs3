@@ -701,6 +701,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLNv0039Dma.cpp
         RSX/MTL/MTLNv2dSurface.cpp
         RSX/MTL/MTLNv3089Image.cpp
+        RSX/MTL/MTLNv308aImage.cpp
     )
 endif()
 
