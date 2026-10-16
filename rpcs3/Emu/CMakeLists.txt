@@ -687,6 +687,7 @@ if(TARGET 3rdparty_metal)
     target_sources(rpcs3_emu PRIVATE
         RSX/MTL/MTLDevice.cpp
         RSX/MTL/MTLResourceManager.cpp
+        RSX/MTL/MTLCommandRecorder.cpp
         RSX/MTL/MTLFormats.cpp
         RSX/MTL/MTLSurfaceState.cpp
         RSX/MTL/MTLDepthStencil.cpp

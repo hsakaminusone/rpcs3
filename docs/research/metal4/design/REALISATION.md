@@ -60,4 +60,9 @@ residency sets, and the deferred-release list. It is the gate for the surface st
 and for the texture cache. The device layer also imports the guest window as one
 no-copy buffer, so a guest address is a buffer offset.
 
+The command recorder (C4) is the second layer. `MTLCommandRecorder` owns a ring of
+three frame slots, each with one allocator, one reusable command buffer, and one
+argument table per stage. It is the only way to open a pass, close an encoder, or
+submit, so the recorded stream is one chokepoint.
+
 <!-- doc-end -->
