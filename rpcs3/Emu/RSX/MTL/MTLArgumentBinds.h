@@ -41,7 +41,28 @@ namespace mtl
 		// are that default, not a settled answer.
 		vertex_draw_params_slot = texture_slot_base + fragment_texture_count, // 28
 		fragment_blend_slot = vertex_draw_params_slot + 1,                    // 29
+
+		// The derived fragment texture range.  HLD-05 §3.2 gives no index to the
+		// stencil mirror, the depth-compare fetch or the programmable-blend inputs,
+		// so they continue above the substituted slots.  A buffer and a texture may
+		// share an index because each stage's MTL4::ArgumentTable keeps the two
+		// spaces apart, but the range starts above both so the documented values of
+		// the substituted slots never move.
+		//
+		// The programmable-blend inputs are an intermediate only: the MSL
+		// cross-compiler turns each into a [[color(i)]] fragment input, so they
+		// never reach the argument table.
+		fragment_stencil_slot_base = fragment_blend_slot + 1,                             // 30
+		fragment_subpass_slot_base = fragment_stencil_slot_base + fragment_texture_count, // 46
+		fragment_depth_input_slot = fragment_subpass_slot_base + 4,                       // 50
 	};
+
+	// The argument-table shape follows the map, so a new slot cannot overflow the
+	// table in silence (HLD-05 §4 invariant 3).  The counts are the highest index
+	// in each space, plus one.
+	constexpr u32 argument_buffer_count = fragment_blend_slot + 1;        // 30
+	constexpr u32 argument_texture_count = fragment_depth_input_slot + 1; // 51
+	constexpr u32 argument_sampler_count = argument_texture_count;
 
 	// One RSX texture unit occupies one index in two tables because MSL has no
 	// combined image sampler: the image is a texture entry and its state a sampler

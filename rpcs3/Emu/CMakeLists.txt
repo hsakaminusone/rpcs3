@@ -711,6 +711,10 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLNv308aImage.cpp
         RSX/MTL/MTLShader.cpp
         RSX/MTL/MTLProgramPipeline.cpp
+        RSX/MTL/MTLVertexProgram.cpp
+        RSX/MTL/MTLFragmentProgram.cpp
+        RSX/MTL/MTLPresenter.cpp
+        RSX/MTL/MTLMetalLayer.mm
     )
 endif()
 

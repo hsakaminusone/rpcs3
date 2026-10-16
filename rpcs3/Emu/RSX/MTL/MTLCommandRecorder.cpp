@@ -30,6 +30,12 @@ namespace mtl
 			{
 				die("command recorder allocation failed");
 			}
+
+			// The commit options are per slot and the slot index is fixed, so the
+			// handler is registered once here and never rebuilt (HLD-04 §3.2).
+			const u32 index = static_cast<u32>(&slot - m_slots.data());
+			slot.commit_options = MTL4::CommitOptions::alloc()->init();
+			slot.commit_options->addFeedbackHandler([this, index](MTL4::CommitFeedback* feedback) { on_feedback(index, feedback); });
 		}
 
 		descriptor->release();
@@ -82,11 +88,8 @@ namespace mtl
 			m_resources->garbage_collect();
 		}
 
-		if (slot.commit_options)
-		{
-			slot.commit_options->release();
-			slot.commit_options = nullptr;
-		}
+		// The commit options live for the recorder's lifetime, so nothing to
+		// recycle here (HLD-04 §3.2).
 
 		// Never reset an allocator while its GPU work is in flight (HLD-01 §4.7).
 		slot.allocator->reset();
@@ -104,16 +107,32 @@ namespace mtl
 		// Every bound allocation must be resident before the commit (HLD-02 I5).
 		m_resources->commit_frame();
 
-		const u32 index = m_slot;
 		slot.in_flight.store(true);
-
-		slot.commit_options = MTL4::CommitOptions::alloc()->init();
-		slot.commit_options->addFeedbackHandler([this, index](MTL4::CommitFeedback* feedback) { on_feedback(index, feedback); });
 
 		const MTL4::CommandBuffer* buffers[] = { slot.command_buffer };
 		m_queue->commit(buffers, 1, slot.commit_options);
 
+		// The drawable is signalled only after the commit that fills it, so the
+		// present is ordered behind the frame (C7, HLD-03 §4.9).
+		if (m_drawable)
+		{
+			m_queue->signalDrawable(m_drawable);
+			m_drawable = nullptr;
+		}
+
 		m_slot = (m_slot + 1) % frame_slot_count;
+	}
+
+	void command_recorder::set_present_drawable(MTL::Drawable* drawable)
+	{
+		// The wait must precede the encoding, because the drawable's texture is the
+		// copy destination.
+		if (drawable)
+		{
+			m_queue->wait(drawable);
+		}
+
+		m_drawable = drawable;
 	}
 
 	MTL4::RenderCommandEncoder* command_recorder::open_pass(const MTL4::RenderPassDescriptor* descriptor, MTL4::RenderEncoderOptions options)

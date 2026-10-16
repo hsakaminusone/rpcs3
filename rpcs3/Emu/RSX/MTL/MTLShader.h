@@ -4,7 +4,6 @@
 
 #ifdef RSX_ENABLE_METAL4
 
-#include <array>
 #include <string>
 #include <vector>
 
@@ -26,35 +25,6 @@ namespace mtl
 	// MSL -> MTL::Library (HLD-05 §3.4).  One MTL4::Compiler per device
 	// (workaround W11).  Null on a compile error; `error` carries the diagnostic.
 	MTL::Library* compile_msl(MTL4::Compiler* compiler, const std::string& msl, NS::Error** error);
-
-	// --- The three MSL post-passes (HLD-05 §2.4) ---
-	// Pure text transforms, so they are unit-testable without a GPU.  Each takes
-	// the whole MSL source and returns the rewritten source.
-
-	// (1) Programmable blending.  SPIRV-Cross emits an input attachment as
-	// `texture2d<float> NAME [[texture(N)]]` and reads it with
-	// `NAME.read(uint2(gl_FragCoord.xy))`.  The tile framebuffer fetch is a
-	// `[[color(color_index)]]` fragment input instead (HLD-05 §2.4, §3.2).
-	std::string rewrite_programmable_blend(std::string msl, u32 color_index);
-
-	// (2) Push-constant substitution.  SPIRV-Cross already emits a push-constant
-	// block as `constant BLOCK& NAME [[buffer(N)]]`.  MSL has no push constants,
-	// so the RSX substituted slot (HLD-05 §3.3, §3.2 †) must be the buffer index.
-	// The caller passes the GLSL block name; an empty name is a no-op.
-	std::string rewrite_push_constant_slot(std::string msl, const std::string& block_name, u32 slot);
-
-	// (3) Border-colour / LOD-bias injection (04 R18/R19).  Neither is
-	// expressible in MSL sampler state, so a helper is injected and the named
-	// texture's two-argument sample call is routed through it.
-	struct sampler_injection
-	{
-		std::string texture;          // the MSL texture variable
-		std::string sampler;          // its MSL sampler variable
-		f32 lod_bias = 0.0f;          // RSX mip LOD bias (04 R19)
-		bool border_enabled = false;  // RSX border colour (04 R18)
-		std::array<f32, 4> border{};  // the border RGBA
-	};
-	std::string inject_sampler_border_and_lod(std::string msl, const sampler_injection& spec);
 }
 
 #endif // RSX_ENABLE_METAL4

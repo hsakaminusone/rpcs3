@@ -18,7 +18,9 @@ namespace mtl
 	//
 	// This header stays free of metal-cpp so the UI can name the renderer:
 	// gcm_enums.h:1183 has `using namespace gcm`, which makes Objective-C's
-	// `Method` ambiguous in a TU that reaches metal-cpp afterwards.
+	// `Method` ambiguous in a TU that reaches metal-cpp afterwards.  The backend
+	// objects sit behind one opaque type for the same reason, so this header also
+	// stays free of the RSX headers the UI must not reach.
 	class MTLGSRender : public GSRender
 	{
 	public:
@@ -28,9 +30,15 @@ namespace mtl
 		u64 get_cycles() override;
 		void on_init_thread() override;
 		void on_exit() override;
+		void flip(const rsx::display_flip_info_t& info) override;
 
 	private:
+		// The resource layer, the command recorder, the surface store and the
+		// presenter.  Defined in the .cpp.
+		struct frame_resources;
+
 		std::unique_ptr<device> m_device;
+		std::unique_ptr<frame_resources> m_frame_resources;
 	};
 }
 
