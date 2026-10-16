@@ -9,7 +9,7 @@ inert rows (`moot`, `impossible`, `na`) need no code.
 | cluster | live | C++ unit | status |
 |---|---|---|---|
 | `surface` | 25 | `MTLSurfaceState` | latched |
-| `depth-rop` | 30 | `MTLDepthStencil` | latched, 22 of 30; the AA control, the depth bounds, ZCULL and `SET_ZSTENCIL_CLEAR_VALUE` need the pass substrate |
+| `depth-rop` | 30 | `MTLDepthStencil` | latched, 23 of 30; the depth bounds, ZCULL and `SET_ZSTENCIL_CLEAR_VALUE` need the pass substrate |
 | `raster` | 23 | `MTLRasterState` | latched |
 | `vertex` | 25 | `MTLVertexState` | slot map and shader key; the streams, the transform constants and the instancing operands are reused |
 | `texture` | 13 | `MTLSamplerState` | the sampler; the cache, the format and the program rows need the texture cache and the compiler |
@@ -65,15 +65,17 @@ three frame slots, each with one allocator, one reusable command buffer, and one
 argument table per stage. It is the only way to open a pass, close an encoder, or
 submit, so the recorded stream is one chokepoint.
 
-The command recorder (C4) is the second layer. `MTLCommandRecorder` owns a ring of
-three frame slots, each with one allocator, one reusable command buffer, and one
-argument table per stage. It is the only way to open a pass, close an encoder, or
-submit, so the recorded stream is one chokepoint.
-
 The barrier chokepoint (C3, first half) is the third layer. `MTLBarrier` carries the
 producer, consumer and visibility of one edge, decides whether the two sides are
 legal inside one encoder, and emits the intra-pass form. A `false` return is a
-pass-split request that the pass scheduler resolves; the scheduler is not built yet.
+pass-split request, which the pass scheduler resolves.
+
+The pass scheduler (C3, second half) is its pair. `MTLPassScheduler` derives the
+encoder boundaries from the hazards: it tracks the writer and the reader of each
+resource in the open pass, queues the barrier that a WAR or RAW edge needs, and
+raises a split request when the edge is not legal inside one encoder. It never
+opens or closes an encoder. A pass boundary orders every resource, so the touch
+sets clear with the pass and not with the frame.
 
 The surface store (C5) is the fourth layer. `MTLSurface` is the Metal projection of
 one guest range: an owned, polymorphic `mtl::texture` handle, a resolve target when
@@ -101,5 +103,65 @@ a resolve target exists.
 asks for it and runs when the frame after the next one completes. The frames that
 follow a release on the queue may still reference the object, so freeing at the
 requesting slot's own completion is not enough.
+
+## The pipeline and binding layer
+
+The pipeline key (C6, first half) is the fifth layer. `MTLPipeline` holds the Metal
+backend's `pipeline_properties` — the exact material of one
+`MTL4::RenderPipelineDescriptor` — with its equality and its `hash_struct`
+specialisation, and assembles the descriptor from the landed state units. The
+shared `program_state_cache` owns the cache, so there is no second cache
+(HLD-02 I10).
+
+The encoder state (C7) is its companion. `MTLEncoderState` composes the landed
+raster, depth-stencil and blend captures into the per-draw dynamic set and writes
+it to the open encoder.
+
+The argument binds (C6, second half) are the sixth layer. `MTLArgumentBinds` holds
+the RSX shader ABI index map and the per-draw bind values, and `argument_binder`
+writes them into the per-stage `MTL4::ArgumentTable`, skipping whatever did not
+change. Metal 4 binds by GPU address and resource ID, so this unit needs no
+compiled shader.
+
+Three corrections are worth recording.
+
+**The Metal 4 pipeline carries less state than the design assumed.**
+`HLD-05-shader-binding-contract.md:331` and `:333` place the cull face, the front
+face and the depth and stencil attachment formats in the pipeline.
+`MTL4::RenderPipelineDescriptor` has none of them: the cull face, the front face,
+the polygon mode, the depth bias and the clip mode are
+`MTL4::RenderCommandEncoder` state, and the depth and stencil formats belong to the
+render pass. The key therefore holds only `raster_enabled` — a cull-both draw has
+no Metal cull mode, so it drops rasterisation — the colour format, the attachment
+count, the sample count, alpha-to-coverage, alpha-to-one, the blend latch and the
+write masks. The effect is a smaller key and a higher hit rate than the doc
+implies. Recorded as `CONFLICTS.md` `C7`.
+
+**The AA control was latched nowhere.** `M_NV4097_SET_ANTI_ALIASING_CONTROL` is
+`reshape` in `depth-rop.csv:32` and names `setAlphaToCoverageState` and
+`setAlphaToOneState`, yet no unit read it, while `MTLDevice` already advertises
+`supports_hw_a2c`. `capture_anti_aliasing_state` now latches both bits and the key
+carries them. The per-draw sample mask stays open: it has no Metal encoder setter
+and travels in the MSL as `[[sample_mask]]`.
+
+**The two substituted push-constant slots have no settled index.** `HLD-05` §3.2 †
+and §6 Q2 leave them open. `MTLArgumentBinds` uses the doc's own stated safe
+default, 28 and 29 above the texture range, and says so at the definition.
+
+## The shader layer is blocked on one tool
+
+C6's third part is the program pipeline, and one dependency is missing. The shared
+frontend (`Program/`) emits GLSL text and then SPIR-V
+(`spirv::compile_glsl_to_spv`, `Program/SPIRVCommon.h:9`). The Vulkan backend
+consumes the SPIR-V directly; Metal consumes MSL, and the SPIR-V to MSL step is
+SPIRV-Cross. `HLD-05-shader-binding-contract.md:78` calls SPIRV-Cross "a pinned
+vendored revision", but it is not in the tree. Recorded as `CONFLICTS.md` `X3`.
+
+The chain stays as HLD-05 §2.3 decides, because the asset sits at the GLSL level
+and survives through SPIR-V: the emulation library (`GLSLSnippets/**`, 1,743
+lines), `GLSLCommon` (886) and the two decompilers (2,356). Emitting MSL directly
+would fork all of it. glslang is already vendored and already serves Vulkan, so
+SPIR-V costs the Metal path nothing new, and it is the only stable, diffable seam
+the verification loop would have.
 
 <!-- doc-end -->
