@@ -104,4 +104,34 @@ applies the two shared helpers before building the `MTLColorWriteMask`.  The two
 dials are therefore `reshape`, not `direct`, for `b8` and `g8b8`.  The LLD text
 is left unchanged for its author to correct.
 
+---
+
+## C4 — the mip filter source
+
+**Dials.** `M_NV4097_SET_TEXTURE_FILTER` (0x1a14, `min_filter`),
+`M_NV4097_SET_TEXTURE_FORMAT` (0x1a00, the mip level count in bits 16-31).
+
+**Design doc says.** `LLD-texture.md:211-212`: "`min_filter`/`mag_filter` →
+`minFilter`/`magFilter`; `mipmap` (format bits 16-31) → `mipFilter`".  The LLD
+assigns the minify filter to `minFilter` alone, and assigns `mipFilter` to the mip
+level count.  It does not say how the count chooses Nearest or Linear.
+
+**The RSX says.** The minify filter is a compound value.  Its two halves name the
+minification filter and the mip treatment: `gcm_enums.h:1524-1533` reads "mipmap
+base level" for `nearest`/`linear`, "closest mipmap level" for the `*_nearest`
+values, and "linear mix between closest mipmap levels" for the `*_linear` values.
+The mip level count is a property of the texture, not of the sampler; Metal takes
+the mip count from the texture size.
+
+`VKFormats.cpp:38-44` is the shipping backend's corroboration: it returns a
+`VkSamplerMipmapMode` per minify value.
+
+**Resolution.** `get_mip_filter` derives `MTL::SamplerMipFilter` from the minify
+filter: `NotMipmapped` for `nearest`/`linear`, `Nearest` for the `*_nearest`
+values, `Linear` for the `*_linear` values.  The mip level count does not choose
+the filter.  The LLD text is left unchanged for its author to correct.
+
+**Open.** Unverified against a title.  A title that samples a mip chain with
+`min_filter == linear` takes the base level under this reading.
+
 <!-- doc-end -->
