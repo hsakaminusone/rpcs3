@@ -43,6 +43,9 @@ namespace vk
 	{
 		if (!initialized)
 		{
+			const auto& gpu = vk::g_render_device->gpu();
+			const auto workaround = vk::driver_selection::make_workaround_profile(gpu.get_driver_kind());
+
 			switch (vk::get_driver_vendor())
 			{
 			case vk::driver_vendor::unknown:
@@ -77,9 +80,10 @@ namespace vk
 				break;
 			case vk::driver_vendor::MVK:
 			case vk::driver_vendor::HONEYKRISP:
-				unroll_loops = true;
+			case vk::driver_vendor::KOSMICKRISP:
+				unroll_loops = workaround.unroll_loops;
 				optimal_kernel_size = 1;
-				optimal_group_size = 256;
+				optimal_group_size = workaround.optimal_group_size;
 				break;
 			case vk::driver_vendor::QUALCOMM:
 			case vk::driver_vendor::TURNIP:
@@ -90,7 +94,6 @@ namespace vk
 				break;
 			}
 
-			const auto& gpu = vk::g_render_device->gpu();
 			max_invocations_x = gpu.get_limits().maxComputeWorkGroupCount[0];
 
 			initialized = true;

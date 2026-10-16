@@ -633,6 +633,22 @@ void fmt_class_string<vk_gpu_scheduler_mode>::format(std::string& out, u64 arg)
 }
 
 template <>
+void fmt_class_string<vulkan_apple_driver>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vulkan_apple_driver value)
+	{
+		switch (value)
+		{
+		case vulkan_apple_driver::auto_: return "Auto";
+		case vulkan_apple_driver::moltenvk: return "MoltenVK";
+		case vulkan_apple_driver::kosmickrisp: return "KosmicKrisp";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
 void fmt_class_string<thread_scheduler_mode>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](thread_scheduler_mode value)

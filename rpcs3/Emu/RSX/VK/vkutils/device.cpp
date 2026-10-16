@@ -285,12 +285,6 @@ namespace vk
 
 	driver_vendor physical_device::get_driver_vendor() const
 	{
-#ifdef __APPLE__
-		// moltenVK currently returns DRIVER_ID_MOLTENVK (0).
-		// For now, assume the vendor is moltenVK on Apple devices.
-		return driver_vendor::MVK;
-#endif
-
 		if (!driver_properties.driverID)
 		{
 			const auto gpu_name = get_name();
@@ -387,8 +381,12 @@ namespace vk
 				return driver_vendor::NVK;
 			case VK_DRIVER_ID_MESA_V3DV:
 				return driver_vendor::V3DV;
+			case VK_DRIVER_ID_MOLTENVK:
+				return driver_vendor::MVK;
 			case VK_DRIVER_ID_MESA_HONEYKRISP:
 				return driver_vendor::HONEYKRISP;
+			case VK_DRIVER_ID_MESA_KOSMICKRISP:
+				return driver_vendor::KOSMICKRISP;
 			case VK_DRIVER_ID_MESA_PANVK:
 				return driver_vendor::PANVK;
 			case VK_DRIVER_ID_ARM_PROPRIETARY:
@@ -428,7 +426,7 @@ namespace vk
 
 	chip_class physical_device::get_chip_class() const
 	{
-		return get_chip_family(props.vendorID, props.deviceID);
+		return get_chip_family(props.vendorID, props.deviceID, get_driver_vendor());
 	}
 
 	u32 physical_device::get_queue_count() const

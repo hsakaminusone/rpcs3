@@ -11,6 +11,9 @@ cp "MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "rpcs3.app/Contents
 cp "MoltenVK/MoltenVK/dynamic/dylib/macOS/MoltenVK_icd.json" "rpcs3.app/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
 sed -i '' "s/.\//..\/..\/..\/Frameworks\//g" "rpcs3.app/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
 
+# Bundle the KosmicKrisp ICD next to MoltenVK (arm64 only).
+../../.ci/bundle-kosmickrisp.sh rpcs3.app
+
 rm -rf "rpcs3.app/Contents/Frameworks/QtPdf.framework" \
 "rpcs3.app/Contents/Frameworks/QtQml.framework" \
 "rpcs3.app/Contents/Frameworks/QtQmlModels.framework" \

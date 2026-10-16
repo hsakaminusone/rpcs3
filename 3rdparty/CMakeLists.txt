@@ -316,6 +316,17 @@ if(NOT ANDROID)
 			${FFMPEG_LIB_SWSCALE}
 			${FFMPEG_LIB_SWRESAMPLE}
 		)
+		if (APPLE)
+			# The builtin ffmpeg static libs (notably libavutil's
+			# hwcontext_videotoolbox.o) reference CoreVideo / VideoToolbox
+			# symbols. These frameworks are declared on the `ffmpeg`
+			# INTERFACE target in 3rdparty/ffmpeg/CMakeLists.txt but that
+			# target is never linked here, so add them explicitly.
+			target_link_libraries(3rdparty_ffmpeg INTERFACE
+				"-framework CoreServices" "-framework CoreFoundation"
+				"-framework CoreMedia" "-framework VideoToolbox"
+				"-framework CoreVideo" "-framework Security")
+		endif()
 		target_include_directories(3rdparty_ffmpeg SYSTEM INTERFACE "ffmpeg/include")
 	endif()
 endif()

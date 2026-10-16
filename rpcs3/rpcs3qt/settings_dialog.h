@@ -31,7 +31,7 @@ Q_SIGNALS:
 	void signal_restore_dependant_defaults();
 private:
 	void EnhanceCheckBox(emu_settings_type settings_type, QCheckBox* checkbox, const QString& tooltip, QObject* tooltip_object = nullptr);
-	void EnhanceComboBox(emu_settings_type settings_type, QComboBox* combobox, const QString& tooltip, QObject* tooltip_object = nullptr, bool is_ranged = false, bool use_max = false, int max = 0, bool sorted = false, bool strict = true);
+	void EnhanceComboBox(emu_settings_type settings_type, QComboBox* combobox, const QString& tooltip, QObject* tooltip_object = nullptr, bool is_ranged = false, bool use_max = false, int max = 0, bool sorted = false, bool strict = true, const QStringList& disabled_options = {});
 	void EnhanceSlider(emu_settings_type settings_type, QSlider* slider, QLabel* label, const QString& label_text) const;
 
 	// Snapping of sliders when moved with mouse

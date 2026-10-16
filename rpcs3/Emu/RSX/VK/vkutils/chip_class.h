@@ -56,6 +56,7 @@ namespace vk
 		NVK,
 		V3DV,
 		HONEYKRISP,
+		KOSMICKRISP,
 		PANVK,
 		ARM_MALI,
 		QUALCOMM,
@@ -76,7 +77,7 @@ namespace vk
 	};
 
 	chip_class get_chip_family();
-	chip_class get_chip_family(u32 vendor_id, u32 device_id);
+	chip_class get_chip_family(u32 vendor_id, u32 device_id, driver_vendor driver);
 
 	static inline bool is_NVIDIA(chip_class chip) { return chip >= chip_class::NV_generic && chip < chip_class::_NV_ENUM_MAX_; }
 	static inline bool is_AMD(chip_class chip) { return chip >= chip_class::AMD_gcn_generic && chip < chip_class::_AMD_ENUM_MAX_; }
