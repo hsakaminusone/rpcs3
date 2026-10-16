@@ -55,12 +55,16 @@ namespace mtl
 		fragment_stencil_slot_base = fragment_blend_slot + 1,                             // 30
 		fragment_subpass_slot_base = fragment_stencil_slot_base + fragment_texture_count, // 46
 		fragment_depth_input_slot = fragment_subpass_slot_base + 4,                       // 50
+
+		// The built-in full-screen fill is not an RSX draw, so its values have no RSX
+		// slot.  It continues above the map, in the buffer space only.
+		fill_values_slot = fragment_depth_input_slot + 1, // 51
 	};
 
 	// The argument-table shape follows the map, so a new slot cannot overflow the
 	// table in silence (HLD-05 §4 invariant 3).  The counts are the highest index
 	// in each space, plus one.
-	constexpr u32 argument_buffer_count = fragment_blend_slot + 1;        // 30
+	constexpr u32 argument_buffer_count = fill_values_slot + 1;           // 52
 	constexpr u32 argument_texture_count = fragment_depth_input_slot + 1; // 51
 	constexpr u32 argument_sampler_count = argument_texture_count;
 
