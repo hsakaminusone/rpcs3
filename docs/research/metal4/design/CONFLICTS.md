@@ -134,4 +134,32 @@ the filter.  The LLD text is left unchanged for its author to correct.
 **Open.** Unverified against a title.  A title that samples a mip chain with
 `min_filter == linear` takes the base level under this reading.
 
+---
+
+## C5 — the quad strip topology
+
+**Dial.** `M_NV4097_SET_BEGIN_END` (0x1808, the `primitive_type` field).
+
+**Design doc says.** `LLD-draw.md:224`: "`quads` / `quad_strip` | — | emulated (→
+triangles)".  The LLD groups the quad strip with the quad list and marks both
+emulated.
+
+**The tree says.** The shared helper `is_primitive_native`
+(`Common/BufferUtils.cpp:816-837`) returns true for `quad_strip` (line 825) and
+false for `quads`.  The shared expander `write_index_array_data_to_buffer_impl`
+(`Common/BufferUtils.cpp:940-960`) expands `quads` through `expand_indexed_quads`
+and has no `quad_strip` case; the non-indexed expander rejects it with "Native
+primitive type doesn't require expansion" (line 914).  Both shipping backends
+agree: `GLHelpers.cpp:30` returns `GL_TRIANGLE_STRIP` and `VKVertexBuffers.cpp:26`
+returns `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP`.
+
+**Resolution.** Reuse the shared helper.  A quad strip maps to
+`MTL::PrimitiveTypeTriangleStrip` and uploads untouched.  The LLD's emulation
+claim needs an expander that does not exist, so this port does not implement it.
+The LLD text is left unchanged for its author to correct.
+
+**Open.** Unverified against a title.  A quad strip is not a triangle strip in
+vertex order, so a title that draws one may show wrong triangles.  The tree's
+reading is consistent across both shipping backends, so this port follows it.
+
 <!-- doc-end -->
