@@ -42,6 +42,7 @@ else
   LLVM_VER="${LLVM_COMPILER_VER:-22}"
   sudo port -N install meson ninja pkgconfig "libclc-$LLVM_VER" spirv-tools "spirv-llvm-translator-$LLVM_VER"
   export PATH="/opt/local/libexec/llvm-$LLVM_VER/bin:/opt/local/bin:/opt/local/sbin:$PATH"
+  export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 
   git clone --depth 1 --branch "$KK_MESA_TAG" "$KK_MESA_REPO" "$TMP/mesa"
   meson setup "$TMP/build" "$TMP/mesa" \
