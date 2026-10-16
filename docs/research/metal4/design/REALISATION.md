@@ -54,4 +54,9 @@ missing layers: the surface store, the pass and encoder scheduler, the pipeline 
 descriptor layer, and the label sink with its command queue. No dial can be
 exercised end to end before those exist.
 
+The resource layer (C5) is the first layer in place. `MTLResourceManager` holds a
+placement heap pool per storage class, a suballocator with a free list, the explicit
+residency sets, and the deferred-release list. It is the gate for the surface store
+and for the texture cache.
+
 <!-- doc-end -->
