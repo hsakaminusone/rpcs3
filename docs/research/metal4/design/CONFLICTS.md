@@ -289,6 +289,31 @@ post-passes (`:91-100`) stand. This is a prerequisite rather than a contradictio
 and it is recorded because it gates the whole shader layer and because the doc's
 wording invites the reader to assume the tool is already present. Vendoring
 SPIRV-Cross as plain files, on the model `06` uses for metal-cpp, is the open
-action.
+action. **Closed:** SPIRV-Cross is vendored at
+`300681bbcb8365a8d1eacdacdbdd0249bbf1d6b1` (Apache-2.0), as plain files under
+`3rdparty/spirv-cross`, with its provenance in
+`3rdparty/spirv-cross/RPCS3_VENDORING.md`.
+
+## X4 — the shader object names in `HLD-05` §3.4-§3.6
+
+**Design doc says.** `HLD-05-shader-binding-contract.md` §3.4 names
+`MTL4::Library` and `MTL4::RenderPipelineState` as the objects the shader layer
+produces; §3.5-§3.6 name a `build_program` entry point and an `ExtraData` block;
+and `pipeline_binding_table.h` is named as the binding table the backend fills.
+
+**The tree says.** `MTL4::Compiler::newLibrary` and
+`MTL4::Compiler::newRenderPipelineState` return `MTL::Library*` and
+`MTL::RenderPipelineState*` (metal-cpp `Metal/MTL4Compiler.hpp`), because Metal 4
+compiles the Metal 3 objects and then consumes them. The pipeline entry point in
+`MTLProgramPipeline` is `build_pipeline`, and there is no `ExtraData` block. The
+pipeline key is the generic `program_state_cache` `pipeline_properties`
+(`ProgramStateCache.h:165,174-179`). `pipeline_binding_table.h` is not used:
+`VKPipelineCompiler` fills the table at run time (`prepareBindingTable()`), and
+the Metal argument table is fixed and baked into the MSL at compile time.
+
+**Resolution.** No design decision changes. The doc names the API by its intent
+and the tree names it by what metal-cpp returns; the two are the same object. The
+Metal path declares its argument indices at compile time, which is why the
+binding table is inert for this backend and why the PSO key stays small.
 
 <!-- doc-end -->

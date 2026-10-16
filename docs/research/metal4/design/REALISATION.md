@@ -148,21 +148,65 @@ and travels in the MSL as `[[sample_mask]]`.
 and §6 Q2 leave them open. `MTLArgumentBinds` uses the doc's own stated safe
 default, 28 and 29 above the texture range, and says so at the definition.
 
-## The shader layer is blocked on one tool
+## The shader layer
 
-C6's third part is the program pipeline, and one dependency is missing. The shared
-frontend (`Program/`) emits GLSL text and then SPIR-V
-(`spirv::compile_glsl_to_spv`, `Program/SPIRVCommon.h:9`). The Vulkan backend
-consumes the SPIR-V directly; Metal consumes MSL, and the SPIR-V to MSL step is
-SPIRV-Cross. `HLD-05-shader-binding-contract.md:78` calls SPIRV-Cross "a pinned
-vendored revision", but it is not in the tree. Recorded as `CONFLICTS.md` `X3`.
+C6 is the RSX ucode to MSL seam, and it is one chain (HLD-05 §2.3 route A):
+RSX ucode -> GLSL text -> glslang -> SPIR-V -> SPIRV-Cross `CompilerMSL` -> MSL
+-> `MTL4::Compiler`. `MTLShader` holds the second half, `MTLProgramPipeline`
+holds the seam and the pipeline cache.
 
 The chain stays as HLD-05 §2.3 decides, because the asset sits at the GLSL level
 and survives through SPIR-V: the emulation library (`GLSLSnippets/**`, 1,743
 lines), `GLSLCommon` (886) and the two decompilers (2,356). Emitting MSL directly
 would fork all of it. glslang is already vendored and already serves Vulkan, so
 SPIR-V costs the Metal path nothing new, and it is the only stable, diffable seam
-the verification loop would have.
+the verification loop has.
+
+`HLD-05-shader-binding-contract.md:78` calls SPIRV-Cross "a pinned vendored
+revision", but it was not in the tree. It is vendored now, as plain files on the
+model 06 used for metal-cpp, at commit `300681bbcb8365a8d1eacdacdbdd0249bbf1d6b1`
+(Apache-2.0), with its provenance in `3rdparty/spirv-cross/RPCS3_VENDORING.md`.
+The six translation units build into `3rdparty_spirv_cross_impl` under
+`-w -Wno-error`, because the upstream code is not ours and it is not built with
+the project's warning set. This closes `CONFLICTS.md` `X3`.
+
+**The three post-passes.** SPIRV-Cross emits MSL that is correct and not complete
+for this backend, because three RSX features have no GLSL form that survives the
+cross-compiler. Each is a pure text transform of the whole MSL source, so each is
+unit-testable without a GPU (HLD-05 §2.4):
+
+1. Programmable blending. SPIRV-Cross emits the input attachment as
+   `texture2d<float> NAME [[texture(N)]]`, and MSL has no such construct for a
+   tile framebuffer fetch. The pass rewrites the declaration and the read into a
+   `[[color(color_index)]]` fragment input.
+2. Push-constant substitution. SPIRV-Cross emits the block as
+   `constant BLOCK& NAME [[buffer(N)]]`, and MSL has no push constants. The pass
+   sets the substituted RSX slot as the buffer index (HLD-05 §3.3).
+3. Border colour and LOD bias. Neither is expressible in MSL sampler state, so the
+   pass injects a helper and routes the named texture's sample call through it
+   (04 R18/R19).
+
+**The four doc-vs-tree conflicts.** These change no design decision, so they are
+citation conflicts (`CONFLICTS.md` `X4`):
+
+1. `HLD-05` §3.4 names `MTL4::Library` as the shader object. metal-cpp returns
+   `MTL::Library*`, because `MTL4::Compiler` produces the Metal 3 object.
+2. The same paragraph names `MTL4::RenderPipelineState`; the tree returns
+   `MTL::RenderPipelineState*`, for the same reason.
+3. `HLD-05` §3.5-§3.6 name `build_program` and an `ExtraData` block. The tree has
+   `build_pipeline` and no such block, and the pipeline key is the
+   `program_state_cache` `pipeline_properties` (`ProgramStateCache.h:165`), so no
+   second cache exists (HLD-02 I10).
+4. `pipeline_binding_table.h` is inert for this backend. The Vulkan backend fills
+   the binding table at run time (`prepareBindingTable()`); the Metal argument
+   table is fixed and baked into the MSL, so the Metal path declares its indices at
+   compile time and needs no table.
+
+**The remaining risk.** SPIRV-Cross is built with
+`SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS`, and the project builds with
+`-fno-exceptions`. A malformed guest shader therefore aborts RPCS3 instead of
+failing one pipeline. A pre-validate or a subprocess guard is owed before the
+backend is offered to users.
 
 ## The dial tests
 
