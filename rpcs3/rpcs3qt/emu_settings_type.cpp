@@ -123,6 +123,9 @@ const std::map<emu_settings_type, cfg_location> settings_location =
 
 	// Vulkan
 	{ emu_settings_type::VulkanAdapter,                    get_cfg_location(local_cfg.video.vk.adapter) },
+#ifdef __APPLE__
+	{ emu_settings_type::VulkanAppleDriver,                get_cfg_location(local_cfg.video.vk.apple_driver) },
+#endif
 	{ emu_settings_type::VulkanAsyncTextureUploads,        get_cfg_location(local_cfg.video.vk.asynchronous_texture_streaming) },
 	{ emu_settings_type::VulkanAsyncSchedulerDriver,       get_cfg_location(local_cfg.video.vk.asynchronous_scheduler) },
 	{ emu_settings_type::ExclusiveFullscreenMode,          get_cfg_location(local_cfg.video.vk.exclusive_fullscreen_mode) },

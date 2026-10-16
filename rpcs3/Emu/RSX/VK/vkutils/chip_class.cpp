@@ -91,7 +91,7 @@ namespace vk
 		return g_chip_class;
 	}
 
-	chip_class get_chip_family(u32 vendor_id, u32 device_id)
+	chip_class get_chip_family(u32 vendor_id, u32 device_id, driver_vendor driver)
 	{
 		if (vendor_id == 0x10DE)
 		{
@@ -105,11 +105,9 @@ namespace vk
 
 		if (vendor_id == 0x106B)
 		{
-#ifdef __APPLE__
-			return chip_class::APPLE_MVK;
-#else
-			return chip_class::APPLE_HK_generic; // Lazy, but at the moment we don't care about the differences in M1, M2, M3, M4, etc
-#endif
+			// MoltenVK and KosmicKrisp drive the same Apple hardware; keep them in separate
+			// classes so MVK-keyed workarounds do not leak onto KosmicKrisp.
+			return driver == driver_vendor::MVK ? chip_class::APPLE_MVK : chip_class::APPLE_HK_generic;
 		}
 
 		if (vendor_id == 0x8086)

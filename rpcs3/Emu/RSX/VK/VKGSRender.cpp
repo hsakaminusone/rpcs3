@@ -26,6 +26,10 @@
 #include "util/asm.hpp"
 #include <vulkan/vulkan_core.h>
 
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
+
 namespace vk
 {
 	VkCompareOp get_compare_func(rsx::comparison_function op, bool reverse_direction = false);
@@ -408,6 +412,34 @@ namespace vk
 	}
 }
 
+#ifdef __APPLE__
+namespace
+{
+	// KosmicKrisp is gated on the host being arm64 and running macOS 26+. Both are
+	// static properties of the machine, queried here without touching Vulkan.
+	vk::driver_selection::host_info get_apple_host_info()
+	{
+		vk::driver_selection::host_info host;
+
+		char version[64] = {};
+		std::size_t size = sizeof(version);
+
+		if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) == 0)
+		{
+			host.macos_major = std::atoi(version); // e.g. "26.0" -> 26
+		}
+
+#if defined(ARCH_ARM64)
+		host.arch = vk::driver_selection::host_arch::arm64;
+#elif defined(ARCH_X64)
+		host.arch = vk::driver_selection::host_arch::x86_64;
+#endif
+
+		return host;
+	}
+} // anonymous namespace
+#endif
+
 u64 VKGSRender::get_cycles()
 {
 	return thread_ctrl::get_cycles(static_cast<named_thread<VKGSRender>&>(*this));
@@ -455,17 +487,78 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 	}, display);
 #endif
 
-	for (auto &gpu : gpus)
+#ifdef __APPLE__
+	// On macOS both MoltenVK and KosmicKrisp can coexist and report the same device
+	// name. The adapter selects the device, the driver preference selects the driver;
+	// they are independent settings, so the driver is never inferred from the adapter.
 	{
-		if (gpu.get_name() == adapter_name)
+		using namespace vk::driver_selection;
+
+		const driver_preference pref = [&]()
 		{
-			m_swapchain.reset(m_instance.create_swapchain(display, gpu));
+			switch (g_cfg.video.vk.apple_driver)
+			{
+			case vulkan_apple_driver::moltenvk:    return driver_preference::moltenvk;
+			case vulkan_apple_driver::kosmickrisp: return driver_preference::kosmickrisp;
+			case vulkan_apple_driver::auto_:       break;
+			}
+
+			return driver_preference::auto_;
+		}();
+
+		std::vector<device_info> devices;
+		devices.reserve(gpus.size());
+
+		for (const auto& gpu : gpus)
+		{
+			device_info info;
+			info.kind = gpu.get_driver_kind();
+			info.name = gpu.get_name();
+			info.driver_id = static_cast<u32>(gpu.get_driver_id());
+			info.index = static_cast<int>(devices.size());
+			devices.push_back(std::move(info));
+		}
+
+		const selection_result result = select_device(pref, devices, get_apple_host_info());
+
+		if (result.found)
+		{
+			int index = find_adapter_index(devices, result.chosen, adapter_label_name(adapter_name));
+
+			if (index < 0)
+			{
+				index = result.chosen_index;
+			}
+
+			m_swapchain.reset(m_instance.create_swapchain(display, gpus[static_cast<usz>(index)]));
 			gpu_found = true;
-			break;
+
+			if (result.fell_back && !result.diagnostic.empty())
+			{
+				rsx_log.warning("%s", result.diagnostic);
+			}
+		}
+		else
+		{
+			rsx_log.error("%s", result.diagnostic);
+		}
+	}
+#endif
+
+	if (!gpu_found)
+	{
+		for (auto &gpu : gpus)
+		{
+			if (gpu.get_name() == adapter_name)
+			{
+				m_swapchain.reset(m_instance.create_swapchain(display, gpu));
+				gpu_found = true;
+				break;
+			}
 		}
 	}
 
-	if (!gpu_found || adapter_name.empty())
+	if (!gpu_found)
 	{
 		m_swapchain.reset(m_instance.create_swapchain(display, gpus[0]));
 	}

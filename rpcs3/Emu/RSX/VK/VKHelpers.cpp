@@ -123,6 +123,10 @@ namespace vk
 		case driver_vendor::MVK:
 			// Apple GPUs / moltenVK need more testing
 			break;
+		case driver_vendor::KOSMICKRISP:
+			// KosmicKrisp unrolls loops, which makes the native list restart path slow; emulate it instead.
+			g_drv_no_primitive_restart = !driver_selection::make_workaround_profile(gpu.get_driver_kind()).allows_primitive_restart;
+			break;
 		case driver_vendor::LAVAPIPE:
 			// This software device works well, with poor performance as the only downside
 			break;

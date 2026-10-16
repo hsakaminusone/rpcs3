@@ -51,9 +51,12 @@ namespace vk
 	{
 		// For any managed resources, try to keep the number of unused/idle resources as low as possible.
 		// Improves search times as well as keeping us below the hardware limit.
-		const auto& limits = get_current_renderer()->gpu().get_limits();
+		const auto& gpu = get_current_renderer()->gpu();
+		const auto& limits = gpu.get_limits();
 		const auto allocated_sampler_count = vmm_get_application_pool_usage(VMM_ALLOCATION_POOL_SAMPLER);
-		const auto max_allowed_samplers = std::min((limits.maxSamplerAllocationCount * 3u) / 4u, 2048u);
+		// KosmicKrisp starts failing sampler creation past 1024 unique samplers.
+		const auto max_allowed_samplers = std::min({(limits.maxSamplerAllocationCount * 3u) / 4u, 2048u,
+			driver_selection::make_workaround_profile(gpu.get_driver_kind()).max_unique_samplers});
 
 		if (allocated_sampler_count > max_allowed_samplers)
 		{

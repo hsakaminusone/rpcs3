@@ -4,6 +4,7 @@
 #include "chip_class.h"
 #include "pipeline_binding_table.h"
 #include "memory.h"
+#include "vk_driver_selection.h"
 
 #include <string>
 #include <vector>
@@ -124,6 +125,9 @@ namespace vk
 		driver_vendor get_driver_vendor() const;
 		std::string get_driver_version() const;
 		chip_class get_chip_class() const;
+
+		VkDriverId get_driver_id() const { return driver_properties.driverID; }
+		driver_selection::driver_kind get_driver_kind() const { return driver_selection::classify_driver_id(static_cast<u32>(driver_properties.driverID)); }
 
 		u32 get_queue_count() const;
 

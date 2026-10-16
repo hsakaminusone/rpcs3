@@ -123,6 +123,7 @@ namespace vk
 			case driver_vendor::INTEL:
 			case driver_vendor::RADV:
 			case driver_vendor::MVK:
+			case driver_vendor::KOSMICKRISP:
 				break;
 			case driver_vendor::ANV:
 			case driver_vendor::NVIDIA:

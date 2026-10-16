@@ -13,6 +13,7 @@
 #include <QScreen>
 #include <QShortcut>
 #include <QStyleFactory>
+#include <QSysInfo>
 
 #include "gui_settings.h"
 #include "qt_utils.h"
@@ -34,6 +35,7 @@
 #include "Emu/system_config.h"
 #include "Emu/title.h"
 #include "Emu/Audio/audio_device_enumerator.h"
+#include "Emu/RSX/VK/vkutils/vk_driver_selection.h"
 
 #include "Loader/PSF.h"
 
@@ -395,6 +397,24 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	// Comboboxes
 	EnhanceComboBox(emu_settings_type::Renderer, ui->renderBox, tooltips.settings.renderer, ui->gb_renderer);
 	SubscribeTooltip(ui->gb_graphicsAdapter, tooltips.settings.graphics_adapter);
+#ifdef __APPLE__
+	{
+		// KosmicKrisp is only usable on arm64 hosts running macOS 26 or newer.
+		const vk::driver_selection::host_arch host_arch =
+#if defined(ARCH_ARM64)
+			vk::driver_selection::host_arch::arm64;
+#else
+			vk::driver_selection::host_arch::x86_64;
+#endif
+		const bool kosmickrisp_supported = vk::driver_selection::host_supports_kosmickrisp(QSysInfo::productVersion().section('.', 0, 0).toInt(), host_arch);
+
+		EnhanceComboBox(emu_settings_type::VulkanAppleDriver, ui->vulkanDriver, tooltips.settings.vulkan_apple_driver, ui->gb_vulkanDriver,
+			false, false, 0, false, true, kosmickrisp_supported ? QStringList{} : QStringList{QStringLiteral("KosmicKrisp")});
+	}
+#else
+	// The MoltenVK/KosmicKrisp split only exists on macOS.
+	ui->gb_vulkanDriver->setVisible(false);
+#endif
 
 	EnhanceComboBox(emu_settings_type::Resolution, ui->resBox, tooltips.settings.resolution, ui->gb_default_resolution, false, false, 0, false, false);
 	// remove unsupported resolutions from the dropdown
@@ -792,8 +812,14 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 			ui->graphicsAdapterBox->clear();
 			ui->graphicsAdapterBox->addItems(renderer.adapters);
 
-			// Reset Adapter to old config
-			int idx = ui->graphicsAdapterBox->findText(renderer.old_adapter);
+			// Reset Adapter to old config.
+			QString old_adapter = renderer.old_adapter;
+#ifdef __APPLE__
+			// A config saved before the driver split stored a tagged label
+			// ("<device> (MoltenVK)"); the list now names devices only.
+			old_adapter = QString::fromStdString(vk::driver_selection::adapter_label_name(old_adapter.toStdString()));
+#endif
+			int idx = ui->graphicsAdapterBox->findText(old_adapter);
 			if (idx < 0)
 			{
 				idx = 0;
@@ -858,6 +884,9 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 		const bool is_vulkan = (text == r_creator->Vulkan.name);
 		ui->asyncTextureStreaming->setEnabled(is_vulkan);
 		ui->vulkansched->setEnabled(is_vulkan);
+#ifdef __APPLE__
+		ui->gb_vulkanDriver->setVisible(is_vulkan);
+#endif
 	};
 
 	const auto apply_fsr_specific_options = [this]()
@@ -2364,9 +2393,9 @@ void settings_dialog::EnhanceCheckBox(emu_settings_type settings_type, QCheckBox
 	}
 }
 
-void settings_dialog::EnhanceComboBox(emu_settings_type settings_type, QComboBox* combobox, const QString& tooltip, QObject* tooltip_object, bool is_ranged, bool use_max, int max, bool sorted, bool strict)
+void settings_dialog::EnhanceComboBox(emu_settings_type settings_type, QComboBox* combobox, const QString& tooltip, QObject* tooltip_object, bool is_ranged, bool use_max, int max, bool sorted, bool strict, const QStringList& disabled_options)
 {
-	m_emu_settings->EnhanceComboBox(combobox, settings_type, is_ranged, use_max, max, sorted, strict);
+	m_emu_settings->EnhanceComboBox(combobox, settings_type, is_ranged, use_max, max, sorted, strict, disabled_options);
 
 	if (!tooltip.isEmpty())
 	{

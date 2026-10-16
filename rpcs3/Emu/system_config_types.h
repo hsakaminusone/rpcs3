@@ -319,6 +319,13 @@ enum class vk_gpu_scheduler_mode
 	fast
 };
 
+enum class vulkan_apple_driver
+{
+	auto_,
+	moltenvk,
+	kosmickrisp
+};
+
 enum class thread_scheduler_mode
 {
 	os,
