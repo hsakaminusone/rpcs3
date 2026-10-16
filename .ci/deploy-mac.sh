@@ -24,6 +24,9 @@ fi
 # Bundle the KosmicKrisp ICD next to MoltenVK (arm64 only).
 ../../.ci/bundle-kosmickrisp.sh rpcs3.app
 
+# Build and bundle the KosmicKrisp ICD next to MoltenVK (arm64 only).
+../../.ci/build-kosmickrisp.sh rpcs3.app
+
 rm -rf "rpcs3.app/Contents/Frameworks/QtPdf.framework" \
 "rpcs3.app/Contents/Frameworks/QtQml.framework" \
 "rpcs3.app/Contents/Frameworks/QtQmlModels.framework" \
