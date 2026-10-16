@@ -699,6 +699,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLGSRender.cpp
         RSX/MTL/MTLSyncFlip.cpp
         RSX/MTL/MTLNv0039Dma.cpp
+        RSX/MTL/MTLNv2dSurface.cpp
     )
 endif()
 
