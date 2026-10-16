@@ -42,6 +42,19 @@ namespace mtl
 	depth_stencil_state capture_depth_stencil_state();
 	stencil_references capture_stencil_references();
 
+	// NV4097_SET_ANTI_ALIASING_CONTROL (LLD-depth-rop §2.4).  Alpha-to-coverage and
+	// alpha-to-one are descriptor state on Metal 4, not encoder state, so they are
+	// captured here and consumed by the pipeline key (CONFLICTS.md C7;
+	// M_NV4097_SET_ANTI_ALIASING_CONTROL).  The per-draw sample mask has no Metal
+	// encoder setter and travels in the MSL as [[sample_mask]].
+	struct anti_aliasing_state
+	{
+		bool alpha_to_coverage = false;
+		bool alpha_to_one = false;
+	};
+
+	anti_aliasing_state capture_anti_aliasing_state();
+
 	// The colour write mask of one attachment (LLD-depth-rop §3.2).  The RSX channel
 	// mask is reconciled with the host channel order, as the surface format decides
 	// the storage (color_utils.hpp:267,300; CONFLICTS.md C3).

@@ -92,6 +92,14 @@ namespace mtl
 		return { rsx::method_registers.stencil_func_ref(), rsx::method_registers.back_stencil_func_ref() };
 	}
 
+	anti_aliasing_state capture_anti_aliasing_state()
+	{
+		anti_aliasing_state state;
+		state.alpha_to_coverage = rsx::method_registers.msaa_alpha_to_coverage_enabled();
+		state.alpha_to_one = rsx::method_registers.msaa_alpha_to_one_enabled();
+		return state;
+	}
+
 	MTL::ColorWriteMask capture_color_write_mask(u32 index, rsx::surface_color_format format)
 	{
 		bool red = rsx::method_registers.color_mask_r(index);
