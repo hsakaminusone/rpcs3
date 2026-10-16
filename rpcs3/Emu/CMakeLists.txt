@@ -690,6 +690,8 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLCommandRecorder.cpp
         RSX/MTL/MTLBarrier.cpp
         RSX/MTL/MTLFormats.cpp
+        RSX/MTL/MTLPassScheduler.cpp
+        RSX/MTL/MTLPipeline.cpp
         RSX/MTL/MTLSurface.cpp
         RSX/MTL/MTLSurfaceCache.cpp
         RSX/MTL/MTLSurfaceState.cpp
@@ -699,6 +701,8 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLSamplerState.cpp
         RSX/MTL/MTLBlendState.cpp
         RSX/MTL/MTLDrawState.cpp
+        RSX/MTL/MTLEncoderState.cpp
+        RSX/MTL/MTLArgumentBinds.cpp
         RSX/MTL/MTLGSRender.cpp
         RSX/MTL/MTLSyncFlip.cpp
         RSX/MTL/MTLNv0039Dma.cpp
