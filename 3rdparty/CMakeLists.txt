@@ -228,6 +228,12 @@ if(USE_METAL4)
 	endif()
 endif()
 
+# SPIRV-Cross (docs/research/metal4/design/HLD-05 §2.3 route A: the shared
+# frontend already emits SPIR-V, and Metal needs MSL).  Plain files, on the
+# model 06 used for metal-cpp.  Metal only, and it reuses the Metal block's
+# platform decision.
+include(${CMAKE_CURRENT_SOURCE_DIR}/spirv-cross/rpcs3.cmake)
+
 # AsmJit
 add_subdirectory(asmjit EXCLUDE_FROM_ALL)
 
@@ -409,6 +415,7 @@ add_library(3rdparty::faudio ALIAS ${FAUDIO_TARGET})
 add_library(3rdparty::libevdev ALIAS ${LIBEVDEV_TARGET})
 add_library(3rdparty::vulkan ALIAS ${VULKAN_TARGET})
 add_library(3rdparty::metal ALIAS ${METAL_TARGET})
+add_library(3rdparty::spirv_cross ALIAS ${SPIRV_CROSS_TARGET})
 add_library(3rdparty::openal ALIAS 3rdparty_openal)
 add_library(3rdparty::ffmpeg ALIAS 3rdparty_ffmpeg)
 add_library(3rdparty::glew ALIAS 3rdparty_glew)

@@ -709,6 +709,8 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLNv2dSurface.cpp
         RSX/MTL/MTLNv3089Image.cpp
         RSX/MTL/MTLNv308aImage.cpp
+        RSX/MTL/MTLShader.cpp
+        RSX/MTL/MTLProgramPipeline.cpp
     )
 endif()
 
@@ -727,6 +729,7 @@ target_link_libraries(rpcs3_emu
         3rdparty::stblib
         3rdparty::vulkan
         3rdparty::metal
+        3rdparty::spirv_cross
         3rdparty::glew
         3rdparty::libusb
         3rdparty::hidapi
