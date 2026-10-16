@@ -261,9 +261,11 @@ namespace mtl
 	void resource_manager::init(const device& dev, u32 frame_count)
 	{
 		m_device = dev.dev();
+		m_guest = dev.window().buffer;
 		m_shared.init(m_device, MTL::StorageModeShared, shared_block_size);
 		m_private.init(m_device, MTL::StorageModePrivate, private_block_size);
 		m_residency.init(m_device, dev.queue(), frame_count);
+		m_deferred.resize(frame_count);
 
 		// The guest window is an application-lifetime resource, and every buffer
 		// binding refers to it (HLD-02 I5).
@@ -302,6 +304,7 @@ namespace mtl
 			return nullptr;
 		}
 
+		track(buffer, pool, heap, offset, required.size);
 		m_residency.on_bind(buffer);
 		return buffer;
 	}
@@ -330,6 +333,8 @@ namespace mtl
 			return nullptr;
 		}
 
+		track(texture, pool, heap, offset, required.size);
+		track(texture, pool, heap, offset, required.size);
 		m_residency.on_bind(texture);
 		return texture;
 	}
@@ -341,6 +346,7 @@ namespace mtl
 
 	void resource_manager::on_frame_begin(u32 index)
 	{
+		m_frame_slot = index;
 		m_residency.on_frame_begin(index);
 	}
 
@@ -352,24 +358,60 @@ namespace mtl
 	void resource_manager::on_commit_complete(u32 index)
 	{
 		m_residency.on_commit_complete(index);
+
+		if (m_deferred.empty())
+		{
+			return;
+		}
+
+		// The slot that follows this one is now free of every reference it could hold.
+		release_list(m_deferred[(index + 1) % static_cast<u32>(m_deferred.size())]);
+	}
+
+	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size)
+	{
+		m_spans.emplace(allocation, allocation_span{ &pool, heap, offset, size });
 	}
 
 	void resource_manager::defer_release(MTL::Allocation* allocation)
 	{
-		if (allocation)
+		if (!allocation)
 		{
-			m_deferred.push_back(allocation);
+			return;
 		}
+
+		if (m_deferred.empty())
+		{
+			allocation->release();
+			return;
+		}
+
+		m_deferred[m_frame_slot % static_cast<u32>(m_deferred.size())].push_back(allocation);
 	}
 
 	void resource_manager::garbage_collect()
 	{
-		for (MTL::Allocation* allocation : m_deferred)
+		for (std::vector<MTL::Allocation*>& list : m_deferred)
 		{
+			release_list(list);
+		}
+	}
+
+	void resource_manager::release_list(std::vector<MTL::Allocation*>& list)
+	{
+		for (MTL::Allocation* allocation : list)
+		{
+			if (const auto found = m_spans.find(allocation); found != m_spans.end())
+			{
+				const allocation_span& span = found->second;
+				span.pool->free(span.heap, span.offset, span.size);
+				m_spans.erase(found);
+			}
+
 			allocation->release();
 		}
 
-		m_deferred.clear();
+		list.clear();
 	}
 }
 

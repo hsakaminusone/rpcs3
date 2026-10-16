@@ -690,6 +690,8 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLCommandRecorder.cpp
         RSX/MTL/MTLBarrier.cpp
         RSX/MTL/MTLFormats.cpp
+        RSX/MTL/MTLSurface.cpp
+        RSX/MTL/MTLSurfaceCache.cpp
         RSX/MTL/MTLSurfaceState.cpp
         RSX/MTL/MTLDepthStencil.cpp
         RSX/MTL/MTLRasterState.cpp
