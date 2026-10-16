@@ -17,7 +17,7 @@ inert rows (`moot`, `impossible`, `na`) need no code.
 | `draw` | 13 | `MTLDrawState` | the primitive map, the index map and the value state; the lowering is reused |
 | `fixed-function` | 3 | none | reuse only |
 | `misc` | 3 | none | reuse only |
-| `sync-flip` | 17 | none | not started; needs the label sink and the command queue |
+| `sync-flip` | 17 | `MTLSyncFlip` | the selector state, the alignment rules, the report decode and the release-barrier shape; the label sink and the present need the command queue |
 | `nv0039-dma` | 10 | none | not started |
 | `nv2d-surface` | 7 | none | not started |
 | `nv3089-image` | 15 | none | not started |
