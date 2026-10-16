@@ -691,6 +691,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLDepthStencil.cpp
         RSX/MTL/MTLRasterState.cpp
         RSX/MTL/MTLVertexState.cpp
+        RSX/MTL/MTLSamplerState.cpp
         RSX/MTL/MTLGSRender.cpp
     )
 endif()
