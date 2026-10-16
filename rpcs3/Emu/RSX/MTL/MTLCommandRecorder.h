@@ -54,6 +54,9 @@ namespace mtl
 		MTL4::ArgumentTable* vertex_table() const { return m_slots[m_slot].vertex_table; }
 		MTL4::ArgumentTable* fragment_table() const { return m_slots[m_slot].fragment_table; }
 
+		// The resource layer, for the traits that allocate a surface.
+		resource_manager& resources() const { return *m_resources; }
+
 	private:
 		void on_feedback(u32 index, MTL4::CommitFeedback* feedback);
 		bool ring_idle() const;

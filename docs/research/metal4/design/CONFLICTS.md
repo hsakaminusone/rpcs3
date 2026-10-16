@@ -181,4 +181,48 @@ reading is consistent across both shipping backends, so this port follows it.
 the citation is off by two lines.  The LLD text is left unchanged for its author
 to correct.
 
+## C6 — the native pitch of an exploded surface
+
+**Dials.** `surface` cluster: `M_NV4097_SET_SURFACE_FORMAT` (0x0208, the
+antialias field) and `M_NV4097_SET_SURFACE_PITCH_A` (0x020c).
+
+**Design doc says.** `HLD-02-resource-model.md:155-160` and `:485`: "`native_pitch`
+— the Metal texture row stride … The invariant (§4) is `native_pitch ≥ rsx_pitch`
+and `native_pitch ≥ bpp × width`."
+
+**The tree says.** `surface_utils.h:256` defines
+`get_bpp()` as `native_pitch / get_surface_width<rsx::surface_metrics::samples>()`,
+and `surface_utils.h:205-208` defines that width as `surface_width * samples_x`.
+So `get_bpp()` returns the format block size only when
+`native_pitch == width × bpp × samples_x`.  The doc states a lower bound with no
+upper bound, so a value that only satisfies the bound breaks `get_bpp()`, which
+the generic store reads (`surface_utils.h:570`, `surface_utils.h:577`).
+
+**Resolution.** `native_pitch = width × bpp × samples_x`, the exact value
+`get_bpp()` requires.  It satisfies the doc's bound when `samples_x == 1` and
+exceeds it otherwise.  The `≥ rsx_pitch` clause has no consumer: the host texture
+row is not a guest row, and the guest row is `rsx_pitch`, which drives
+`memory_range`.  The doc text is left unchanged for its author to correct.
+
+---
+
+## X2 — the `mtl_surface` field types
+
+**Design doc says.** `HLD-02-resource-model.md:411-412` writes the `mtl_surface`
+sketch with `MTL::Texture* texture;` and `MTL::Texture* resolve;`.
+
+**The tree says.** `surface_utils.h:160` declares `resolve_surface` as
+`std::unique_ptr<remove_pointer_t<image_storage_type>>`, so the storage type must
+be an owning handle with a destructor.  A `metal-cpp` object is not destructible:
+`NS::Object` declares `~Object() = delete` (`Foundation/NSObject.hpp:95`).
+Further, `surface_utils.h:504` cross-casts an image to `rsx::ref_counted`, so the
+storage type must be polymorphic, and `surface_store.h:391` casts an image back to
+the surface type, so the surface type must derive from the image type.
+
+**Resolution.** `image_storage_type = mtl::texture*` — the type
+`HLD-01-architecture.md:240` names — `mtl::texture` is an owning, polymorphic
+handle, and `mtl::surface` derives from it.  HLD-02 §3.2's sketch field types are
+not implementable as written; the sketch is left unchanged for its author to
+correct.
+
 <!-- doc-end -->

@@ -4,6 +4,7 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -80,23 +81,44 @@ namespace mtl
 		MTL::Buffer* new_buffer(u64 length, MTL::StorageMode storage);
 		MTL::Texture* new_texture(MTL::TextureDescriptor* descriptor, MTL::StorageMode storage);
 
+		// The one no-copy buffer over the guest block (HLD-02 §3.5).  A guest address
+		// is the offset into it, so a load needs no staging copy.
+		MTL::Buffer* guest_buffer() const { return m_guest; }
+
 		void make_persistent(MTL::Allocation* allocation);
 		void on_frame_begin(u32 index);
 		void commit_frame();
 		void on_commit_complete(u32 index);
 
-		// Deferred release (HLD-02 §4).  A Metal 4 command buffer holds no strong
-		// reference, so an object must survive until its frame completes.  Release the
-		// deferred list only after on_commit_complete() of the frame that used it.
+		// Deferred release (HLD-02 I7).  A Metal 4 command buffer holds no strong
+		// reference, so an object must survive until every frame that can reference it
+		// completes.  A release is queued on the frame slot that asks for it, and it
+		// runs when the frame after the next one completes, because the frames that
+		// follow it on the queue may still reference the object.
 		void defer_release(MTL::Allocation* allocation);
 		void garbage_collect();
 
 	private:
+		// The heap span of one allocation, so a release returns it to its pool.
+		struct allocation_span
+		{
+			heap_pool* pool = nullptr;
+			MTL::Heap* heap = nullptr;
+			u64 offset = 0;
+			u64 size = 0;
+		};
+
+		void track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size);
+		void release_list(std::vector<MTL::Allocation*>& list);
+
 		MTL::Device* m_device = nullptr;
+		MTL::Buffer* m_guest = nullptr;
 		residency_manager m_residency;
 		heap_pool m_shared;
 		heap_pool m_private;
-		std::vector<MTL::Allocation*> m_deferred;
+		std::unordered_map<MTL::Allocation*, allocation_span> m_spans;
+		std::vector<std::vector<MTL::Allocation*>> m_deferred;
+		u32 m_frame_slot = 0;
 	};
 
 	// A private placement heap holds GPU-only resources; a shared one holds the

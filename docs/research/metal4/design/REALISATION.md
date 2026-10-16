@@ -65,4 +65,41 @@ three frame slots, each with one allocator, one reusable command buffer, and one
 argument table per stage. It is the only way to open a pass, close an encoder, or
 submit, so the recorded stream is one chokepoint.
 
+The command recorder (C4) is the second layer. `MTLCommandRecorder` owns a ring of
+three frame slots, each with one allocator, one reusable command buffer, and one
+argument table per stage. It is the only way to open a pass, close an encoder, or
+submit, so the recorded stream is one chokepoint.
+
+The barrier chokepoint (C3, first half) is the third layer. `MTLBarrier` carries the
+producer, consumer and visibility of one edge, decides whether the two sides are
+legal inside one encoder, and emits the intra-pass form. A `false` return is a
+pass-split request that the pass scheduler resolves; the scheduler is not built yet.
+
+The surface store (C5) is the fourth layer. `MTLSurface` is the Metal projection of
+one guest range: an owned, polymorphic `mtl::texture` handle, a resolve target when
+the surface is multisampled, and the deferred data movement the generic store asks
+for before an access. `MTLSurfaceCache` supplies the trait set of the generic
+`rsx::surface_store`; the store itself is not forked (HLD-02 I10).
+
+Two realisations of the surface store are worth recording.
+
+**The surface type derives from the image type.** The `mtl_surface` sketch in
+`HLD-02-resource-model.md:411-415` implies containment. Containment cannot work:
+`surface_store.h:391` casts an image pointer back to the surface pointer, and
+`surface_utils.h:504` cross-casts an image to `rsx::ref_counted`. So `mtl::surface`
+derives from `mtl::texture` and from
+`rsx::render_target_descriptor<mtl::texture*>`, which is the shape the Vulkan
+backend also has. Recorded as `CONFLICTS.md` `X2`.
+
+**A surface has two sample counts.** `get_spp()` is the guest sample count and must
+equal `get_format_sample_count(antialias)` (`surface_store.h:646`). The Metal image
+sample count follows the video configuration, so an override to one sample leaves
+`get_spp()` unchanged. `samples()` is the image sample count, and it decides whether
+a resolve target exists.
+
+**Deferred release is per frame slot.** A release is queued on the frame slot that
+asks for it and runs when the frame after the next one completes. The frames that
+follow a release on the queue may still reference the object, so freeing at the
+requesting slot's own completion is not enough.
+
 <!-- doc-end -->
