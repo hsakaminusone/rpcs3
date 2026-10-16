@@ -1,16 +1,10 @@
 #pragma once
 
 #include "util/types.hpp"
+#include "MTLAvailability.h"
 #include <memory>
 
 // Metal 4 backend port surface (docs/research/metal4/08 §2; HLD-01 §3.1).
-// The backend is compiled only on Apple arm64; Metal 4 itself adds an OS wall
-// (macOS 26+) that is a runtime gate, not a build flag, because metal-cpp ships
-// no availability annotations (docs/research/metal4/06 §3.4).
-#if defined(HAVE_METAL) && defined(__APPLE__) && defined(__aarch64__)
-#define RSX_ENABLE_METAL4 1
-#endif
-
 #ifdef RSX_ENABLE_METAL4
 
 #include "Metal/Metal.hpp"
@@ -22,14 +16,6 @@ namespace rsx
 
 namespace mtl
 {
-	// macOS version carrying the Metal 4 API (docs/research/metal4/06 §3.1).
-	constexpr u32 metal4_os_floor = 26;
-
-	// OS-major part of the gate; arm64 is enforced by not building the backend
-	// elsewhere (docs/research/metal4/06 §3.5).
-	u32 macos_major();
-	bool metal4_supported();
-
 	struct features
 	{
 		bool metal4_family = false; // GPUFamilyMetal4 probe result
