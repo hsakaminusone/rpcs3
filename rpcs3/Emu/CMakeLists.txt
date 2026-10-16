@@ -683,6 +683,12 @@ if(TARGET 3rdparty_vulkan)
     endif()
 endif()
 
+if(TARGET 3rdparty_metal)
+    target_sources(rpcs3_emu PRIVATE
+        RSX/MTL/MTLDevice.cpp
+    )
+endif()
+
 if(NOT WIN32)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
 endif()
@@ -697,6 +703,7 @@ target_link_libraries(rpcs3_emu
         3rdparty::opengl
         3rdparty::stblib
         3rdparty::vulkan
+        3rdparty::metal
         3rdparty::glew
         3rdparty::libusb
         3rdparty::hidapi

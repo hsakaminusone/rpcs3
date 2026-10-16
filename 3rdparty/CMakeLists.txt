@@ -205,6 +205,26 @@ if(USE_VULKAN)
 	endif()
 endif()
 
+# Metal 4 (docs/research/metal4/06 §3, §5: Apple silicon + macOS 26 at runtime,
+# deployment target stays 15.0, x86_64 excluded)
+set(METAL_TARGET 3rdparty_dummy_lib)
+if(USE_METAL4)
+	if(NOT APPLE)
+		message(STATUS "RPCS3: USE_METAL4 ignored on non-Apple platforms.")
+	elseif(CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+		message(STATUS "RPCS3: USE_METAL4 skipped for the non-arm64 slice (Metal 4 does not run on Intel GPUs).")
+	else()
+		add_library(3rdparty_metal_impl STATIC metal-cpp/metal.cpp)
+		target_include_directories(3rdparty_metal_impl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal-cpp)
+
+		add_library(3rdparty_metal INTERFACE)
+		target_compile_definitions(3rdparty_metal INTERFACE -DHAVE_METAL)
+		target_link_libraries(3rdparty_metal INTERFACE 3rdparty_metal_impl
+			"-framework Metal" "-framework QuartzCore" "-framework CoreFoundation" "-framework Foundation")
+		set(METAL_TARGET 3rdparty_metal)
+	endif()
+endif()
+
 # AsmJit
 add_subdirectory(asmjit EXCLUDE_FROM_ALL)
 
@@ -385,6 +405,7 @@ add_library(3rdparty::discordRPC ALIAS 3rdparty_discordRPC)
 add_library(3rdparty::faudio ALIAS ${FAUDIO_TARGET})
 add_library(3rdparty::libevdev ALIAS ${LIBEVDEV_TARGET})
 add_library(3rdparty::vulkan ALIAS ${VULKAN_TARGET})
+add_library(3rdparty::metal ALIAS ${METAL_TARGET})
 add_library(3rdparty::openal ALIAS 3rdparty_openal)
 add_library(3rdparty::ffmpeg ALIAS 3rdparty_ffmpeg)
 add_library(3rdparty::glew ALIAS 3rdparty_glew)
