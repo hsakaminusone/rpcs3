@@ -1,5 +1,6 @@
 #!/bin/sh -ex
 
+# Throwaway probe: builtin ffmpeg with LTO off, to expose missing system libraries.
 git config --global --add safe.directory '*'
 
 CPU_ARCH="${1:-x86_64}"
@@ -8,7 +9,7 @@ MSYS2="${2:-clang64}"
 # Pull all the submodules except some
 # Note: Tried to use git submodule status, but it takes over 20 seconds
 # shellcheck disable=SC2046
-git submodule -q update --init $(awk '/path/ && !/llvm/ && !/opencv/ && !/ffmpeg/ && !/curl/ && !/FAudio/ && !/zlib/ { print $3 }' .gitmodules)
+git submodule -q update --init $(awk '/path/ && !/llvm/ && !/opencv/ && !/curl/ && !/FAudio/ && !/zlib/ { print $3 }' .gitmodules)
 
 mkdir build && cd build || exit 1
 
@@ -41,7 +42,8 @@ cmake ..                                               \
     -DUSE_FAUDIO=OFF                                   \
     -DUSE_SDL=ON                                       \
     -DUSE_SYSTEM_SDL=OFF                               \
-    -DUSE_SYSTEM_FFMPEG=ON                             \
+    -DUSE_SYSTEM_FFMPEG=OFF                            \
+    -DUSE_LTO=OFF                                      \
     -DUSE_SYSTEM_OPENCV=ON                             \
     -DUSE_SYSTEM_OPENAL=OFF                            \
     -DUSE_DISCORD_RPC=ON                               \
@@ -54,11 +56,4 @@ cmake ..                                               \
     -DRUN_RPCS3_TESTS=OFF                              \
     -G Ninja
 
-ninja; build_status=$?;
-
-cd ..
-
-# If it compiled succesfully let's deploy.
-if [ "$build_status" -eq 0 ]; then
-    .ci/deploy-windows-clang.sh "${CPU_ARCH}" "${MSYS2}"
-fi
+ninja
