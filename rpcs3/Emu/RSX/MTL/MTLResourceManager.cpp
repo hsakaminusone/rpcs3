@@ -258,12 +258,16 @@ namespace mtl
 		m_per_frame[slot]->commit();
 	}
 
-	void resource_manager::init(MTL::Device* device, MTL4::CommandQueue* queue, u32 frame_count)
+	void resource_manager::init(const device& dev, u32 frame_count)
 	{
-		m_device = device;
-		m_shared.init(device, MTL::StorageModeShared, shared_block_size);
-		m_private.init(device, MTL::StorageModePrivate, private_block_size);
-		m_residency.init(device, queue, frame_count);
+		m_device = dev.dev();
+		m_shared.init(m_device, MTL::StorageModeShared, shared_block_size);
+		m_private.init(m_device, MTL::StorageModePrivate, private_block_size);
+		m_residency.init(m_device, dev.queue(), frame_count);
+
+		// The guest window is an application-lifetime resource, and every buffer
+		// binding refers to it (HLD-02 I5).
+		m_residency.make_persistent(dev.window().buffer);
 	}
 
 	void resource_manager::shutdown()

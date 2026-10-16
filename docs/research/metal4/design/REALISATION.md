@@ -57,6 +57,7 @@ exercised end to end before those exist.
 The resource layer (C5) is the first layer in place. `MTLResourceManager` holds a
 placement heap pool per storage class, a suballocator with a free list, the explicit
 residency sets, and the deferred-release list. It is the gate for the surface store
-and for the texture cache.
+and for the texture cache. The device layer also imports the guest window as one
+no-copy buffer, so a guest address is a buffer offset.
 
 <!-- doc-end -->
