@@ -19,7 +19,7 @@ inert rows (`moot`, `impossible`, `na`) need no code.
 | `misc` | 3 | none | reuse only |
 | `sync-flip` | 17 | `MTLSyncFlip` | the selector state, the alignment rules, the report decode and the release-barrier shape; the label sink and the present need the command queue |
 | `nv0039-dma` | 10 | `MTLNv0039Dma` | the transfer descriptor, the validity rule and the visibility point; the byte copy is the shared handler |
-| `nv2d-surface` | 7 | none | not started |
+| `nv2d-surface` | 7 | `MTLNv2dSurface` | the destination descriptor, the format map and the pitch rule; the copy and the swizzle kernel need the compute encoder |
 | `nv3089-image` | 15 | none | not started |
 | `nv308a-image` | 6 | none | not started |
 
