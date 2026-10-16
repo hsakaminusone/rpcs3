@@ -32,7 +32,7 @@ namespace mtl
 			return true;
 		}
 
-		rsx_log.error("Metal 4 requires macOS 26 or newer on Apple silicon. Host reported: %u", macos_major());
+		rsx_log.error("Metal 4 requires macOS %u or newer on Apple silicon. Host reported: %u", metal4_api_floor, macos_major());
 		return false;
 	}
 

@@ -65,6 +65,8 @@
 #include "Emu/RSX/VK/VKGSRender.h"
 #endif
 
+#include "Emu/RSX/MTL/MTLGSRender.h"
+
 #ifdef _WIN32
 #include <Usbiodef.h>
 #include <Dbt.h>
@@ -718,6 +720,7 @@ std::unique_ptr<gs_frame> gui_application::get_gs_frame()
 	}
 	case video_renderer::null:
 	case video_renderer::vulkan:
+	case video_renderer::metal:
 	{
 		frame = new gs_frame(screen, frame_geometry, app_icon, m_gui_settings, m_start_games_fullscreen);
 		break;
@@ -805,6 +808,20 @@ void gui_application::create_callbacks()
 #if defined(HAVE_VULKAN)
 			g_fxo->init<rsx::thread, named_thread<VKGSRender>>(ar);
 #endif
+			break;
+		}
+		case video_renderer::metal:
+		{
+#if defined(RSX_ENABLE_METAL4)
+			if (mtl::metal4_supported())
+			{
+				g_fxo->init<rsx::thread, named_thread<mtl::MTLGSRender>>(ar);
+				break;
+			}
+
+			rsx_log.error("Metal 4 is not available on this host; no video output.");
+#endif
+			g_fxo->init<rsx::thread, named_thread<NullGSRender>>(ar);
 			break;
 		}
 		}
