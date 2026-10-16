@@ -3,6 +3,8 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLShader.h"
+#include "MTLFragmentProgram.h"
+#include "MTLVertexProgram.h"
 
 #include "../Program/GLSLTypes.h"
 #include "../Program/SPIRVCommon.h"
@@ -13,20 +15,16 @@
 
 namespace mtl
 {
-	// The Metal decompiler subclass lands with the shader front-end unit
-	// (mirrors VKVertexProgram; HLD-05 §2.1).  Until then the seam reports the
-	// missing hop instead of returning a wrong shader, so a recompile fails
-	// cleanly and no wrong pipeline is cached.
-	std::string decompile_vertex_program(const RSXVertexProgram&)
+	// The RSX ucode -> GLSL hop.  The decompiler subclasses hold the GLSL dialect;
+	// the SPIR-V, MSL and library hops stay in this unit (HLD-05 §2.1).
+	std::string decompile_vertex_program(const RSXVertexProgram& program)
 	{
-		rsx_log.error("Metal: the RSX -> GLSL vertex decompiler is not wired yet (MTLProgramPipeline.h)");
-		return {};
+		return decompile_vertex_glsl(program);
 	}
 
-	std::string decompile_fragment_program(const RSXFragmentProgram&)
+	std::string decompile_fragment_program(const RSXFragmentProgram& program)
 	{
-		rsx_log.error("Metal: the RSX -> GLSL fragment decompiler is not wired yet (MTLProgramPipeline.h)");
-		return {};
+		return decompile_fragment_glsl(program);
 	}
 
 	shader_program::~shader_program()
@@ -157,16 +155,17 @@ namespace mtl
 
 	void MTLTraits::validate_pipeline_properties(const vertex_program_type&, const fragment_program_type& fragment, pipeline_properties& properties)
 	{
-		// A zero mask means the fragment outputs were not reflected, so leave the
-		// properties untouched rather than clear every write mask.
-		if (fragment.color_output_mask == 0)
+		// A program whose MSL translation failed carries no reflection, so its
+		// properties must be left alone.  A zero mask on a translated program is
+		// not the same thing: it is a program with no colour output, and it must
+		// clear every write mask so an unwritten attachment cannot be written.
+		if (fragment.msl.empty())
 		{
 			return;
 		}
 
-		// Mask each write mask by the fragment program's live colour outputs, so
-		// an unwritten attachment cannot be written (the VKTraits intent,
-		// VKProgramBuffer.h:34-41).
+		// Mask each write mask by the fragment program's live colour outputs (the
+		// VKTraits intent, VKProgramBuffer.h:34-41).
 		const u32 attachment_count = static_cast<u32>(properties.write_mask.size());
 		for (u32 index = 0; index < attachment_count; ++index)
 		{

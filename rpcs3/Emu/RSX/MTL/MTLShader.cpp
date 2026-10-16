@@ -6,9 +6,6 @@
 
 #include "util/logs.hpp"
 
-#include <cctype>
-#include <cstdio>
-
 // SPIRV-Cross is third-party.  The include directory is SYSTEM
 // (3rdparty/spirv-cross/rpcs3.cmake), and the pragmas keep the diagnostics out
 // if the header is ever reached as a normal include (the SPIRVCommon.cpp idiom).
@@ -56,56 +53,6 @@ namespace mtl
 			msl_binding.msl_sampler = binding;
 			compiler.add_msl_resource_binding(msl_binding);
 		}
-
-		// A float literal for injected MSL text; `1` without a suffix would be an
-		// int in MSL, and `1f` is not a valid literal, so a decimal point is added
-		// when the value has no fraction or exponent.
-		std::string float_literal(f32 value)
-		{
-			char buffer[32]{};
-			std::snprintf(buffer, sizeof(buffer), "%.9g", static_cast<double>(value));
-			std::string text = buffer;
-
-			if (text.find_first_of(".eEni") == std::string::npos)
-			{
-				text += ".0";
-			}
-
-			text += "f";
-			return text;
-		}
-
-		bool is_identifier_char(char c)
-		{
-			return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
-		}
-
-		// The index of the '(' at `open`, or npos.
-		usz matching_paren(const std::string& text, usz open)
-		{
-			if (open >= text.size() || text[open] != '(')
-			{
-				return std::string::npos;
-			}
-
-			int depth = 0;
-			for (usz index = open; index < text.size(); ++index)
-			{
-				if (text[index] == '(')
-				{
-					++depth;
-				}
-				else if (text[index] == ')')
-				{
-					if (--depth == 0)
-					{
-						return index;
-					}
-				}
-			}
-
-			return std::string::npos;
-		}
 	}
 
 	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask)
@@ -124,6 +71,11 @@ namespace mtl
 		// The VS reads its attributes from the texture_buffer streams, not from a
 		// vertex descriptor (HLD-05 §3.5).
 		options.texture_buffer_native = true;
+		// RSX programmable blending is a tile framebuffer read, and MSL 2.3 has it
+		// natively: an input attachment becomes a [[color(i)]] fragment input
+		// (HLD-05 §2.4).  Without this the cross-compiler emits it as a texture
+		// binding that nothing can supply.
+		options.use_framebuffer_fetch_subpasses = true;
 		compiler.set_msl_options(options);
 
 		const spirv_cross::ExecutionModel stage = is_vertex
@@ -204,161 +156,6 @@ namespace mtl
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
 		descriptor->release();
 		return library;
-	}
-
-	std::string rewrite_programmable_blend(std::string msl, u32 color_index)
-	{
-		// The input attachment is the texture whose `.read(` the shader calls.
-		const std::string read_token = ".read(";
-		const usz read_pos = msl.find(read_token);
-		if (read_pos == std::string::npos)
-		{
-			return msl;
-		}
-
-		usz name_start = read_pos;
-		while (name_start > 0 && is_identifier_char(msl[name_start - 1]))
-		{
-			--name_start;
-		}
-
-		const std::string name = msl.substr(name_start, read_pos - name_start);
-		if (name.empty())
-		{
-			return msl;
-		}
-
-		// The declaration `texture2d<float> NAME [[texture(N)]]` becomes a
-		// `[[color(color_index)]]` fragment input of type float4.
-		const std::string declaration = "texture2d<float> " + name;
-		const usz decl_pos = msl.find(declaration);
-		if (decl_pos == std::string::npos)
-		{
-			return msl;
-		}
-
-		const usz attribute_pos = msl.find("[[texture(", decl_pos);
-		const usz attribute_end = (attribute_pos == std::string::npos) ? std::string::npos : msl.find("]]", attribute_pos);
-		if (attribute_pos == std::string::npos || attribute_end == std::string::npos)
-		{
-			return msl;
-		}
-
-		const std::string attribute = "[[color(" + std::to_string(color_index) + ")]]";
-		msl.replace(decl_pos, (attribute_end + 2) - decl_pos, "float4 " + name + " " + attribute);
-
-		// Each `NAME.read(<coordinate>)` becomes the fetched value NAME.
-		const std::string call = name + read_token;
-		usz pos = 0;
-		while ((pos = msl.find(call, pos)) != std::string::npos)
-		{
-			const usz close = matching_paren(msl, pos + call.size() - 1);
-			if (close == std::string::npos)
-			{
-				break;
-			}
-
-			msl.replace(pos, (close + 1) - pos, name);
-			pos += name.size();
-		}
-
-		return msl;
-	}
-
-	std::string rewrite_push_constant_slot(std::string msl, const std::string& block_name, u32 slot)
-	{
-		if (block_name.empty())
-		{
-			return msl;
-		}
-
-		// SPIRV-Cross emits `constant BLOCK& NAME [[buffer(N)]]`.
-		const std::string declaration = "constant " + block_name + "&";
-		const usz decl_pos = msl.find(declaration);
-		if (decl_pos == std::string::npos)
-		{
-			return msl;
-		}
-
-		const usz attribute_pos = msl.find("[[buffer(", decl_pos);
-		const usz attribute_end = (attribute_pos == std::string::npos) ? std::string::npos : msl.find("]]", attribute_pos);
-		if (attribute_pos == std::string::npos || attribute_end == std::string::npos)
-		{
-			return msl;
-		}
-
-		msl.replace(attribute_pos, (attribute_end + 2) - attribute_pos, "[[buffer(" + std::to_string(slot) + ")]]");
-		return msl;
-	}
-
-	std::string inject_sampler_border_and_lod(std::string msl, const sampler_injection& spec)
-	{
-		if (spec.texture.empty() || spec.sampler.empty())
-		{
-			return msl;
-		}
-
-		// The helper names float4/sampler/texture2d unqualified, so it needs the
-		// `using namespace metal;` line.  Without the anchor the rewrite would not
-		// compile, so leave the source unchanged.
-		const std::string anchor = "using namespace metal;";
-		const usz anchor_pos = msl.find(anchor);
-		if (anchor_pos == std::string::npos)
-		{
-			return msl;
-		}
-
-		const std::string call = spec.texture + ".sample(" + spec.sampler + ", ";
-		usz pos = 0;
-		bool rewritten = false;
-		while ((pos = msl.find(call, pos)) != std::string::npos)
-		{
-			const usz close = matching_paren(msl, pos + spec.texture.size() + std::string(".sample").size());
-			if (close == std::string::npos)
-			{
-				break;
-			}
-
-			const usz arguments_start = pos + call.size();
-			const std::string coordinate = msl.substr(arguments_start, close - arguments_start);
-			// Only the two-argument sample form is rewritten; a third LOD
-			// argument would need to fold into the bias and is left alone.
-			if (coordinate.find(',') != std::string::npos)
-			{
-				pos = close + 1;
-				continue;
-			}
-
-			const std::string replacement = "rsx_sampler_fetch(" + spec.texture + ", " + spec.sampler + ", " + coordinate
-				+ ", " + float_literal(spec.lod_bias)
-				+ ", float4(" + float_literal(spec.border[0]) + ", " + float_literal(spec.border[1])
-				+ ", " + float_literal(spec.border[2]) + ", " + float_literal(spec.border[3]) + ")"
-				+ ", " + (spec.border_enabled ? "true" : "false") + ")";
-
-			msl.replace(pos, (close + 1) - pos, replacement);
-			pos += replacement.size();
-			rewritten = true;
-		}
-
-		if (!rewritten)
-		{
-			return msl;
-		}
-
-		// The border test is on normalized coordinates; the RSX 2D case the port
-		// targets uses normalized UVs.
-		const std::string helper =
-			"\nstatic inline float4 rsx_sampler_fetch(texture2d<float> tex, sampler smp, float2 uv, float lod_bias, float4 border, bool border_enabled)\n"
-			"{\n"
-			"\tif (border_enabled && (any(uv < float2(0.0f)) || any(uv > float2(1.0f))))\n"
-			"\t{\n"
-			"\t\treturn border;\n"
-			"\t}\n"
-			"\treturn tex.sample(smp, uv, level(lod_bias));\n"
-			"}\n";
-
-		msl.insert(anchor_pos + anchor.size(), helper);
-		return msl;
 	}
 }
 

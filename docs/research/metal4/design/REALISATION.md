@@ -148,6 +148,17 @@ and travels in the MSL as `[[sample_mask]]`.
 and §6 Q2 leave them open. `MTLArgumentBinds` uses the doc's own stated safe
 default, 28 and 29 above the texture range, and says so at the definition.
 
+**The argument table was too small for its own map.** The first shape was 16
+buffers, 28 textures and 28 samplers, taken from the fixed RSX map's own range.
+It did not cover the map's highest indices: the substituted slots are buffers 28
+and 29, and the derived fragment range reaches texture 50. A bind past the
+table's maximum is not a diagnostic — the slot is simply not there. The shape is
+now derived from the map (`argument_buffer_count = fragment_blend_slot + 1`,
+`argument_texture_count = fragment_depth_input_slot + 1`), so a slot added to the
+map can no longer overflow the table in silence. The map also gained the three
+derived fragment slots that the fragment decompiler had been keeping as private
+constants, so the ABI has one home.
+
 ## The shader layer
 
 C6 is the RSX ucode to MSL seam, and it is one chain (HLD-05 §2.3 route A):
@@ -170,21 +181,39 @@ The six translation units build into `3rdparty_spirv_cross_impl` under
 `-w -Wno-error`, because the upstream code is not ours and it is not built with
 the project's warning set. This closes `CONFLICTS.md` `X3`.
 
-**The three post-passes.** SPIRV-Cross emits MSL that is correct and not complete
-for this backend, because three RSX features have no GLSL form that survives the
-cross-compiler. Each is a pure text transform of the whole MSL source, so each is
-unit-testable without a GPU (HLD-05 §2.4):
+**HLD-05 §2.4 asks for three MSL post-passes. None is needed.** The section is
+written against the assumption that SPIRV-Cross cannot express three RSX features
+in MSL. It can, and the seam does not have to guess at MSL text:
 
-1. Programmable blending. SPIRV-Cross emits the input attachment as
-   `texture2d<float> NAME [[texture(N)]]`, and MSL has no such construct for a
-   tile framebuffer fetch. The pass rewrites the declaration and the read into a
-   `[[color(color_index)]]` fragment input.
-2. Push-constant substitution. SPIRV-Cross emits the block as
-   `constant BLOCK& NAME [[buffer(N)]]`, and MSL has no push constants. The pass
-   sets the substituted RSX slot as the buffer index (HLD-05 §3.3).
-3. Border colour and LOD bias. Neither is expressible in MSL sampler state, so the
-   pass injects a helper and routes the named texture's sample call through it
-   (04 R18/R19).
+1. Programmable blending. SPIRV-Cross has the native path, and it is one option:
+   `CompilerMSL::Options::use_framebuffer_fetch_subpasses` turns a subpass input
+   into a `[[color(i)]]` fragment input and its read into the value itself
+   (`spirv_msl.cpp:15699-15718`, `:16522-16526`). The option defaults to false,
+   which is why the first draft of this unit tried to rewrite the MSL by text.
+   The seam sets the option and the rewrite is gone. A text pass here would also
+   have been fragile: it keyed on `texture2d<float>` and missed the
+   multisampled form, and it found the input attachment by searching for the
+   first `.read(` in the module.
+2. Push-constant substitution. `add_msl_resource_binding` already sets the MSL
+   buffer index from the substituted slot, so the emitted declaration is
+   `[[buffer(28)]]` or `[[buffer(29)]]` directly (HLD-05 §3.3). A text pass on the
+   block name is a second mechanism for one job.
+3. Border colour and LOD bias. The LOD bias is already handled where it belongs,
+   in the emulation library: the decompiler reads the per-unit `sampler_info` and
+   the `TEX*_BIAS` ops apply it (`GLSLSnippets/RSXProg/RSXFragmentTextureOps.glsl`).
+   The border colour is a real gap and stays open: RSX takes an arbitrary RGBA
+   border, and Metal's sampler offers only four fixed border colours
+   (`MTL::SamplerBorderColor`). Baking the colour into the MSL would also be
+   wrong, because the program cache is keyed by the program and the border colour
+   is per texture unit and per draw. The fix belongs in the shared
+   `sampler_info` buffer, next to the LOD bias, and it changes a header the
+   Vulkan backend also reads, so it is recorded rather than taken here.
+
+**The seam is wired.** `MTLProgramPipeline` calls the two decompiler subclasses
+(`MTLVertexProgram`, `MTLFragmentProgram`) for the RSX ucode -> GLSL hop, then
+`spirv::compile_glsl_to_spv`, then `spv_to_msl`, then `compile_msl`. The
+decompilers emit Vulkan-rule GLSL 450 and take their argument indices from
+`MTLArgumentBinds.h`, so a program's MSL indices are the RSX ABI numbers.
 
 **The four doc-vs-tree conflicts.** These change no design decision, so they are
 citation conflicts (`CONFLICTS.md` `X4`):
@@ -207,6 +236,55 @@ citation conflicts (`CONFLICTS.md` `X4`):
 `-fno-exceptions`. A malformed guest shader therefore aborts RPCS3 instead of
 failing one pipeline. A pre-validate or a subprocess guard is owed before the
 backend is offered to users.
+
+## The presenter
+
+C7. No pixel reaches the screen without it. `MTLPresenter` owns the CAMetalLayer
+and the present path; `MTLMetalLayer` is the AppKit half, and it is the only
+Objective-C++ unit of the backend. The renderer attaches it to the Qt NSView that
+`GSFrameBase::handle()` returns.
+
+**The drawable carries the source resolution.** A CAMetalLayer scales its drawable
+to its own bounds, so the drawable is sized to the RSX output and the present is
+one copy and no scale pass. A drawable the size of the client area would need a
+GPU scale or a cropped copy. The presenter sets the size on the first present and
+on every size change, so the layer needs no resize call. The cost is that the
+display pipe, not the GPU, does the scaling, and that `CAMetalLayer`'s default
+`contentsGravity` is `resize`: a source whose aspect ratio differs from the window
+is stretched rather than letterboxed, and a Retina window upscales the drawable.
+Both are the overlay composite pass's job (the aspect mode and integer scaling
+live there), not the presenter's.
+
+**The present stays on the one submit path.** Metal 4 requires a wait for the
+drawable before it is written and a signal before it is presented, and both are
+queue operations. The queue belongs to the recorder, so
+`command_recorder::set_present_drawable` does the wait immediately and `submit()`
+does the signal after the commit. The presenter does not commit; a second commit
+path would break the frame ring.
+
+**The copy goes through a compute encoder.** Metal 4 has no separate blit
+encoder. `MTL4::ComputeCommandEncoder::copyFromTexture` is the copy, so the
+present needs no new encoder kind.
+
+**The flip source is the surface at the flip address.** `MTLGSRender::flip` looks
+it up with `rsx::surface_store::get_surface_at(info.buffer)` and asks for the
+memory-read form. A frame whose surface is absent, or whose drawable pool is
+empty, presents nothing: the frame is dropped and not presented late.
+
+**A copy needs a matching destination.** `copyFromTexture` is a straight copy, so
+both sides must agree on the sample count and the format. The presenter checks
+both and drops the frame when they do not match, and it takes the layer's pixel
+format from the source when the layer can scan it out. A multisampled display
+surface therefore needs its resolve target, and an exotic format needs a
+conversion pass; neither is a copy.
+
+**The presenter is not the frame owner.** `begin_frame` and `submit` stay in
+`flip`, so a dropped present still advances the ring and the recorder stays the
+only owner of the frame lifecycle.
+
+The mechanism is complete and wired. It cannot yet produce a content pixel,
+because no draw is executed and the surface store is therefore empty: that needs
+the execution spine (C1).
 
 ## The dial tests
 
