@@ -707,6 +707,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLBlendState.cpp
         RSX/MTL/MTLDrawState.cpp
         RSX/MTL/MTLGSRender.cpp
+        RSX/MTL/MTLSyncFlip.cpp
     )
 endif()
 
