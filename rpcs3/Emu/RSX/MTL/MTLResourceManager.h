@@ -74,7 +74,7 @@ namespace mtl
 	class resource_manager
 	{
 	public:
-		void init(MTL::Device* device, MTL4::CommandQueue* queue, u32 frame_count);
+		void init(const device& dev, u32 frame_count);
 		void shutdown();
 
 		MTL::Buffer* new_buffer(u64 length, MTL::StorageMode storage);
