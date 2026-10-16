@@ -267,6 +267,19 @@ is a *smaller* PSO key and a higher cache hit rate than the doc implies.  The
 `MTL4RenderCommandEncoder` setters.  Only the HLD-05 stage assignment is wrong,
 and it is left unchanged for its author to correct.
 
+**One further correction, found while wiring the clear.**  The depth test and the
+depth write are **not** individual encoder fields.  `MTL4RenderCommandEncoder`
+declares `setDepthStencilState(const MTL::DepthStencilState*)` (`:98`) and no
+`setDepthCompareFunction` and no `setDepthWriteEnabled`; the compare function and
+the write flag are fields of `MTL::DepthStencilDescriptor`, consumed when the
+immutable `MTL::DepthStencilState` is built.  So the `depth-rop` latch
+(`MTLDepthStencil.h`) is the key of a cached object, and that object is the only
+way the depth state reaches the encoder.  `create_depth_stencil_state`
+(`MTLDepthStencil.cpp:154`) builds it; the *cache* and the `setDepthStencilState`
+call are part of the draw path, so a backend that builds the object without
+applying it has no depth test at all.  The built-in fill applies its own two
+objects directly, because it must not be rejected by the state it is clearing.
+
 ---
 
 ## X3 — SPIRV-Cross is assumed but not vendored

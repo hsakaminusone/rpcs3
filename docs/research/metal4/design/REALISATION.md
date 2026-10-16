@@ -327,4 +327,51 @@ goes through `gcm_enum_cast`, which returns an `expected`, and the conversion to
 the enum verifies (`gcm_enums.h:1188`). `NV4097_SET_FRONT_FACE` zero is one such
 word, so a zeroed fixture stops on a valid dial.
 
+## The execution spine
+
+C1 is the `rsx::thread` execution path. The backend objects come up in
+`on_init_thread` and go down in `on_exit`, in reverse order, and `flip` presents
+the frame. This unit lands the frame lifetime and the clear path; the draw path is
+the next one.
+
+**The framebuffer is the pass descriptor.** Metal has no framebuffer object, so
+`MTLFramebuffer` holds the bound attachment set — the colour targets and the depth
+stencil the store bound — and builds the `MTL4::RenderPassDescriptor` for each
+pass. The store still owns the surfaces: it reuses a match, splits an overlap and
+allocates when there is none. The set is re-walked only when the layout changes,
+and an unchanged layout is recognised by the address, pitch, format and target
+fields, not by the serialization tag, which changes with every store. A
+multisampled colour attachment resolves on store, so the resolved image is the
+samplable one.
+
+**The clear is a load action, or a fill.** A clear that covers its whole
+attachment is `MTLLoadActionClear` and costs no draw. Metal has no scissored
+clear, so a clear that does not cover its attachment is a full-screen triangle
+confined by the scissor: `MTLFill` is that pipeline, and it is the Metal form of
+`vkCmdClearAttachments`. Its values reach the fragment stage through the argument
+table, because Metal 4 has no `setBytes`, and the ABI carries one slot for it
+(`fill_values_slot`). `clear_covers_attachment()` decides which form applies, so
+the decision stays the surface cluster's and not this unit's.
+
+**The depth-stencil object is the only carrier of the depth state.**
+`MTL4RenderCommandEncoder` has `setDepthStencilState` and no compare-function and
+no write-flag setter, so the latch must be built into a cached object and applied
+(`CONFLICTS.md` C7). The fill applies its own two objects — a write one and a read
+one, both with an always-passing compare, because a clear must not be rejected by
+the state it is clearing. The draw path needs the cache and the apply, and it is
+recorded here as the next item rather than left as a silent no-op.
+
+**The scissor is cached.** `rsx::thread::get_scissor` returns false both for an
+unchanged region and for an invalid one, and it fills the region only in the first
+case, so the caller caches the rectangle and reads the flag to tell the two apart.
+The clear asks for the unclipped form, which is the rule the draw context uses in
+the Vulkan backend (`VKGSRender.cpp:2618`).
+
+**What still has no consumer.** `emit_geometry` is the base no-op, so no draw is
+executed and the surface store stays empty: `flip` finds no surface, and a clear
+is the only thing this unit can put on a screen. The draw path needs the vertex
+stream upload, the index expansion the shared `draw_command_processor` already
+does, the texture cache, and the depth-stencil cache above. `on_semaphore_acquire_wait`
+is the base no-op too, so a mid-frame semaphore wait does not yet force a submit.
+
 <!-- doc-end -->
