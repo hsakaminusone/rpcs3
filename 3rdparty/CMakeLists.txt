@@ -215,7 +215,10 @@ if(USE_METAL4)
 		message(STATUS "RPCS3: USE_METAL4 skipped for the non-arm64 slice (Metal 4 does not run on Intel GPUs).")
 	else()
 		add_library(3rdparty_metal_impl STATIC metal-cpp/metal.cpp)
-		target_include_directories(3rdparty_metal_impl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal-cpp)
+		# SYSTEM: metal-cpp is third-party.  Its headers use old-style casts and
+		# other constructs that RPCS3 compiles with -Werror (as with the other
+		# vendored dependencies, which are all -isystem).
+		target_include_directories(3rdparty_metal_impl SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal-cpp)
 
 		add_library(3rdparty_metal INTERFACE)
 		target_compile_definitions(3rdparty_metal INTERFACE -DHAVE_METAL)
