@@ -26,6 +26,7 @@
 #include "MTLZCULL.h"
 
 #include "Emu/Memory/vm.h"
+#include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/Common/BufferUtils.h"
 #include "Emu/RSX/Common/io_buffer.h"
 #include "Emu/RSX/Core/RSXDrawCommands.h"
@@ -33,11 +34,14 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/Utils/rsx_utils.h"
+#include "util/asm.hpp"
 #include "util/video_provider.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <list>
+#include <mutex>
 #include <tuple>
 
 // The two media-capture triggers are owned by the Qt side and the shared report
@@ -314,6 +318,37 @@ namespace mtl
 		MTL4::RenderCommandEncoder* encoder = nullptr;
 	};
 
+	// The deferred flush queue.  A guest write into a range the texture cache owns
+	// faults on the protected page, and the guest bytes are canonical, so the dirty
+	// sections must reach guest memory before the faulting instruction is retried.
+	// The fault runs on the guest thread and the flush needs an encoder, so the
+	// faulting thread posts the request, raises the backend interrupt and waits
+	// (GLGSRender.cpp:1298-1307, :1385-1396).
+	//
+	// The wait is not an optimisation: the page keeps its protection until the
+	// flush completes, so a request that is never drained leaves the guest
+	// faulting on the same instruction forever.
+	struct MTLGSRender::flush_queue
+	{
+		struct request
+		{
+			texture_cache::thrashed_set sections;
+			bool invalidate_samplers = false;
+
+			atomic_t<bool> processed = false;
+			volatile bool received = false;
+
+			void producer_wait()
+			{
+				utils::spin_wait(processed, [](bool v) { return v; });
+				received = true;
+			}
+		};
+
+		std::list<request> pending;
+		std::mutex guard;
+	};
+
 	MTLGSRender::MTLGSRender(utils::serial* ar) noexcept
 		: GSRender(ar)
 	{
@@ -343,6 +378,7 @@ namespace mtl
 		// guest window joins the persistent residency set and the ring is sized once
 		// (HLD-02 I5, HLD-04 §3.2).
 		m_frame_resources = std::make_unique<frame_resources>();
+		m_flush_queue = std::make_unique<flush_queue>();
 		m_frame_resources->resources.init(*m_device, frame_slot_count);
 		m_frame_resources->recorder.init(*m_device, m_frame_resources->resources);
 		m_frame_resources->fill.init(*m_device, m_frame_resources->resources);
@@ -1438,11 +1474,60 @@ namespace mtl
 	// committed (HLD-04 §4.3).
 	void MTLGSRender::on_semaphore_acquire_wait()
 	{
+		// A pending flush request before the wait, or the RSX thread sleeps on a
+		// label while the faulting thread waits for the flush it posted
+		// (GLGSRender.cpp:1329).
+		if (m_flush_queue && !m_flush_queue->pending.empty())
+		{
+			do_local_task(rsx::FIFO::state::lock_wait);
+		}
+
 		if (m_frame_open && m_frame_resources)
 		{
 			m_frame_resources->recorder.submit();
 			m_frame_open = false;
 		}
+	}
+
+	// The flush runs here, on the RSX thread, because it needs an encoder and the
+	// fault that asked for it runs on a guest thread (GLGSRender.cpp:1329-1350).
+	// A request is released by the faulting thread once it has consumed its result,
+	// so the list keeps the requests that are still in flight.
+	void MTLGSRender::do_local_task(rsx::FIFO::state state)
+	{
+		if (m_flush_queue && m_frame_resources)
+		{
+			std::lock_guard lock(m_flush_queue->guard);
+
+			m_flush_queue->pending.remove_if([](const flush_queue::request& q) { return q.received; });
+
+			for (flush_queue::request& request : m_flush_queue->pending)
+			{
+				if (request.processed)
+				{
+					continue;
+				}
+
+				// The request may have arrived between two frames, and the recorder
+				// has no command buffer open while the ring slot is idle.
+				open_frame();
+
+				m_frame_resources->textures.flush_all(m_frame_resources->recorder, request.sections);
+
+				if (request.invalidate_samplers)
+				{
+					// A cached image became invalid, so every unit re-resolves on its
+					// next draw (VKGSRender.cpp:1028).  The flags are the RSX thread's
+					// to write, because the faulting thread cannot touch them.
+					m_textures_dirty.fill(true);
+					m_vertex_textures_dirty.fill(true);
+				}
+
+				request.processed = true;
+			}
+		}
+
+		GSRender::do_local_task(state);
 	}
 
 	// A guest write to a range a surface owns invalidates that surface, because
@@ -1459,8 +1544,9 @@ namespace mtl
 	}
 
 	// A guest access to a locked page invalidates the sections that overlap it
-	// (VKGSRender.cpp:1277).  The call runs on the RSX thread between draws, so no
-	// encoder is open and the flush may open its own.
+	// (VKGSRender.cpp:1277).  The call runs on the faulting guest thread, so it
+	// only records the invalidation: the deferred cause keeps the encoding off
+	// this thread, and the flush is queued for the RSX thread.
 	bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
 	{
 		if (!m_frame_resources)
@@ -1474,21 +1560,33 @@ namespace mtl
 			? rsx::invalidation_cause::deferred_write
 			: rsx::invalidation_cause::deferred_read;
 
-		const auto result = m_frame_resources->textures.invalidate_address(m_frame_resources->recorder, address, cause);
-
-		if (result.invalidate_samplers)
-		{
-			// A cached image became invalid, so every unit re-resolves on its next
-			// draw (VKGSRender.cpp:1028).
-			m_textures_dirty.fill(true);
-			m_vertex_textures_dirty.fill(true);
-		}
+		auto result = m_frame_resources->textures.invalidate_address(m_frame_resources->recorder, address, cause);
 
 		if (!result.violation_handled)
 		{
 			// The fault is not the texture cache's, so it belongs to a query.
 			return zcull_ctrl->on_access_violation(address);
 		}
+
+		const bool invalidate_samplers = result.invalidate_samplers;
+
+		flush_queue::request* request = nullptr;
+		{
+			std::lock_guard lock(m_flush_queue->guard);
+
+			auto& queued = m_flush_queue->pending.emplace_back();
+			queued.sections = std::move(result);
+			queued.invalidate_samplers = invalidate_samplers;
+			request = &queued;
+		}
+
+		// The page keeps its protection until the flush reaches guest memory, so the
+		// faulting instruction must not be retried before the request completes
+		// (GLGSRender.cpp:1298-1307).  A request is posted even when nothing is
+		// flushable, because the sampler flags belong to the RSX thread.
+		m_eng_interrupt_mask |= rsx::backend_interrupt;
+		vm::temporary_unlock();
+		request->producer_wait();
 
 		return true;
 	}

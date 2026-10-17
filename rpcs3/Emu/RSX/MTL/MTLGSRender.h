@@ -54,6 +54,11 @@ namespace mtl
 		void on_invalidate_memory_range(const utils::address_range32& range, rsx::invalidation_cause cause) override;
 		void notify_tile_unbound(u32 tile) override;
 
+		// Drain the deferred flush queue.  A guest fault cannot flush, because it
+		// runs on the guest thread and the flush needs an encoder, so it posts a
+		// request and waits; this is where the request runs (GLGSRender.cpp:1329).
+		void do_local_task(rsx::FIFO::state state) override;
+
 	private:
 		// The resource layer, the command recorder, the surface store, the pass the
 		// attachments belong to, the built-in fill, the presenter and the draw path.
@@ -95,6 +100,12 @@ namespace mtl
 
 		std::unique_ptr<device> m_device;
 		std::unique_ptr<frame_resources> m_frame_resources;
+
+		// The deferred flush queue.  It is not part of the frame resources, because
+		// a request outlives the frame that is open when it arrives.  Defined in
+		// the .cpp, so the header stays free of the RSX texture-cache headers.
+		struct flush_queue;
+		std::unique_ptr<flush_queue> m_flush_queue;
 
 		// The current scissor rectangle, in attachment pixels (MTLRasterState.h).
 		areau m_scissor;
