@@ -85,7 +85,7 @@ accepted deviation is marked **Limitation**.
 | F8 | High | access-violation result | Fixed |
 | F9 | Medium | drawable layer setup | Partial |
 | F10 | Medium | present output pipeline | Fixed |
-| F11 | Medium | DMA/image clusters | Open |
+| F11 | Medium | DMA/image clusters | Fixed |
 | F12 | Medium | drawable acquire block | Fixed |
 | E1 | High | cull-both point/line | Fixed |
 | E2 | Critical | `surface_b` attachment | Fixed |
@@ -102,7 +102,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 59 findings, 42 fixed, 3 partial, 0 blocked, 5 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 59 findings, 43 fixed, 3 partial, 0 blocked, 4 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -647,14 +647,16 @@ interval has no metal-cpp binding, so `metal_layer_refresh_interval` reads
 `NSScreen.maximumFramesPerSecond` in the Objective-C++ unit. `adaptive` is an
 approximation: Metal has no mailbox present mode, so it cannot yield exactly.
 
-### F11 — the DMA, image and sync clusters are dead code. Open.
-`MTLNv0039Dma.cpp`, `MTLNv2dSurface.cpp`, `MTLNv3089Image.cpp`,
-`MTLNv308aImage.cpp` and `MTLSyncFlip.cpp` only include themselves, so nothing
-reaches them; the live DMA, blit and sync path is the shared CPU implementation
-in `NV47/HW/*.cpp` (`nv0039.cpp:69-177` and the rest). Their semantics match the
-references, so they will drift from the live path. `MTLSyncFlip`'s GPU-label
-release path is unreachable. The fix is to wire them into the backend or delete
-them.
+### F11 — the DMA, image and sync clusters are dead code. Fixed: deleted.
+The five units only included themselves, so nothing reached them. The live path
+is the shared CPU implementation in `NV47/HW/*.cpp` (`nv0039.cpp:69-177` and the
+rest), and the backend already declines both GPU paths a Metal-side unit would
+serve: `supports_passthrough_dma` is false (`MTLDevice.cpp:135`), so a transfer
+is a host byte copy over the shared guest window, and `supports_host_gpu_labels`
+is false (`MTLDevice.cpp:138`), so the guest labels stay CPU-side. A Metal-side
+decode of the same registers would only drift from the shared handlers, so the
+five units and their headers are deleted and the clusters move to reuse-only
+(`REALISATION.md`).
 
 ### F12 — the drawable acquire can block forever. Fixed.
 `MTLPresenter.cpp:78-83` called `nextDrawable()` while
@@ -825,6 +827,5 @@ harness owns. They are parked, not closed.
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
 | F5 / F9 | The partial halves wait transitively on the present output mode. |
-| F11 | Wire the dead DMA, image and sync clusters into the backend or delete them. The choice is a design decision, because the clusters are also the dialect-contract coverage. |
 
 <!-- doc-end -->

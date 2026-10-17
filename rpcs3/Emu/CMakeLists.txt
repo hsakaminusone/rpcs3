@@ -706,11 +706,6 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLHandles.cpp
         RSX/MTL/MTLTextureCache.cpp
         RSX/MTL/MTLGSRender.cpp
-        RSX/MTL/MTLSyncFlip.cpp
-        RSX/MTL/MTLNv0039Dma.cpp
-        RSX/MTL/MTLNv2dSurface.cpp
-        RSX/MTL/MTLNv3089Image.cpp
-        RSX/MTL/MTLNv308aImage.cpp
         RSX/MTL/MTLShader.cpp
         RSX/MTL/MTLProgramPipeline.cpp
         RSX/MTL/MTLVertexProgram.cpp
