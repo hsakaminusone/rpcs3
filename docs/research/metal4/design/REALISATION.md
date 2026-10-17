@@ -17,17 +17,21 @@ inert rows (`moot`, `impossible`, `na`) need no code.
 | `draw` | 13 | `MTLDrawState` | the primitive map, the index map and the value state; the lowering is reused |
 | `fixed-function` | 3 | none | reuse only |
 | `misc` | 3 | none | reuse only |
-| `sync-flip` | 17 | `MTLSyncFlip` | the selector state, the alignment rules, the report decode and the release-barrier shape; the label sink and the present need the command queue |
-| `nv0039-dma` | 10 | `MTLNv0039Dma` | the transfer descriptor, the validity rule and the visibility point; the byte copy is the shared handler |
-| `nv2d-surface` | 7 | `MTLNv2dSurface` | the destination descriptor, the format map and the pitch rule; the copy and the swizzle kernel need the compute encoder |
-| `nv3089-image` | 15 | `MTLNv3089Image` | the source state, the format map, the clip rule, the interpolation and the mirror test; the copy needs the compute encoder |
-| `nv308a-image` | 6 | `MTLNv308aImage` | the upload state, the store kind, the offset rule and the RGB565 rounding; the host store needs the guest window and the compute encoder |
+| `sync-flip` | 17 | none | reuse only; the guest labels stay CPU-side (`supports_host_gpu_labels` is false) |
+| `nv0039-dma` | 10 | none | reuse only; the byte copy is the shared CPU handler |
+| `nv2d-surface` | 7 | none | reuse only; the destination is the shared CPU blit |
+| `nv3089-image` | 15 | none | reuse only; the scaled copy is the shared CPU handler |
+| `nv308a-image` | 6 | none | reuse only; the host store is the shared CPU handler |
 
 ## Reuse-only clusters
 
-`fixed-function` and `misc` need no new Metal code. Every live row is realised by
-shared `Core/`, `Common/` or `Program/` code that the Metal backend calls the same
-way the Vulkan and OpenGL backends do.
+`fixed-function`, `misc`, `sync-flip`, `nv0039-dma`, `nv2d-surface`,
+`nv3089-image` and `nv308a-image` need no new Metal code. Every live row is
+realised by shared `Core/`, `Common/` or `Program/` code that the Metal backend
+calls the same way the Vulkan and OpenGL backends do. The transfer and sync
+engines run the shared CPU handlers, because the guest window is a shared buffer
+and the backend declines host GPU labels and passthrough DMA; a Metal-specific
+decode of the same registers would only drift.
 
 **`fixed-function`.**
 
@@ -49,10 +53,9 @@ way the Vulkan and OpenGL backends do.
 
 ## Substrate
 
-The remaining clusters and the latched-but-unconsumed rows need the same four
-missing layers: the surface store, the pass and encoder scheduler, the pipeline and
-descriptor layer, and the label sink with its command queue. No dial can be
-exercised end to end before those exist.
+The remaining clusters and the latched-but-unconsumed rows need the same three
+missing layers: the surface store, the pass and encoder scheduler, and the pipeline
+and descriptor layer. No dial can be exercised end to end before those exist.
 
 The resource layer (C5) is the first layer in place. `MTLResourceManager` holds a
 placement heap pool per storage class, a suballocator with a free list, the explicit
