@@ -402,10 +402,10 @@ file changes.
 
 **Argument tables are snapshotted at bind time.** A probe confirmed that
 `MTL4RenderCommandEncoder::setArgumentTable` captures the table, so a write that
-follows the bind is invisible to the draw. The order is therefore
-mutate-then-bind-then-draw, and `argument_binder::bind` returns whether it wrote
-any slot so the draw path re-binds the table only when it must. One table per
-stage per frame slot is enough: no table ring exists.
+follows the bind is invisible to the draw (`CONFLICTS.md` `X5`). The order is
+therefore mutate-then-bind-then-draw, and `argument_binder::bind` returns whether
+it wrote any slot so the draw path re-binds the table only when it must. One table
+per stage per frame slot is enough: no table ring exists.
 
 **The texture units resolve before the programs.** A draw clause resolves its
 referenced units once, in `load_texture_env`, before
@@ -418,14 +418,130 @@ entries, because MSL has no combined image sampler.
 
 The findings register (`REVIEW-FINDINGS.md`) holds the itemised list of places
 where the tree does not yet reproduce the RSX behaviour, with the evidence for
-each. The blocked set shares one cause: **the pass scheduler is not wired**, so
-`emit_barrier`'s pass-split request has no resolver, and the depth-as-texture
-stencil mirror (A3/B1), the `EQUAL` depth-test input (A4/B2), the texture
-barrier (B10) and the MSAA depth resolve (B6) all wait on it. The open set is the
-surface initialisation and transfer path (B4, B7, B8, B9, B14), the logic op
-(C1), the extended depth range (C3) and the two shader-feature flags (A7, A8).
+each. Five review passes feed it; the fifth is a second reading of the
+state-latching cluster, recorded as the `E` entries.
+
+The blocked set shares one cause: **the pass scheduler was not wired**, so no
+hazard was recorded and `emit_barrier` had no caller. The scheduler is now driven
+(pass D's F2), so the depth-as-texture stencil mirror (A3/B1), the `EQUAL`
+depth-test input (A4/B2), the texture barrier (B10) and the MSAA depth resolve
+(B6) are unblocked in principle and wait only on their own shader and surface
+work.
+
+The open set is the surface initialisation and transfer path (B4, B8, B14), the
+logic op (C1/E6), the sampler LOD bias (E8), the PSO attachment-count key (E3),
+the latch dataflow and its dead fields (E13), the shadow-compare flag (A7), the
+present output pipeline (F10) and the DMA, image and sync clusters (F11). Each
+carries its open question in `REVIEW-FINDINGS.md`, "Parked for review", because
+none can be settled from the tree alone: they wait on a hardware measurement, a
+Metal 4 behaviour check, or a decision the acceptance harness owns.
+
+The partial set is the flip preamble (F5), the access-violation result (F8), the
+drawable layer setup (F9) and the sampler LOD clamp (E8, which implements the
+clamp and records the bias as a limitation because Metal has no sampler bias):
+the fixes closed the present-critical half and the remainder waits on the CPU
+readback wait, the present pipeline or the fragment program's texture contract.
+
 The limitation set is the Metal state the RSX has and Metal does not: point
 polygon mode (C4), the per-primitive polygon-offset enables (C7), the line width,
-the depth bounds and the dither (C10).
+the dither (C10) and the inert PSO-key fields (E12), plus the hardware
+conditional-render path (A8), which stays on the CPU skip with its argument slot
+reserved and unbound.
+
+The second state pass also closed the cull-both point and line regression (E1,
+which rasterised nothing), the `surface_b` null-attachment crash (E2), the
+`z16_float` depth target (E4), the extended-depth-range claim (C3/E5), the A2C at
+one sample claim (E9), the missing depth-bounds test (E7) and the missing
+two-sample gate (E10), and replaced the PSO key's commutative hash (E11).
+
+The surface transfer pass closed the source validation and the covering-copy fast
+path in the old-contents drain (B7), the `erase_bkgnd` initialisation (B9, which
+was never done with the read-buffers configuration off) and the cyclic-reference
+barrier (B10, whose requirement the resource-level hazard record already meets).
+
+## The depth/stencil-as-texture cluster
+
+This was the last blocked group.  The redirected depth fragment unit (A3/B1) and the
+emulated depth compare (A4/B2) both read the depth surface from a fragment shader.
+A probe on the target device settled every mechanism, so the group is unblocked.
+
+The shared decode fixes the contract.  `ZS_READ(index, coord)` reads the depth plane
+and the stencil plane as
+`vec2(texture(texN, coord).r, float(texture(texN_stencil, coord).x))`
+(`Program/GLSLSnippets/RSXProg/RSXFragmentTextureDepthConversion.glsl:2`,
+`...RSXFragmentTextureMSAAOps.glsl:3`), and `TEX_NAME_STENCIL` is a second sampler
+per TIU (`RSXFragmentTextureOps.glsl:56`).  The stencil read is unsigned-integer, so
+the mirror is a `texture2d<uint>`.  The emulated compare fetches the depth plane with
+`texelFetch(frag_depth, ...)` and needs no sampler (`RSXROPEpilogue.glsl:77-82`).
+
+VK satisfies both by binding a second *view* of the same image: the stencil aspect
+view with a dedicated nearest/clamp-to-border sampler (`VKDraw.cpp:702-721`) and the
+depth aspect view with a null sampler (`VKDraw.cpp:795-800`).  A hardware probe on the
+target device (Apple A18 Pro, macOS 27) measured the Metal equivalents.
+
+- **The stencil mirror is a texture view.**  `newTextureView(MTLPixelFormatX32_Stencil8)`
+  of the `Depth32Float_Stencil8` surface is a shader-readable `texture2d<uint>` that
+  returns the exact stencil bytes, and it is the mechanism MoltenVK uses for a Vulkan
+  stencil aspect (`MVKImage.mm:2146-2161`).  `MTLPixelFormatStencil8` is not a
+  castable view format and aborts the process, so it must never be requested.  The
+  parent needs `MTLTextureUsagePixelFormatView`, which `surface::create` already sets.
+- **The depth input is a same-format copy.**  Depth→depth `copyFromTexture` is
+  bit-exact for `Depth32Float_Stencil8`, `Depth32Float` and `Depth16Unorm`, so a
+  mirror taken at the clause boundary gives the pre-pass snapshot the emulated compare
+  needs.  Every clause already gets its own pass (`command_recorder::open_pass` closes
+  the open encoder first, `MTLCommandRecorder.cpp:138-140`).
+- **The MSL read form is `.read()`.**  `texture2d<float, access::read>` with
+  `.read(uint2)` compiles and returns the depth; `texelFetch` is not a valid MSL
+  identifier in this toolchain.  The cross-compiler emits `.read()` for the guest
+  `texelFetch` (`OpImageFetch`), so the guest form needs no change.
+- **A stencil read-back uses the blit option.**  `copyFromTexture … toBuffer …
+  MTLBlitOptionStencilFromDepthStencil` yields one byte per texel with the exact
+  stencil values, and the depth option yields the depth plane (4 bytes per texel for
+  the 32-bit formats, 2 for `Depth16Unorm`).  A combined format requires a non-`None`
+  option.  MoltenVK sizes the read-back the same way (`MVKCmdTransfer.mm:1163-1185`).
+
+The same-pass attachment read is **not** rejected by API validation on this device,
+for depth or colour, read-only or write-enabled, but it stays formally undefined, so
+the depth input keeps the copy.  The stencil view is safe in the redirect case
+because the sampled surface is normally not the bound depth attachment.
+
+KosmicKrisp (the Mesa Vulkan-on-Metal-4 driver) independently reaches the same
+conclusions, which is the strongest corroboration available because it targets the same
+API.  It maps the stencil aspect to `PIPE_FORMAT_X32_S8X24_UINT`
+(`kk_image_view.c:103-105`), casts that to `MTLPixelFormatX32_Stencil8`
+(`kk_format.c:338`), builds the view with `newTextureViewWithPixelFormat:`
+(`mtl_texture.m:77-88`), and reserves `MTLPixelFormatStencil8` for blits only
+(`kk_cmd_copy.c:56`) — the same split.  Its read-back uses
+`MTLBlitOptionDepthFromDepthStencil` / `MTLBlitOptionStencilFromDepthStencil`
+(`kk_cmd_copy.c:50-57`) with `util_format_get_stride` sizing, byte-for-byte the contract
+measured here.  Its same-pass split predicate (`kk_cmd_buffer.c:394-408`) splits on a
+depth/stencil write→read edge and never on a colour write→read edge, exactly the measured
+rule, and it always splits under multisampling (`kk_cmd_buffer.c:467-477`).
+
+The depth input keeps the **copy** and does not adopt KosmicKrisp's pass split.  The split
+makes a depth read defined by moving it to a later encoder, which works when the read and
+the write are separate commands.  The emulated compare reads and writes the same surface
+inside one draw, so a split cannot express it; the pre-pass snapshot is what the RSX
+depth test needs.  The copy is the mechanism the split cannot replace.
+
+Multisampling: an MS→MS depth copy is clean, an MS→1-sample blit is rejected
+(`sampleCount` must match), and a texture view made from a multisampled source can carry a
+channel swizzle, which answers B14.  The MSAA depth resolve does **not** use a render-pass
+store.  KosmicKrisp tried that and abandoned it: a Metal producer barrier does not order a
+depth or stencil render-pass resolve, even at `StageAll`→`StageAll`, so it forces a meta
+resolve for both and applies the render-pass resolve to colour only
+(`kk_cmd_buffer.c:1000-1005`, `:900-986`).  This backend therefore keeps
+`StoreActionStore` on the depth and stencil attachments and does not use a depth resolve
+target; `surface::resolve` returns early for a depth surface and leaves the flag set, so
+the surface is never claimed resolved (REVIEW-FINDINGS.md, B6).  The colour resolve uses
+`StoreActionStoreAndMultisampleResolve`, so the multisampled image survives and a later
+write needs no unresolve.
+
+The two depth-as-texture binds are combined image samplers in the MSL layout, because the
+generated GLSL declares `usampler2D` and `sampler2D` (`MTLFragmentProgram.cpp:108,119`) and
+SPIRV-Cross gives both a texture and a sampler at the same index (`MTLShader.cpp:52-53`).
+Each therefore binds a texture and a sampler.  The stencil half uses its own
+nearest/clamp-to-border opaque-black sampler (`stencil_mirror_sampler`), because the
+unit's sampler may be a comparison sampler (`VKDraw.cpp:707-717`).
 
 <!-- doc-end -->
