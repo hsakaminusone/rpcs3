@@ -428,13 +428,13 @@ depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
 and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
 The open set is the texture initialisation path (B8), the logic op (C1/E6), the
-latch dataflow and its dead fields (E13), the shadow-compare flag (A7), the present
-output pipeline (F10) and the DMA, image and sync clusters (F11). Each carries its
-open question in `REVIEW-FINDINGS.md`, "Parked for review", because none can be
-settled from the tree alone: they wait on a hardware measurement, a Metal 4
-behaviour check, or a decision the acceptance harness owns. The PSO
-attachment-count key (E3) is closed without a change: the proposed colour-attachment
-map bridges a gap the RSX renumbering does not leave.
+latch dataflow and its dead fields (E13), the present output pipeline (F10) and the
+DMA, image and sync clusters (F11). Each carries its open question in
+`REVIEW-FINDINGS.md`, "Parked for review", because none can be settled from the
+tree alone: they wait on a hardware measurement, a Metal 4 behaviour check, or a
+decision the acceptance harness owns. The PSO attachment-count key (E3) is closed
+without a change: the proposed colour-attachment map bridges a gap the RSX
+renumbering does not leave.
 
 The partial set is the flip preamble (F5), the access-violation result (F8), the
 drawable layer setup (F9) and the sampler LOD clamp (E8, which implements the
@@ -468,6 +468,13 @@ Running the state tests found one more defect, recorded as E14: the depth/stenci
 and sampler hashes packed 16-bit GL enum values into three-bit and four-bit fields,
 so `keep` and `zero` hashed alike and a distinct sampler state could collide. Both
 now fold each field at its own width.
+
+The shadow-compare flag (A7) also closed, on a measurement rather than a code
+defect. The native `sampler2DShadow` path can serve the RSX, but only with the
+operand order compensated, because Metal compares the reference against the texel
+and the RSX compares the texel against the reference. The sampler path now swaps
+the directed functions, which is what Vulkan already does. The measurement is in
+the register, and the native path is therefore kept.
 
 ## The depth/stencil-as-texture cluster
 

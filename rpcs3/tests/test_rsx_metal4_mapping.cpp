@@ -318,6 +318,31 @@ TEST(MTLMapCompare, TheMetalValueFollowsTheGcmOrdinal)
 	}
 }
 
+TEST(MTLMapCompare, TheShadowSamplerReversesOnlyTheDirectedFunctions)
+{
+	// Metal's sample_compare evaluates `reference OP texel` (measured, A7), while
+	// the RSX compares the texel first: comparison_passes is called as
+	// comparison_passes(texel, ref) (RSXFragmentTextureOps.glsl:106,
+	// RSXFragmentPrologue.glsl:137-149).  The sampler path compensates by swapping
+	// the directed functions, which is the reversal VKDraw.cpp:409 passes.
+	EXPECT_EQ(mtl::get_compare_function(rsx::comparison_function::less, true), MTL::CompareFunctionGreater);
+	EXPECT_EQ(mtl::get_compare_function(rsx::comparison_function::less_or_equal, true), MTL::CompareFunctionGreaterEqual);
+	EXPECT_EQ(mtl::get_compare_function(rsx::comparison_function::greater, true), MTL::CompareFunctionLess);
+	EXPECT_EQ(mtl::get_compare_function(rsx::comparison_function::greater_or_equal, true), MTL::CompareFunctionLessEqual);
+
+	// A function that does not name a direction must not move.
+	for (const auto op : { rsx::comparison_function::never, rsx::comparison_function::equal,
+		rsx::comparison_function::not_equal, rsx::comparison_function::always })
+	{
+		SCOPED_TRACE(static_cast<u32>(op));
+		EXPECT_EQ(mtl::get_compare_function(op, true), mtl::get_compare_function(op));
+	}
+
+	// The depth and stencil tests compare the incoming value against the stored
+	// one, which is the Metal order, so they keep the direct mapping.
+	EXPECT_EQ(mtl::get_compare_function(rsx::comparison_function::less), MTL::CompareFunctionLess);
+}
+
 // =============================================================================
 // 6. get_primitive_topology_class: rsx::primitive_type -> MTL::PrimitiveTopologyClass
 //    (MTLPipeline.h:65; MTLPipeline.cpp:45-65)

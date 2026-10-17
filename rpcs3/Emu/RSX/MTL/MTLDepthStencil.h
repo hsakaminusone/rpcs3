@@ -113,7 +113,11 @@ namespace mtl
 	// state reaches the encoder (CONFLICTS.md C7).
 	void apply_depth_stencil_state(MTL4::RenderCommandEncoder* encoder, depth_stencil_cache& cache, const depth_stencil_state& state);
 
-	MTL::CompareFunction get_compare_function(rsx::comparison_function op);
+	// `reverse` swaps the operand order.  The depth and stencil tests compare the
+	// incoming value against the stored one, which is the Metal order; the shadow
+	// sampler compares the reference against the texel, which is not
+	// (REVIEW-FINDINGS.md, A7).
+	MTL::CompareFunction get_compare_function(rsx::comparison_function op, bool reverse = false);
 	MTL::StencilOperation get_stencil_operation(rsx::stencil_op op);
 }
 
