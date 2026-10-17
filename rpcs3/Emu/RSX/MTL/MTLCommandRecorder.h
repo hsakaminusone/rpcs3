@@ -42,6 +42,13 @@ namespace mtl
 		void begin_frame();
 		void submit();
 
+		// A CPU readback must observe the copy it encoded, and a Metal 4 command
+		// buffer is the unit of submission, so the frame commits early and waits for
+		// the slot to come back.  The slot is re-entered, because the frame owns
+		// exactly one slot, and the present drawable is left for the frame's own
+		// submit (REVIEW-FINDINGS.md, B4).
+		void flush_for_readback();
+
 		MTL4::RenderCommandEncoder* open_pass(const MTL4::RenderPassDescriptor* descriptor, MTL4::RenderEncoderOptions options = MTL4::RenderEncoderOptionNone);
 		MTL4::ComputeCommandEncoder* open_compute();
 		void close_encoder();

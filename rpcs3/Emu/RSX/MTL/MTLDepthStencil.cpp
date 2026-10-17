@@ -228,34 +228,24 @@ namespace mtl
 
 	u64 hash_depth_stencil_state(const depth_stencil_state& state)
 	{
-		// The latch is 19 small fields.  Pack each face into one word (three bits
-		// per operation, eight per mask) and hash the three words, so the hash stays
-		// consistent with operator== without touching padding.
-		struct packed
+		// The comparison and stencil-op enums are 16-bit GL constants, so each
+		// field is hashed at its own width.  A packed bit field cannot hold them:
+		// three bits per operation overlapped the mask fields, and `keep` and
+		// `zero` share their low three bits, so distinct states collapsed.
+		auto hash_face = [](usz hash, const stencil_face& face)
 		{
-			u32 depth;
-			u32 front;
-			u32 back;
-			u32 reserved = 0;
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.compare));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.fail));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.zfail));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.zpass));
+			hash = rpcs3::hash64(hash, face.read_mask);
+			return rpcs3::hash64(hash, face.write_mask);
 		};
 
-		auto pack_face = [](const stencil_face& face) -> u32
-		{
-			return (static_cast<u32>(face.compare) << 0)
-				| (static_cast<u32>(face.fail) << 3)
-				| (static_cast<u32>(face.zfail) << 6)
-				| (static_cast<u32>(face.zpass) << 9)
-				| (static_cast<u32>(face.read_mask) << 12)
-				| (static_cast<u32>(face.write_mask) << 20);
-		};
-
-		const packed key = {
-			(static_cast<u32>(state.depth_compare) << 1) | static_cast<u32>(state.depth_write),
-			pack_face(state.front),
-			pack_face(state.back),
-		};
-
-		return rpcs3::hash_struct<packed>(key);
+		usz hash = rpcs3::hash64(rpcs3::fnv_seed, static_cast<u16>(state.depth_compare));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_write));
+		hash = hash_face(hash, state.front);
+		return hash_face(hash, state.back);
 	}
 
 	void depth_stencil_cache::shutdown()

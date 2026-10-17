@@ -372,27 +372,49 @@ namespace mtl
 			return;
 		}
 
-		// A Metal producer barrier does not order a depth or stencil render-pass
-		// resolve, even at StageAll->StageAll, so only a colour attachment resolves in
-		// the pass (Mesa src/kosmickrisp/vulkan/kk_cmd_buffer.c:1000-1005).  The depth
-		// resolve needs a meta resolve; until it lands the flag stays set, so the
-		// surface is never claimed resolved (REVIEW-FINDINGS.md, B6).
+		// A depth or stencil attachment resolves in its own pass, because the resolve
+		// only reads the multisampled image after the passes that wrote it have
+		// closed.  StoreAndMultisampleResolve keeps the multisampled image, so a later
+		// write needs no unresolve.
+		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
+
 		if (m_depth)
 		{
-			return;
+			MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
+			depth->setTexture(value());
+			depth->setResolveTexture(resolve_surface->value());
+			depth->setLoadAction(MTL::LoadActionLoad);
+			depth->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+
+			if (rsx::is_depth_stencil_format(get_surface_depth_format()))
+			{
+				MTL::RenderPassStencilAttachmentDescriptor* stencil = descriptor->stencilAttachment();
+				stencil->setTexture(value());
+				stencil->setResolveTexture(resolve_surface->value());
+				stencil->setLoadAction(MTL::LoadActionLoad);
+				stencil->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+			}
+		}
+		else
+		{
+			MTL::RenderPassColorAttachmentDescriptor* attachment = descriptor->colorAttachments()->object(0);
+			attachment->setTexture(value());
+			attachment->setResolveTexture(resolve_surface->value());
+			attachment->setLoadAction(MTL::LoadActionLoad);
+			attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
 		}
 
-		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
-		MTL::RenderPassColorAttachmentDescriptor* attachment = descriptor->colorAttachments()->object(0);
-		attachment->setTexture(value());
-		attachment->setResolveTexture(resolve_surface->value());
-		attachment->setLoadAction(MTL::LoadActionLoad);
-		// The multisampled image survives the resolve, so a later write needs no
-		// unresolve.
-		attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
-
-		cmd.open_pass(descriptor, MTL4::RenderEncoderOptionNone);
+		MTL4::RenderCommandEncoder* encoder = cmd.open_pass(descriptor, MTL4::RenderEncoderOptionNone);
 		descriptor->release();
+
+		// A render-pass resolve is ordered for later queue work by the producer form
+		// of the barrier.  The consumer form leaves a window in which the resolved
+		// image is not yet visible, so the resolve pass declares the edge itself
+		// (REVIEW-FINDINGS.md, B6).
+		if (encoder)
+		{
+			emit_producer_barrier(encoder, { MTL::StageAll, MTL::StageAll });
+		}
 
 		msaa_flags = rsx::surface_state_flags::ready;
 	}

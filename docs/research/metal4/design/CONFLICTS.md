@@ -451,4 +451,40 @@ in both the tree follows the RSX source.
 both cases, so nothing changes. Recorded because a reader comparing the Metal
 and Vulkan tables would otherwise read each difference as a bug.
 
+## X10 — the depth resolve follows the macOS 27 measurement, not KosmicKrisp
+
+**The reference says.** KosmicKrisp forces a meta resolve for depth and stencil:
+`src/kosmickrisp/vulkan/kk_cmd_buffer.c:1000-1005` bails out to the meta path for
+a non-colour resolve, with the comment "There appears to be a synchronization bug
+in Metal. Force meta resolves for depth and stencil for now." The bail-out arrived
+with the render-pass resolve itself, in `db5ab8de` (2026-07-23), and has not
+changed since. The workarounds page
+(`docs.mesa3d.org/drivers/kosmickrisp/workarounds.html`) does not list it and there
+is no Metal ticket for it, so it is a design decision rather than a tracked bug.
+
+**The tree says.** `surface::resolve` (`MTLSurface.cpp`) performs the depth
+resolve, and for a combined format the stencil resolve, in a render pass: both
+attachments `LoadActionLoad` + `StoreActionStoreAndMultisampleResolve` with the
+1-sample image as the target, and the pass emits a producer barrier
+(`emit_producer_barrier`, `MTLBarrier.cpp:34`) before later queue work. The
+measurement on the floor device (Apple A18 Pro, macOS 27.0.1, MTL4, 48 rounds per
+row):
+
+| case | no barrier | consumer `barrierAfterQueueStages` | producer `barrierAfterStages` |
+|---|---|---|---|
+| clear-only depth resolve → blit | 4/48 | 46/48 | **48/48** |
+| clear-only depth resolve → fragment | 46/48 | 46/48 | **48/48** |
+| draw-written depth resolve → blit | 3/48 | 45/48 | **48/48** |
+| draw-written depth resolve → fragment | 46/48 | 46/48 | **48/48** |
+| resolve and read in separate command buffers | 46/48 | 43/48 | **48/48** |
+| combined `Depth32Float_Stencil8`, depth and stencil resolve | 30/32 | — | **32/32** |
+| stencil resolve alone | **48/48** | 48/48 | 48/48 |
+
+**Resolution.** The backend floor is macOS 27, so a macOS 26 restriction does not
+bind it. The tree takes the producer-barrier form, which is 576 of 576 across the
+twelve measured configurations; the consumer form leaves a stale window of about
+five percent and no barrier is worse. A stencil resolve needs no barrier.
+Recorded because the reference implementation disagrees, so a reader would
+otherwise read the tree's resolve as the unsafe choice.
+
 <!-- doc-end -->

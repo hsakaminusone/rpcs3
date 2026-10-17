@@ -423,24 +423,24 @@ state-latching cluster, recorded as the `E` entries.
 
 The blocked set shares one cause: **the pass scheduler was not wired**, so no
 hazard was recorded and `emit_barrier` had no caller. The scheduler is now driven
-(pass D's F2), so the depth-as-texture stencil mirror (A3/B1), the `EQUAL`
-depth-test input (A4/B2), the texture barrier (B10) and the MSAA depth resolve
-(B6) are unblocked in principle and wait only on their own shader and surface
-work.
+(pass D's F2), and the two items it unblocked have since landed: the
+depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
+and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
-The open set is the surface initialisation and transfer path (B4, B8, B14), the
-logic op (C1/E6), the sampler LOD bias (E8), the PSO attachment-count key (E3),
-the latch dataflow and its dead fields (E13), the shadow-compare flag (A7), the
-present output pipeline (F10) and the DMA, image and sync clusters (F11). Each
-carries its open question in `REVIEW-FINDINGS.md`, "Parked for review", because
-none can be settled from the tree alone: they wait on a hardware measurement, a
-Metal 4 behaviour check, or a decision the acceptance harness owns.
+The open set is the texture initialisation path (B8), the logic op (C1/E6), the
+latch dataflow and its dead fields (E13), the shadow-compare flag (A7), the present
+output pipeline (F10) and the DMA, image and sync clusters (F11). Each carries its
+open question in `REVIEW-FINDINGS.md`, "Parked for review", because none can be
+settled from the tree alone: they wait on a hardware measurement, a Metal 4
+behaviour check, or a decision the acceptance harness owns. The PSO
+attachment-count key (E3) is closed without a change: the proposed colour-attachment
+map bridges a gap the RSX renumbering does not leave.
 
 The partial set is the flip preamble (F5), the access-violation result (F8), the
 drawable layer setup (F9) and the sampler LOD clamp (E8, which implements the
 clamp and records the bias as a limitation because Metal has no sampler bias):
-the fixes closed the present-critical half and the remainder waits on the CPU
-readback wait, the present pipeline or the fragment program's texture contract.
+the fixes closed the present-critical half and the remainder waits on the present
+pipeline or the fragment program's texture contract.
 
 The limitation set is the Metal state the RSX has and Metal does not: point
 polygon mode (C4), the per-primitive polygon-offset enables (C7), the line width,
@@ -458,6 +458,16 @@ The surface transfer pass closed the source validation and the covering-copy fas
 path in the old-contents drain (B7), the `erase_bkgnd` initialisation (B9, which
 was never done with the read-buffers configuration off) and the cyclic-reference
 barrier (B10, whose requirement the resource-level hazard record already meets).
+It then closed the CPU readback wait (B4): a readback must observe the copy it
+encoded, so `command_recorder::flush_for_readback` ends the command buffer, commits
+it, waits for that slot's commit feedback and re-enters the same slot, because the
+frame owns exactly one slot and the present drawable belongs to the frame's own
+submit.
+
+Running the state tests found one more defect, recorded as E14: the depth/stencil
+and sampler hashes packed 16-bit GL enum values into three-bit and four-bit fields,
+so `keep` and `zero` hashed alike and a distinct sampler state could collide. Both
+now fold each field at its own width.
 
 ## The depth/stencil-as-texture cluster
 
@@ -526,16 +536,25 @@ depth test needs.  The copy is the mechanism the split cannot replace.
 
 Multisampling: an MS→MS depth copy is clean, an MS→1-sample blit is rejected
 (`sampleCount` must match), and a texture view made from a multisampled source can carry a
-channel swizzle, which answers B14.  The MSAA depth resolve does **not** use a render-pass
-store.  KosmicKrisp tried that and abandoned it: a Metal producer barrier does not order a
-depth or stencil render-pass resolve, even at `StageAll`→`StageAll`, so it forces a meta
-resolve for both and applies the render-pass resolve to colour only
-(`kk_cmd_buffer.c:1000-1005`, `:900-986`).  This backend therefore keeps
-`StoreActionStore` on the depth and stencil attachments and does not use a depth resolve
-target; `surface::resolve` returns early for a depth surface and leaves the flag set, so
-the surface is never claimed resolved (REVIEW-FINDINGS.md, B6).  The colour resolve uses
-`StoreActionStoreAndMultisampleResolve`, so the multisampled image survives and a later
-write needs no unresolve.
+channel swizzle, which answers B14.
+
+The MSAA depth resolve **does** use a render-pass store.  KosmicKrisp forces a
+meta resolve for depth and stencil because it measured a synchronization bug in
+Metal (`kk_cmd_buffer.c:1000-1005`), but the backend floor is macOS 27 and the bug
+does not reproduce there.  The 48-round measurement on the floor device is in
+CONFLICTS.md X10: a depth render-pass resolve is 48 of 48 reliable with a
+**producer** barrier and 46 of 48 with the consumer form, a stencil resolve needs
+no barrier, and a combined depth-and-stencil resolve is 32 of 32.  `surface::resolve`
+therefore builds the resolve in its own pass — the depth attachment and, for a
+combined format, the stencil attachment, both `LoadActionLoad` +
+`StoreActionStoreAndMultisampleResolve` with the 1-sample image as the target — and
+emits `emit_producer_barrier` (`MTLBarrier.cpp:34`).  The barrier form is
+load-bearing: the consumer form leaves a stale window on the clear-only and
+draw-written resolve cases, and no barrier is worse.
+
+`StoreActionStore` keeps the multisampled image, so a later write needs no
+unresolve, and `framebuffer::open_pass` keeps `StoreActionStore` on the depth and
+stencil attachments because a clause pass is not the last writer of that image.
 
 The two depth-as-texture binds are combined image samplers in the MSL layout, because the
 generated GLSL declares `usampler2D` and `sampler2D` (`MTLFragmentProgram.cpp:108,119`) and
@@ -543,5 +562,34 @@ SPIRV-Cross gives both a texture and a sampler at the same index (`MTLShader.cpp
 Each therefore binds a texture and a sampler.  The stencil half uses its own
 nearest/clamp-to-border opaque-black sampler (`stencil_mirror_sampler`), because the
 unit's sampler may be a comparison sampler (`VKDraw.cpp:707-717`).
+
+## The macOS 27 floor and the KosmicKrisp workarounds
+
+The backend floor is macOS 27 (`mtl::metal4_api_floor` 26, `offer_floor` 27), and
+KosmicKrisp's workaround ledger
+(`docs.mesa3d.org/drivers/kosmickrisp/workarounds.html`) is the best available
+prior art for what breaks in Metal 4. Every entry that resolved at or before the
+floor needs no reproduction here, so the ledger is a filter rather than a
+checklist:
+
+| KosmicKrisp workaround | Status on the floor | Applies here |
+|---|---|---|
+| W6 device coherency | fixed in macOS 27 beta | no |
+| W7 stencil `sample_mask` under a depth-only MSAA pass | macOS 26.0.1 | unconfirmed for the RSX; measure before relying on it |
+| W8 Rosetta heap-size alignment | fixed as of macOS 27 beta 5 | no |
+| W9/W10 loop reconvergence and `bcsel` miscompiles | macOS 26.4.1 | no |
+| W11 multiple `MTL4Compiler` heap corruption | resolved in macOS 27 beta 5 | no, and the one-compiler-per-device rule holds anyway |
+| W12 index-buffer length register math | resolved in macOS 27 | no |
+| W13 16-bit index-buffer out-of-bounds guarantees | open, FB23291220 | only if index-buffer robustness is enabled |
+| W14/W17 MSL float-controls NaN folding | macOS 26.5 / 27.0 beta | no |
+| W15 volatile / coherent device miscompile | present on macOS 27 only when W6 is disabled | no: the `coherent` qualifier is kept |
+| W16 out-of-bounds LOD clamp | macOS 27 beta, M5 only | no: the floor device is not M5 |
+| W18 stale reads after a barrier | fixed in macOS 27 | no |
+
+The depth-resolve restriction is not in the ledger and is a KosmicKrisp design
+decision rather than a tracked bug; the floor measurement does not reproduce it
+(CONFLICTS.md X10). Only W13 and W7 stay live, and each is conditional: W13 needs
+index-buffer robustness to be enabled, and W7 needs a measurement against the RSX
+before anything relies on the stencil `sample_mask`.
 
 <!-- doc-end -->

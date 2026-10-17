@@ -38,6 +38,12 @@ namespace mtl
 	// earlier encoder before the consumer stages of the open encoder.  The presenter
 	// uses it to order the frame's render work before its own copy.
 	void emit_queue_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec);
+
+	// The producer-side queue-scope form (HLD-03 §3.2).  It orders the open
+	// encoder's own work before the stages of later encoders.  A render-pass resolve
+	// needs this form: the consumer form leaves a window in which the resolved image
+	// is not yet visible (REVIEW-FINDINGS.md, B6).
+	void emit_producer_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec);
 }
 
 #endif // RSX_ENABLE_METAL4

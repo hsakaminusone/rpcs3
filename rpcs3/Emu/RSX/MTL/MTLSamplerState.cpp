@@ -238,31 +238,21 @@ namespace mtl
 
 	u64 hash_sampler_state(const sampler_state& state)
 	{
-		// Pack the enums into one word and the floats by bit pattern, so the hash
-		// stays consistent with operator== without touching padding.
-		struct packed
-		{
-			u32 enums;
-			u32 max_aniso;
-			u32 min_lod;
-			u32 max_lod;
-		};
-
-		const packed key = {
-			static_cast<u32>(state.wrap_s)
-				| (static_cast<u32>(state.wrap_t) << 4)
-				| (static_cast<u32>(state.wrap_r) << 8)
-				| (static_cast<u32>(state.min_filter) << 12)
-				| (static_cast<u32>(state.mag_filter) << 16)
-				| (static_cast<u32>(state.border_color) << 20)
-				| (static_cast<u32>(state.compare) << 24)
-				| (static_cast<u32>(state.depth_compare) << 28),
-			state.max_aniso,
-			std::bit_cast<u32>(state.min_lod),
-			std::bit_cast<u32>(state.max_lod),
-		};
-
-		return rpcs3::hash_struct<packed>(key);
+		// The comparison function is a 16-bit GL constant, so the fields are hashed
+		// at their own widths.  A packed word cannot hold them: a four-bit slot for
+		// `compare` overlapped `depth_compare` and survived only because the current
+		// comparison values happen to be small.
+		usz hash = rpcs3::hash64(rpcs3::fnv_seed, static_cast<u16>(state.wrap_s));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.wrap_t));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.wrap_r));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.min_filter));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.mag_filter));
+		hash = rpcs3::hash64(hash, static_cast<u32>(state.border_color));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.compare));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_compare));
+		hash = rpcs3::hash64(hash, state.max_aniso);
+		hash = rpcs3::hash64(hash, std::bit_cast<u32>(state.min_lod));
+		return rpcs3::hash64(hash, std::bit_cast<u32>(state.max_lod));
 	}
 
 	void sampler_cache::shutdown()

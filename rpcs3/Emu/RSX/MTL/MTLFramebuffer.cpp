@@ -145,10 +145,9 @@ namespace mtl
 			MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
 			depth->setTexture(m_depth->value());
 			depth->setLoadAction(clear_depth ? MTL::LoadActionClear : MTL::LoadActionLoad);
-			// The depth attachment always stores.  A depth or stencil render-pass
-			// resolve is not ordered by a Metal producer barrier, so the depth half of
-			// a multisampled surface resolves through a meta resolve instead, outside
-			// this pass (Mesa kk_cmd_buffer.c:1000-1005).
+			// The depth attachment always stores, and resolves in its own pass
+			// (surface::resolve), because a clause pass is not the last writer of the
+			// multisampled image.
 			depth->setStoreAction(MTL::StoreActionStore);
 
 			if (clear_depth)

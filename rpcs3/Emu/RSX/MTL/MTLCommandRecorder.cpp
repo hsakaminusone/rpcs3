@@ -123,6 +123,32 @@ namespace mtl
 		m_slot = (m_slot + 1) % frame_slot_count;
 	}
 
+	void command_recorder::flush_for_readback()
+	{
+		close_encoder();
+
+		frame_slot& slot = m_slots[m_slot];
+		slot.command_buffer->endCommandBuffer();
+
+		m_resources->commit_frame();
+
+		slot.in_flight.store(true);
+
+		const MTL4::CommandBuffer* buffers[] = { slot.command_buffer };
+		m_queue->commit(buffers, 1, slot.commit_options);
+
+		{
+			std::unique_lock lock(m_mutex);
+			m_condition.wait(lock, [&slot] { return !slot.in_flight.load(); });
+		}
+
+		// The slot came back, so its GPU work is complete and the same slot serves
+		// the rest of the frame (HLD-04 §3.1).
+		slot.allocator->reset();
+		slot.command_buffer->beginCommandBuffer(slot.allocator);
+		m_encoder = nullptr;
+	}
+
 	void command_recorder::set_present_drawable(MTL::Drawable* drawable)
 	{
 		// The wait must precede the encoding, because the drawable's texture is the

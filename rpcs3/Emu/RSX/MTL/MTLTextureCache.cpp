@@ -144,6 +144,8 @@ namespace mtl
 			MTL::Size::Make(transfer_width, transfer_height, 1),
 			m_staging->value(), dst_offset, rsx_pitch, rsx_pitch * transfer_height);
 
+		m_readback_cmd = &cmd;
+
 		synchronized = true;
 		sync_timestamp = rsx::get_shared_tag();
 	}
@@ -152,6 +154,13 @@ namespace mtl
 	{
 		ensure(m_staging);
 		ensure(offset + size <= m_staging->value()->length());
+
+		if (m_readback_cmd)
+		{
+			m_readback_cmd->flush_for_readback();
+			m_readback_cmd = nullptr;
+		}
+
 		return static_cast<u8*>(m_staging->value()->contents()) + offset;
 	}
 
