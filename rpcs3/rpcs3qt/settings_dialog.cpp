@@ -19,6 +19,7 @@
 #include "qt_utils.h"
 #include "uuid.h"
 #include "settings_dialog.h"
+
 #include "ui_settings_dialog.h"
 #include "tooltips.h"
 #include "input_dialog.h"
@@ -36,6 +37,7 @@
 #include "Emu/title.h"
 #include "Emu/Audio/audio_device_enumerator.h"
 #include "Emu/RSX/VK/vkutils/vk_driver_selection.h"
+#include "Emu/RSX/MTL/MTLAvailability.h"
 
 #include "Loader/PSF.h"
 
@@ -395,7 +397,8 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	});
 
 	// Comboboxes
-	EnhanceComboBox(emu_settings_type::Renderer, ui->renderBox, tooltips.settings.renderer, ui->gb_renderer);
+	EnhanceComboBox(emu_settings_type::Renderer, ui->renderBox, tooltips.settings.renderer, ui->gb_renderer,
+		false, false, 0, false, true, mtl::metal4_available(QSysInfo::productVersion().section('.', 0, 0).toInt()) ? QStringList{} : QStringList{QStringLiteral("Metal")});
 	SubscribeTooltip(ui->gb_graphicsAdapter, tooltips.settings.graphics_adapter);
 #ifdef __APPLE__
 	{
