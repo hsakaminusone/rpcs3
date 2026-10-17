@@ -33,6 +33,11 @@ namespace mtl
 
 		void reset();
 
+		// The occlusion-query counter buffer.  Every pass carries it, because a
+		// counter must keep its value across the passes of one query
+		// (MTLZCULL.h).  The zcull backend owns the buffer and sets it once.
+		void set_visibility_buffer(MTL::Buffer* buffer) { m_visibility = buffer; }
+
 		bool valid() const { return m_color_count != 0 || m_depth != nullptr; }
 		u8 color_count() const { return m_color_count; }
 		u8 sample_count() const { return m_sample_count; }
@@ -45,6 +50,7 @@ namespace mtl
 	private:
 		std::array<surface*, 4> m_color{};
 		surface* m_depth = nullptr;
+		MTL::Buffer* m_visibility = nullptr;
 		rsx::framebuffer_layout m_layout{};
 		u8 m_color_count = 0;
 		u8 m_sample_count = 1;

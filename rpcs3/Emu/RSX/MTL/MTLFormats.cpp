@@ -6,6 +6,29 @@
 
 namespace mtl
 {
+	// The byte size of one pixel of a Metal colour format the output path carries.
+	// Returns 0 for a format the display path does not present.
+	u32 get_pixel_size(MTL::PixelFormat format)
+	{
+		switch (format)
+		{
+		case MTL::PixelFormat::PixelFormatBGRA8Unorm:
+		case MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB:
+		case MTL::PixelFormat::PixelFormatRGBA8Unorm:
+		case MTL::PixelFormat::PixelFormatRGBA8Unorm_sRGB:
+			return 4;
+		default:
+			return 0;
+		}
+	}
+
+	// True when the memory order of a format is blue, green, red, alpha.  The video
+	// sink and the screenshot writer take the byte order as a flag.
+	bool is_bgra_format(MTL::PixelFormat format)
+	{
+		return format == MTL::PixelFormat::PixelFormatBGRA8Unorm || format == MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
+	}
+
 	MTL::PixelFormat get_surface_color_format(rsx::surface_color_format format)
 	{
 		switch (format)
@@ -46,8 +69,11 @@ namespace mtl
 		switch (format)
 		{
 		case rsx::surface_depth_format2::z16_uint:
-		case rsx::surface_depth_format2::z16_float:
 			return MTL::PixelFormat::PixelFormatDepth16Unorm;
+		case rsx::surface_depth_format2::z16_float:
+			// A unorm target cannot hold the float range, so the float variant uses
+			// a float target (VKFormats.cpp:15-16; GLRenderTargets.cpp:78-79).
+			return MTL::PixelFormat::PixelFormatDepth32Float;
 		case rsx::surface_depth_format2::z24s8_uint:
 		case rsx::surface_depth_format2::z24s8_float:
 			return MTL::PixelFormat::PixelFormatDepth32Float_Stencil8;

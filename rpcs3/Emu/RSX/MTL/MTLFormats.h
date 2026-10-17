@@ -30,6 +30,13 @@ namespace mtl
 	// The native channel order of a guest format, in A-R-G-B order so it composes
 	// with the RSX remap vector (GLTexture.cpp:214-269).
 	std::array<MTL::TextureSwizzle, 4> get_texture_component_layout(u32 gcm_format);
+
+	// The byte size of one pixel of a Metal colour format the output path carries.
+	// Zero means the format is not presentable.
+	u32 get_pixel_size(MTL::PixelFormat format);
+
+	// True when the memory order of a format is blue, green, red, alpha.
+	bool is_bgra_format(MTL::PixelFormat format);
 }
 
 #endif // RSX_ENABLE_METAL4

@@ -212,6 +212,7 @@ namespace mtl
 			set.sampler_info.init(resources, draw_capacity);
 			set.stipple.init(resources, draw_capacity);
 			set.blend_values.init(resources, draw_capacity);
+			set.fill_values.init(resources, fill_capacity);
 			set.vertex_draw_params.init(resources, draw_capacity);
 			set.fragment_constants.init(resources, constant_capacity);
 			// One change is one 468-vec4 file, so the ring holds the changes, not
@@ -226,6 +227,8 @@ namespace mtl
 			set.persistent.init(resources, stream_capacity);
 			set.volatile_stream.init(resources, volatile_capacity);
 			set.index.init(resources, index_capacity);
+			set.overlay_vertices.init(resources, overlay_vertex_capacity);
+			set.overlay_uniforms.init(resources, overlay_uniform_capacity);
 		}
 	}
 
@@ -239,6 +242,7 @@ namespace mtl
 			set.sampler_info.shutdown();
 			set.stipple.shutdown();
 			set.blend_values.shutdown();
+			set.fill_values.shutdown();
 			set.vertex_draw_params.shutdown();
 			set.fragment_constants.shutdown();
 			set.transform_constants.shutdown();
@@ -251,6 +255,8 @@ namespace mtl
 			set.persistent.shutdown();
 			set.volatile_stream.shutdown();
 			set.index.shutdown();
+			set.overlay_vertices.shutdown();
+			set.overlay_uniforms.shutdown();
 		}
 
 		m_slot = 0;
@@ -267,6 +273,7 @@ namespace mtl
 		set.sampler_info.begin_frame();
 		set.stipple.begin_frame();
 		set.blend_values.begin_frame();
+		set.fill_values.begin_frame();
 		set.vertex_draw_params.begin_frame();
 		set.fragment_constants.begin_frame();
 		set.transform_constants.begin_frame();
@@ -277,6 +284,8 @@ namespace mtl
 		streams.persistent.begin_frame();
 		streams.volatile_stream.begin_frame();
 		streams.index.begin_frame();
+		streams.overlay_vertices.begin_frame();
+		streams.overlay_uniforms.begin_frame();
 	}
 }
 

@@ -80,6 +80,18 @@ namespace mtl
 	};
 	static_assert(sizeof(blend_values) == 32);
 
+	// The built-in fill's values (MTLFill.h).  Bytes 0..15 are the colour and byte
+	// 16 is the depth, which is the MSL struct the fill library declares.  A fill
+	// reads one block, and a Metal 4 command buffer does not snapshot buffer
+	// contents, so every fill takes its own block.
+	struct fill_values
+	{
+		f32 color[4];
+		f32 depth;
+		f32 reserved[3];
+	};
+	static_assert(sizeof(fill_values) == 32);
+
 	// A vec4 element.  The transform-constant file, the fragment constants, the
 	// instancing constants and the stipple pattern are all addressed in vec4 units,
 	// so the ring's index is the shader's index.
@@ -269,6 +281,7 @@ namespace mtl
 		static constexpr u32 draw_capacity = 8192;
 		static constexpr u32 constant_capacity = 65536;
 		static constexpr u32 transform_capacity = 512;
+		static constexpr u32 fill_capacity = 1024;
 
 		// The vertex streams hold one frame's uploaded attribute data.  The
 		// capacities are the usual working set; a ring that overflows chains to a
@@ -276,6 +289,12 @@ namespace mtl
 		static constexpr u64 stream_capacity = 8u * 1024u * 1024u;
 		static constexpr u64 volatile_capacity = 2u * 1024u * 1024u;
 		static constexpr u64 index_capacity = 2u * 1024u * 1024u;
+
+		// The overlay passes are not RSX draws: their vertices and their uniform
+		// block are per-frame CPU data with no RSX slot, so they take their own
+		// rings (HLD-06 §2.6).
+		static constexpr u64 overlay_vertex_capacity = 4u * 1024u * 1024u;
+		static constexpr u64 overlay_uniform_capacity = 128u * 1024u;
 
 		void init(resource_manager& resources, u32 frame_count);
 		void shutdown();
@@ -314,6 +333,21 @@ namespace mtl
 		MTL::GPUAddress instancing_lookup_address() const { return m_sets[m_slot].instancing_lookup.address(); }
 		MTL::GPUAddress blend_values_address() const { return m_sets[m_slot].blend_values.address(); }
 
+		// Pack one fill's values and return the address of its block, because the
+		// fill shader reads the block at offset zero (MTLFill.cpp).
+		MTL::GPUAddress alloc_fill_values(const std::array<f32, 4>& color, f32 depth)
+		{
+			fill_values* values = m_sets[m_slot].fill_values.alloc();
+			if (!values)
+			{
+				return 0;
+			}
+
+			std::copy(color.begin(), color.end(), values->color);
+			values->depth = depth;
+			return m_sets[m_slot].fill_values.address_of(m_sets[m_slot].fill_values.index());
+		}
+
 		// A substituted push constant is read at offset zero, so it is bound at its
 		// own block, not at the ring base.
 		MTL::GPUAddress blend_values_block_address() const { return m_sets[m_slot].blend_values.address_of(m_sets[m_slot].blend_values.index()); }
@@ -322,6 +356,8 @@ namespace mtl
 		stream_ring& persistent_stream() { return m_streams[m_slot].persistent; }
 		stream_ring& volatile_stream() { return m_streams[m_slot].volatile_stream; }
 		byte_ring& index_ring() { return m_streams[m_slot].index; }
+		byte_ring& overlay_vertex_ring() { return m_streams[m_slot].overlay_vertices; }
+		byte_ring& overlay_uniform_ring() { return m_streams[m_slot].overlay_uniforms; }
 
 		bool valid() const { return m_sets[m_slot].vertex_context.valid(); }
 
@@ -334,6 +370,7 @@ namespace mtl
 			block_ring<sampler_info> sampler_info;
 			block_ring<vec4_block> stipple;
 			block_ring<blend_values> blend_values;
+			block_ring<fill_values> fill_values;
 			block_ring<u32> vertex_draw_params;
 			block_ring<vec4_block> fragment_constants;
 			block_ring<vec4_block> transform_constants;
@@ -346,6 +383,8 @@ namespace mtl
 			stream_ring persistent;
 			stream_ring volatile_stream;
 			byte_ring index;
+			byte_ring overlay_vertices;
+			byte_ring overlay_uniforms;
 		};
 
 		std::array<ring_set, frame_slot_count> m_sets;

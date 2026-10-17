@@ -36,8 +36,9 @@ namespace mtl
 		bool alpha_to_coverage = false;
 		bool alpha_to_one = false;
 
-		// A cull-both draw has no Metal cull mode, so the rasteriser is dropped
-		// (culls_both_faces(); MTLRasterState.h:52).
+		// A triangle-class cull-both draw has no Metal cull mode, so the rasteriser is
+		// dropped for it (culls_both_faces(); MTLRasterState.h:52).  The RSX culls
+		// triangles only, so a point or line draw keeps the rasteriser.
 		bool raster_enabled = true;
 
 		// The whole latched `blend` cluster (MTLBlendState.h:15-40).  The alpha test
@@ -75,28 +76,30 @@ namespace rpcs3
 	inline usz hash_struct<mtl::pipeline_properties>(const mtl::pipeline_properties& properties)
 	{
 		// Combine per-field hashes.  The struct has padding, so a whole-struct byte
-		// hash would not be deterministic; XOR the individual fields instead.
+		// hash would not be deterministic; fold the individual fields in order.  A
+		// commutative combine (XOR) would collide any two fields that swap, which
+		// manufactures bucket collisions in a cache that holds thousands of objects.
 		usz seed = hash_struct(properties.color_format);
-		seed ^= hash_struct(properties.attachment_count);
-		seed ^= hash_struct(properties.sample_count);
-		seed ^= hash_struct(properties.alpha_to_coverage);
-		seed ^= hash_struct(properties.alpha_to_one);
-		seed ^= hash_struct(properties.raster_enabled);
+		seed = hash64(seed, hash_struct(properties.attachment_count));
+		seed = hash64(seed, hash_struct(properties.sample_count));
+		seed = hash64(seed, hash_struct(properties.alpha_to_coverage));
+		seed = hash64(seed, hash_struct(properties.alpha_to_one));
+		seed = hash64(seed, hash_struct(properties.raster_enabled));
 
-		seed ^= hash_struct(properties.blend.enable_mask);
-		seed ^= hash_struct(properties.blend.source_rgb);
-		seed ^= hash_struct(properties.blend.source_a);
-		seed ^= hash_struct(properties.blend.destination_rgb);
-		seed ^= hash_struct(properties.blend.destination_a);
-		seed ^= hash_struct(properties.blend.equation_rgb);
-		seed ^= hash_struct(properties.blend.equation_a);
-		seed ^= hash_struct(properties.blend.alpha_test_enabled);
-		seed ^= hash_struct(properties.blend.logic_op_enabled);
-		seed ^= hash_struct(properties.blend.logic_operation);
-		seed ^= hash_struct(properties.blend.shade_mode);
+		seed = hash64(seed, hash_struct(properties.blend.enable_mask));
+		seed = hash64(seed, hash_struct(properties.blend.source_rgb));
+		seed = hash64(seed, hash_struct(properties.blend.source_a));
+		seed = hash64(seed, hash_struct(properties.blend.destination_rgb));
+		seed = hash64(seed, hash_struct(properties.blend.destination_a));
+		seed = hash64(seed, hash_struct(properties.blend.equation_rgb));
+		seed = hash64(seed, hash_struct(properties.blend.equation_a));
+		seed = hash64(seed, hash_struct(properties.blend.alpha_test_enabled));
+		seed = hash64(seed, hash_struct(properties.blend.logic_op_enabled));
+		seed = hash64(seed, hash_struct(properties.blend.logic_operation));
+		seed = hash64(seed, hash_struct(properties.blend.shade_mode));
 
-		seed ^= hash_struct(properties.write_mask);
-		seed ^= hash_struct(properties.input_primitive_topology);
+		seed = hash64(seed, hash_struct(properties.write_mask));
+		seed = hash64(seed, hash_struct(properties.input_primitive_topology));
 		return hash_base(seed);
 	}
 }

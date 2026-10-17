@@ -4,7 +4,6 @@
 
 #ifdef RSX_ENABLE_METAL4
 
-#include <array>
 #include <unordered_map>
 
 namespace mtl
@@ -26,11 +25,14 @@ namespace mtl
 		void init(const device& dev, resource_manager& resources);
 		void shutdown();
 
-		// Fill the open encoder.  `color_format` is the pass's colour attachment
-		// format, or MTL::PixelFormatInvalid for a depth-only pass.  The caller sets
-		// the scissor, opens the pass and passes its sample count.  A false write flag
+		// Fill the open encoder.  `values` is the address of one fill-value block
+		// (MTLConstants.h fill_values), because Metal 4 has no setBytes.  The caller
+		// packs a fresh block per fill: a command buffer does not snapshot buffer
+		// contents.  `color_format` is the pass's colour attachment format, or
+		// MTL::PixelFormatInvalid for a depth-only pass.  The caller sets the
+		// scissor, opens the pass and passes its sample count.  A false write flag
 		// leaves that attachment alone.
-		void fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::PixelFormat color_format, u8 sample_count, const std::array<f32, 4>& color, f32 depth, bool write_color, bool write_depth);
+		void fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, bool write_color, bool write_depth);
 
 	private:
 		// The output set of the fragment shader, which is what a Metal 4 pipeline
@@ -48,7 +50,6 @@ namespace mtl
 		MTL4::Compiler* m_compiler = nullptr;
 		resource_manager* m_resources = nullptr;
 		MTL::Library* m_library = nullptr;
-		MTL::Buffer* m_values = nullptr;
 		MTL::DepthStencilState* m_depth_write = nullptr;
 		MTL::DepthStencilState* m_depth_read = nullptr;
 		std::unordered_map<u64, MTL::RenderPipelineState*> m_pipelines;

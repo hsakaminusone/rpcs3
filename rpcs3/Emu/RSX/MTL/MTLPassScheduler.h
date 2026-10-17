@@ -6,6 +6,7 @@
 
 #include "Emu/RSX/Common/TextureUtils.h"
 
+#include <unordered_map>
 #include <vector>
 
 namespace mtl
@@ -21,42 +22,49 @@ namespace mtl
 	class pass_scheduler
 	{
 	public:
-		// Start a pass.  A pass boundary orders every resource, so the touch sets and
-		// the split request clear here.  The caller calls this when it opens an
-		// encoder, including the first encoder of a frame.
+		// A frame boundary retires every record, so an edge cannot leak across it
+		// (HLD-03 §5).
+		void begin_frame();
+
+		// Start a pass.  A pass boundary orders everything already queued, so the
+		// per-pass edges and the split request clear here.  The per-resource record
+		// survives, because a read in this pass must still be ordered behind a write
+		// in an earlier pass of the frame.
 		void begin_pass();
 
-		// Record a write of resource by stages in the open pass.  Returns false when
-		// the write cannot join the pass.
-		bool note_write(MTL::ResourceID resource, MTL::Stages stages);
+		// Record the read and the write of a resource at stages in the open pass.
+		// Each one consumes the opposite record, because the edge it finds is the
+		// edge it queues.
+		void note_read(MTL::ResourceID resource, MTL::Stages stages);
+		void note_write(MTL::ResourceID resource, MTL::Stages stages);
 
-		// Record a read of resource by stages in the open pass.  Returns false when
-		// the read cannot join the pass.
-		bool note_read(MTL::ResourceID resource, MTL::Stages stages);
-
-		// Queue one explicit edge for a resource whose writer is in another pass.
-		void note_edge(const barrier_spec& spec);
-
-		// Emit every queued barrier that is legal inside one encoder.  A barrier that
-		// is not legal latches a split request.
+		// Emit every queued edge that the open encoder can order.  An edge it cannot
+		// order is carried to the next encoder and latches the split request.
 		void flush(MTL4::CommandEncoder* encoder);
+
+		// Emit the carried edges on the encoder the caller opened after the split.
+		// Returns false when nothing was carried.  The caller calls this before it
+		// records the new pass (HLD-03 §2.4).
+		bool emit_split_barriers(MTL4::CommandEncoder* encoder);
 
 		bool split_requested() const { return m_split; }
 
 	private:
-		struct touch
+		struct record
 		{
-			MTL::ResourceID resource;
-			MTL::Stages stages;
+			MTL::Stages write_stages = 0;
+			u32 write_pass = 0;
+			MTL::Stages read_stages = 0;
+			u32 read_pass = 0;
 		};
 
-		// Capacity rule: the touch sets stay bounded so the linear scans stay cheap.
-		// At the cap the pass splits, and begin_pass() clears both sets (HLD-03 §2.4).
-		static constexpr usz max_tracked_touches = 64;
-
-		std::vector<touch> m_writers;
-		std::vector<touch> m_readers;
+		// One entry per resource the frame has touched.  A flat map keeps the note
+		// path O(1); a linear scan would make the frame's cost quadratic in its
+		// working set, which is the load-bearing path of every draw.
+		std::unordered_map<u64, record> m_records;
 		std::vector<barrier_spec> m_pending;
+		std::vector<barrier_spec> m_carried;
+		u32 m_pass = 0;
 		bool m_split = false;
 	};
 }

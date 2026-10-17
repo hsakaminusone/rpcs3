@@ -47,15 +47,38 @@ namespace mtl
 		// (surface_store.h:1001).
 		void write_to_memory(command_recorder& cmd, MTL::Buffer* target, u32 dst_offset, u32 src_offset, u32 write_length);
 
+		// The depth-input mirror (REALISATION.md, "The depth/stencil-as-texture
+		// cluster").  A render pass cannot read the texture it holds as its depth
+		// attachment, so the emulated depth compare samples a copy.  The mirror
+		// shares the depth surface's format, extent and sample count, and is made on
+		// first use because most depth surfaces never need it.
+		texture* depth_mirror();
+
+		// Copy the depth surface into its mirror and return the mirror's resource
+		// id.  The copy runs in its own encoder, so both edges are queue-scope: the
+		// depth surface the previous pass wrote, and the mirror this pass reads.
+		MTL::ResourceID mirror_depth(command_recorder& cmd);
+
+		// The stencil read of a redirected depth unit is a castable texture view, not
+		// a copy (REALISATION.md, "The depth/stencil-as-texture cluster").  The view
+		// is `X32_Stencil8`, which is the only castable stencil format: a
+		// `Stencil8` view of `Depth32Float_Stencil8` aborts the process, so it is
+		// never requested.  Returns null when the surface carries no stencil.
+		texture* stencil_view() override;
+
 	private:
 		void create(u32 address, u16 width, u16 height, u16 pitch, rsx::surface_antialiasing antialias, const rsx::surface_scaling_config_t& scaling, MTL::PixelFormat format, u8 bpp, bool depth);
 
-		void flush_old_contents(command_recorder& cmd);
+		void flush_old_contents(command_recorder& cmd, rsx::surface_access access);
+		void initialize_memory(command_recorder& cmd, rsx::surface_access access);
+		void clear_memory(command_recorder& cmd, texture* target);
 		void load_background(command_recorder& cmd);
 		void resolve(command_recorder& cmd);
 		void unresolve(command_recorder& cmd);
 
 		bool m_depth = false;
+		std::unique_ptr<texture> m_depth_mirror;
+		std::unique_ptr<texture> m_stencil_view;
 	};
 }
 

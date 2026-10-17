@@ -46,6 +46,11 @@ namespace mtl
 	// A vertex texture has no anisotropy and no comparison.
 	sampler_state capture_vertex_sampler(u8 unit);
 
+	// The sampler of a redirected depth unit's stencil half.  It is separate from
+	// the unit's sampler because that sampler may be a comparison sampler, which
+	// cannot read the stencil (VKDraw.cpp:707-717).
+	sampler_state stencil_mirror_sampler();
+
 	MTL::SamplerAddressMode get_address_mode(rsx::texture_wrap_mode mode);
 	MTL::SamplerMinMagFilter get_min_mag_filter(rsx::texture_minify_filter filter);
 	MTL::SamplerMinMagFilter get_min_mag_filter(rsx::texture_magnify_filter filter);

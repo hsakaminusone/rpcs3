@@ -101,6 +101,15 @@ namespace mtl
 			{
 				unit(binds.fragment_textures[index], previous.fragment_textures[index], texture_slot_base + index);
 			}
+
+			// The depth-as-texture inputs are combined image samplers at their own
+			// index, so they bind a texture and a sampler like a texture unit.
+			for (u32 index = 0; index < fragment_texture_count; ++index)
+			{
+				unit(binds.fragment_stencil[index], previous.fragment_stencil[index], fragment_stencil_slot_base + index);
+			}
+
+			unit(binds.fragment_depth_input, previous.fragment_depth_input, fragment_depth_input_slot);
 		}
 
 		m_bound[stage] = binds;

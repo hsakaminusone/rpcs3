@@ -106,6 +106,16 @@ namespace mtl
 		// first four indices and the fragment range the next sixteen.
 		std::array<texture_bind, vertex_texture_count> vertex_textures{};     // [12..15]
 		std::array<texture_bind, fragment_texture_count> fragment_textures{}; // [12..27]
+
+		// The depth-as-texture inputs.  A redirected depth unit also reads the
+		// stencil half of its surface at [30..45]; the emulated depth compare reads a
+		// depth mirror at [50].  Both are combined image samplers in the MSL layout,
+		// so each carries a sampler at its own index as well as a texture.  Metal
+		// forbids reading a texture that is an attachment in the open pass, so each
+		// mirror is a distinct image, copied at the clause boundary
+		// (REALISATION.md, "The depth/stencil-as-texture cluster").
+		std::array<texture_bind, fragment_texture_count> fragment_stencil{}; // [30..45]
+		texture_bind fragment_depth_input{};                                 // [50]
 	};
 
 	// The per-stage argument-table writer.  A bind is an encoder-visible write and
