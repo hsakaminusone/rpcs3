@@ -160,6 +160,14 @@ swaps. The loop is: change; build the app and the test binary; run the tests; ru
 the document linter; run the inventory validator. A change is not complete until
 the tests pass and the linter reports zero errors.
 
+**One emulator instance at a time, and never detached.** The emulator is heavily
+multithreaded, so two concurrent instances drive the load high enough to make the
+desktop unresponsive on this machine, and an instance that is started detached
+cannot be killed by the handle that started it, so it keeps running and keeps the
+load high. Before every boot, kill any existing instance and confirm none is left;
+start the instance under a handle that can be killed; bound the run; kill it and
+confirm again. This rule was learned the hard way.
+
 ---
 
 ## 3. What is built
@@ -725,6 +733,8 @@ licence file, which is not present.
 1. No new dependency installs are allowed on this machine.
 2. The machine has 8 GB of memory, so only a four-job build is safe.
 3. Builds must run one at a time, in `./build`.
+4. Run one emulator instance at a time, never detached, and always kill it when the
+   run ends (see 2.5). Concurrent or orphaned instances freeze the desktop.
 
 ### 9.3 The tooling roadblocks
 
