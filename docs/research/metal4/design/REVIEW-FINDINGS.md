@@ -84,7 +84,7 @@ accepted deviation is marked **Limitation**.
 | F7 | High | cross-encoder barriers | Fixed |
 | F8 | High | access-violation result | Fixed |
 | F9 | Medium | drawable layer setup | Partial |
-| F10 | Medium | present output pipeline | Open |
+| F10 | Medium | present output pipeline | Fixed |
 | F11 | Medium | DMA/image clusters | Open |
 | F12 | Medium | drawable acquire block | Fixed |
 | E1 | High | cull-both point/line | Fixed |
@@ -102,7 +102,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 59 findings, 41 fixed, 3 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 59 findings, 42 fixed, 3 partial, 0 blocked, 5 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -627,13 +627,25 @@ and colour-space properties govern the present. The layer now sets
 `allowsNextDrawableTimeout` and the sRGB colour space. The drawable size still
 follows the source, because a view-sized drawable needs the scale pass F10.
 
-### F10 — the present is a bare copy with no output pipeline. Open.
-`MTLPresenter.cpp:49-102` performs one `copyFromTexture`. There is no overlay
-composite, video-out calibration or gamma, aspect or letterbox handling, sRGB or
-colour-space conversion, screenshot or recording, and no vsync. VK and GL
-implement all of these around the flip (`VKPresent.cpp:661-976`,
-`GLPresent.cpp:300-444`, HLD-06 §2.2, §2.8), so the OSD, the colour range, the
-gamma and the scaling are all missing.
+### F10 — the present output pipeline. Fixed.
+The original text is stale: the output tier exists. `mtl::frame_output` owns the
+scale, calibration and UI passes and the frame capture (`MTLPresent.cpp`), and
+`MTLGSRender::flip` drives it. The flip requests the capture before the compose
+(`MTLGSRender.cpp:1416`), composes into the drawable's pass with the aspect, the
+display area, the gamma, the range flag and the overlay manager (`:1450`), and the
+calibration pass applies the gamma, the range conversion and the stereo merge
+(`MTLPresent.cpp:73-88`). The capture runs before the output path scales, the order
+VK uses (`VKPresent.cpp:684`). The letterbox is the black clear outside the aspect
+rectangle (`MTLGSRender.cpp:1436-1440`).
+
+The remaining gap was the output mode. The layer hardcoded `displaySyncEnabled = YES`
+(`MTLMetalLayer.mm`), so `g_cfg.video.vsync` was ignored. `presenter::update_vsync`
+now re-reads the setting on every acquire and maps it per HLD-06 §2.8: `full` sets
+the display sync, `off` clears it, and `adaptive` clears it and paces the present
+with `presentAfterMinimumDuration` at the display's refresh interval. The refresh
+interval has no metal-cpp binding, so `metal_layer_refresh_interval` reads
+`NSScreen.maximumFramesPerSecond` in the Objective-C++ unit. `adaptive` is an
+approximation: Metal has no mailbox present mode, so it cannot yield exactly.
 
 ### F11 — the DMA, image and sync clusters are dead code. Open.
 `MTLNv0039Dma.cpp`, `MTLNv2dSurface.cpp`, `MTLNv3089Image.cpp`,
@@ -812,8 +824,7 @@ harness owns. They are parked, not closed.
 | B15 | Whether the Metal 4 compute-encoder copy of a combined depth-stencil image is a platform defect or a probe artefact, and whether a Metal 3 blit encoder needs an ordering rule against a Metal 4 command buffer. |
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
-| F5 / F9 | The partial halves wait transitively on F10. |
-| F10 | The present output pipeline: overlay composite, video-out calibration and gamma, colour range, aspect and letterbox, capture and vsync. Design first, because the layer has no such pass. |
+| F5 / F9 | The partial halves wait transitively on the present output mode. |
 | F11 | Wire the dead DMA, image and sync clusters into the backend or delete them. The choice is a design decision, because the clusters are also the dialect-contract coverage. |
 
 <!-- doc-end -->

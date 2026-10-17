@@ -8,6 +8,8 @@
 #include "MTLCommandRecorder.h"
 #include "MTLMetalLayer.h"
 
+#include "Emu/system_config.h"
+
 #include <QuartzCore/QuartzCore.hpp>
 
 namespace mtl
@@ -67,6 +69,8 @@ namespace mtl
 			m_height = height;
 		}
 
+		update_vsync();
+
 		CA::MetalDrawable* drawable = static_cast<CA::MetalLayer*>(m_layer)->nextDrawable();
 
 		if (!drawable)
@@ -91,6 +95,27 @@ namespace mtl
 		return true;
 	}
 
+	void presenter::update_vsync()
+	{
+		const vsync_mode mode = g_cfg.video.vsync;
+		const bool sync = (mode == vsync_mode::full);
+
+		// Metal has one display-sync state, so only a full sync is a true vsync.
+		// The other two modes present as soon as the drawable is ready, and adaptive
+		// paces the present to one refresh interval, which is the closest available
+		// behaviour to a sync that yields when a frame is late (HLD-06 §2.8).
+		m_present_interval = (mode == vsync_mode::adaptive) ? metal_layer_refresh_interval(m_view) : 0.0;
+
+		if (m_sync_applied && sync == m_sync_enabled)
+		{
+			return;
+		}
+
+		set_metal_layer_sync(m_layer, sync);
+		m_sync_enabled = sync;
+		m_sync_applied = true;
+	}
+
 	void presenter::present(command_recorder& recorder)
 	{
 		MTL::Drawable* drawable = m_drawable;
@@ -100,7 +125,16 @@ namespace mtl
 
 		if (drawable)
 		{
-			drawable->present();
+			if (m_present_interval > 0.0)
+			{
+				// The paced present of the adaptive mode.  The layer carries no
+				// display sync in that mode, so this is what bounds the rate.
+				drawable->presentAfterMinimumDuration(m_present_interval);
+			}
+			else
+			{
+				drawable->present();
+			}
 		}
 	}
 }

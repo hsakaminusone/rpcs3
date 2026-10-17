@@ -20,6 +20,15 @@ namespace mtl
 	// an MTL::PixelFormat.
 	void set_metal_layer_drawable(void* layer, u32 width, u32 height, u32 format);
 
+	// Gate the present on the display's refresh.  A metal layer has one sync state,
+	// so this is the whole of vsync (HLD-06 §2.8).
+	void set_metal_layer_sync(void* layer, bool enabled);
+
+	// One screen refresh in seconds, which the adaptive present paces to.  Falls
+	// back to 1/60 when the view has no screen.  AppKit carries this value and
+	// metal-cpp does not, so it is read here (HLD-06 §2.8).
+	f64 metal_layer_refresh_interval(void* view);
+
 	// Detach and release the layer from `view`.
 	void detach_metal_layer(void* view, void* layer);
 }

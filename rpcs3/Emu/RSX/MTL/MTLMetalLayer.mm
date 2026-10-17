@@ -65,6 +65,37 @@ namespace mtl
 		metal_layer.drawableSize = CGSizeMake(width, height);
 	}
 
+	void set_metal_layer_sync(void* layer, bool enabled)
+	{
+		if (!layer)
+		{
+			return;
+		}
+
+		static_cast<CAMetalLayer*>(layer).displaySyncEnabled = enabled;
+	}
+
+	f64 metal_layer_refresh_interval(void* view)
+	{
+		constexpr f64 default_interval = 1.0 / 60.0;
+
+		if (!view)
+		{
+			return default_interval;
+		}
+
+		NSScreen* screen = static_cast<NSView*>(view).window.screen;
+
+		if (!screen)
+		{
+			return default_interval;
+		}
+
+		const NSInteger rate = screen.maximumFramesPerSecond;
+
+		return rate > 0 ? 1.0 / static_cast<f64>(rate) : default_interval;
+	}
+
 	void detach_metal_layer(void* view, void* layer)
 	{
 		if (view)
