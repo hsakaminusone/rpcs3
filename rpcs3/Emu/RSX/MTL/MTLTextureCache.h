@@ -42,6 +42,10 @@ namespace mtl
 		// the GPU-to-CPU copy is a compute pass over a shared buffer.
 		std::unique_ptr<buffer> m_staging;
 
+		// The recorder that encoded the staging copy.  The readback waits on it, so
+		// the CPU never reads a copy the GPU has not written (REVIEW-FINDINGS.md, B4).
+		command_recorder* m_readback_cmd = nullptr;
+
 		MTL::PixelFormat format = MTL::PixelFormat::PixelFormatBGRA8Unorm;
 
 	public:

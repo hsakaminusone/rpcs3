@@ -8,6 +8,15 @@
 
 #include <memory>
 
+// The present source and the CPU-upload scratch images are the only metal-cpp
+// types this header names, and it must not reach metal-cpp itself: the UI
+// includes it before any metal-cpp include, and gcm_enums.h:1183's
+// `using namespace gcm` would then make Objective-C's `Method` ambiguous.
+namespace MTL
+{
+	class Texture;
+}
+
 namespace mtl
 {
 	class device;

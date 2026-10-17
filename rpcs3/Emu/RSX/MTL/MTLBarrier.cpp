@@ -30,6 +30,11 @@ namespace mtl
 	{
 		encoder->barrierAfterQueueStages(spec.producer, spec.consumer, spec.visibility);
 	}
+
+	void emit_producer_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec)
+	{
+		encoder->barrierAfterStages(spec.producer, spec.consumer, spec.visibility);
+	}
 }
 
 #endif // RSX_ENABLE_METAL4

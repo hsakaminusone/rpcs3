@@ -53,10 +53,9 @@ accepted deviation is marked **Limitation**.
 | B1 | High | depth/stencil mirror | Fixed |
 | B2 | High | depth-compare input | Fixed |
 | B3 | High | transfer-read barrier | Fixed |
-| B4 | High | CPU readback sync | Open |
+| B4 | High | CPU readback sync | Fixed |
 | B5 | High | `copy_texture` AA region | Fixed |
-| B6 | High | depth resolve path | Partial |
-| B6a | Medium | MSAA depth meta resolve | Limitation |
+| B6 | High | depth resolve path | Fixed |
 | B7 | Medium | `flush_old_contents` region | Fixed |
 | B8 | Medium | `load_background` texel size | Open |
 | B9 | Medium | `erase_bkgnd` init | Fixed |
@@ -89,7 +88,7 @@ accepted deviation is marked **Limitation**.
 | F12 | Medium | drawable acquire block | Fixed |
 | E1 | High | cull-both point/line | Fixed |
 | E2 | Critical | `surface_b` attachment | Fixed |
-| E3 | Low | PSO attachment-count key | Open |
+| E3 | Low | PSO attachment-count key | Won't fix |
 | E4 | High | `z16_float` depth format | Fixed |
 | E5 | High | extended depth range | Duplicate of C3 |
 | E6 | High | logic op | Duplicate of C1 |
@@ -100,8 +99,9 @@ accepted deviation is marked **Limitation**.
 | E11 | Low | PSO key hash | Fixed |
 | E12 | Low | key completeness | Limitation |
 | E13 | Low | latch dataflow and dead fields | Open |
+| E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 58 findings, 36 fixed, 5 partial, 0 blocked, 8 open, 7 limitations, 2 duplicates.
+Totals: 58 findings, 39 fixed, 4 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -201,12 +201,18 @@ Without it an MSAA surface is read before its resolve and a pending
 `old_contents` flush is skipped, so the DMA write-back returned stale bytes. The
 barrier is now taken first.
 
-### B4 — the CPU readback has no completion wait. Open.
-`cached_texture_section::map_synchronized` returns the staging pointer as soon as
-the copy is encoded; the copy executes at commit, so every `finish_flush`
-readback is undefined. GL waits a fence (`GLTextureCache.h:432`) and `finish_flush`
-here is empty. The fix is a shared-event or `waitUntilCompleted` wait on the
-frame slot the copy was encoded into.
+### B4 — the CPU readback has no completion wait. Fixed.
+`cached_texture_section::map_synchronized` returned the staging pointer as soon as
+the copy was encoded, but the copy executes at commit, so every readback was
+undefined. GL waits a fence (`GLTextureCache.h:432`); VK's `map_synchronized`
+returns null, so its readback is dead and is no precedent. A Metal 4 command buffer
+is the unit of submission, so the copy can be observed only after a commit:
+`copy_texture` records the recorder in the section, and `map_synchronized` calls
+`command_recorder::flush_for_readback`, which ends the command buffer, commits it,
+waits for that slot's commit feedback, then resets the allocator and re-enters the
+**same** slot. The slot is re-entered rather than advanced because the frame owns
+exactly one slot, and the present drawable is not consumed, so only the frame's own
+submit presents.
 
 ### B5 — `copy_texture` over-ran the resolve image for an AA surface. Fixed.
 The region was scaled by `samples_x`/`samples_y` before the blit, but a Metal
@@ -215,31 +221,34 @@ image really is sample-sized and it has a typeless resize when the sizes differ
 (`VKTextureCache.h:241-261`); Metal has no such path, so the source region
 exceeded the texture. The scaling is removed.
 
-### B6 — an MSAA depth surface is resolved through a colour attachment. Fixed for colour; the depth resolve is a limitation.
+### B6 — an MSAA depth surface is resolved through a colour attachment. Fixed.
 `surface::resolve` set the depth texture as `colorAttachments()->object(0)` with a
-resolve texture, and the framebuffer layer never gave the depth attachment a resolve
-target. VK resolves the depth aspect directly (`VKRenderTargets.cpp:1034`). Two
-measurements settle the fix. A device probe confirms an MSAA→1-sample blit is rejected
-(`sampleCount` must match). KosmicKrisp then shows why the render-pass route is wrong for
-depth: it tried a depth render-pass resolve and abandoned it, because a Metal producer
-barrier does not order a depth or stencil render-pass resolve even at
-`StageAll`→`StageAll`, and it now forces a meta resolve for both
-(`src/kosmickrisp/vulkan/kk_cmd_buffer.c:1000-1005`; the render-pass resolve is applied to
-colour only, `:900-986`). The tree therefore keeps `StoreActionStore` on the depth and stencil
-attachments, gives neither a resolve target, and returns early from `surface::resolve` for a
-depth surface while leaving `require_resolve` set, so the surface is never claimed
-resolved. The colour resolve now uses `StoreActionStoreAndMultisampleResolve`, so the
-multisampled image survives and `unresolve` no longer copies a 1-sample image into an
-N-sample one, which was itself an illegal blit. The meta resolve is the remaining work
-(see the limitation below).
+resolve texture, and the framebuffer layer never gave the depth attachment a
+resolve target. VK resolves the depth aspect directly (`VKRenderTargets.cpp:1034`).
+A device probe confirms an MSAA→1-sample blit is rejected (`sampleCount` must
+match), so a blit cannot resolve it either.
 
-### B6a — a multisampled depth surface has no resolve. Limitation.
-The MSAA depth resolve needs a meta resolve: a pass that reads the multisampled depth
-image with an explicit sample index and writes the 1-sample target through the graphics
-pipeline, because no Metal blit or render-pass store can produce it where a producer
-barrier orders it (KK_WORKAROUND, `src/kosmickrisp/vulkan/kk_cmd_buffer.c:1000-1005`). Until
-it lands, a multisampled depth surface keeps `require_resolve` set and a transfer read sees
-the multisampled image, not a resolved one.
+KosmicKrisp forces meta resolves for depth and stencil from the outset, on the
+premise that a Metal producer barrier does not order a depth or stencil
+render-pass resolve. It introduced that bail-out in `db5ab8de` (2026-07-23) with
+the comment "There appears to be a synchronization bug in Metal", has not
+revisited it since, and files no Metal ticket for it: it is a baked-in decision,
+not a tracked Apple bug. The project's own 48-round measurement on the macOS 27
+floor (Apple A18 Pro, macOS 27.0.1) does not reproduce it. A depth render-pass
+resolve is 48 of 48 reliable with a **producer** barrier and 46 of 48 with the
+consumer form, so the producer form is what the edge needs; a stencil resolve
+needs no barrier at all, and a combined depth-and-stencil resolve is 32 of 32.
+The measurement is the basis of the macOS 27 floor decision (CONFLICTS.md).
+
+`surface::resolve` now builds the resolve in its own pass: the depth attachment
+and, for a combined format, the stencil attachment, both `LoadActionLoad` +
+`StoreActionStoreAndMultisampleResolve` with the 1-sample image as the target. The
+pass emits a producer barrier (`emit_producer_barrier`), so later queue work
+observes the resolved image. `StoreActionStore` keeps the multisampled image, so a
+later write needs no unresolve — which retires the illegal 1-sample-to-N-sample
+blit that `unresolve` used to do. The `StoreActionStore` on the depth and stencil
+attachments in `framebuffer::open_pass` stays, because a clause pass is not the
+last writer of the multisampled image.
 
 ### B7 — `flush_old_contents` used the raw region. Fixed.
 VK transforms both rectangles with `transform_pixels_to_samples` and skips a
@@ -360,14 +369,47 @@ view for a multisample texture as well, with the source's own
 
 ## C — the state latches and the clear path
 
-### C1 — the logic op has no implementation. Open.
+### C1 — the logic op has no implementation. Open: mechanism identified, design decided.
 The RSX logic op is a real operation: VK bakes it into the pipeline
 (`VKGSRender.cpp:322-326`) and GL enables `GL_COLOR_LOGIC_OP`
-(`GLDraw.cpp:199-201`). Metal has no logic-op state and no MSL performs it, so a
-logic-op draw is a plain write. The fix is an MSL emulation that reads the
-destination, or a recorded deviation. Pass E6 re-confirms it: the operation is
+(`GLDraw.cpp:199-201`). Metal has no logic-op state — neither
+`MTL4::RenderPipelineDescriptor` nor `MTL4::RenderCommandEncoder` exposes one — so a
+logic-op draw is currently a plain write. Pass E6 re-confirms it: the operation is
 latched and keyed and then never consumed, and `MTLBlendState.cpp:111` disables
 blending when it wins, so the draw writes plainly with no diagnostic.
+
+The mechanism that reads the destination colour in a Metal 4 fragment shader is the
+`[[color(n)]]` input, and the tree already owns it: the programmable-blending path
+declares `layout(input_attachment_index = n, set = 0, binding = 46 + n) uniform
+subpassInput frag_src_n` and reads it with `subpassLoad`
+(`RSXROPPrologue.glsl:53-77`; `MTLFragmentProgram.cpp:124-132`), and
+`MTLShader.cpp:78` sets `use_framebuffer_fetch_subpasses`, so SPIRV-Cross lowers the
+subpass input to an MSL `[[color(n)]]` parameter. The logic op needs no encoder
+state and no binding of its own: the same declaration, plus the op applied in the
+epilogue.
+
+Design, not landed:
+- A capability `backend_configuration::supports_native_logic_op` (default true), set
+  false in `MTLDevice.cpp` beside the other capability flags.
+- `rsx::thread` folds a synthesized `RSX_SHADER_CONTROL_LOGIC_OP` into
+  `current_fragment_program.ctrl` when `logic_op_enabled()` holds and the capability
+  is false — the `RSX_SHADER_CONTROL_ALPHA_TEST` precedent (`RSXThread.cpp:2442`).
+  The bit goes in the enum's "Custom" range (`gcm_enums.h:457`).
+- The shared ROP prologue declares and loads `mrt_colorN` under `_ENABLE_LOGIC_OP`,
+  and the epilogue applies the op where it applies blending. The load must **not**
+  reuse the programmable-blending gate `IS_MRT_BLEND_ENABLED(n)`, because the ROP
+  blend-target bits are written only under `RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING`
+  (`Core/RSXDrawCommands.cpp:693-696`) and a logic-op guest need not enable blending.
+- The op is a uniform in the fragment push-constant block, so changing the op does
+  not recompile the shader.
+- Scope: the emulation quantizes source and destination to the guest's 8-bit unorm
+  encoding. Vulkan forbids `logicOpEnable` on a floating-point attachment and GL
+  leaves the result undefined for a non-fixed-point framebuffer, so a float target
+  has no logic op to reproduce.
+
+Not landed in this pass: no test in the tree reaches the GLSL-to-MSL hop, so the
+emulation cannot be verified before first light, and it would otherwise land into a
+programmable-blending path that has never executed. The fix follows first light.
 
 ### C2 — the stencil reference ignored the single-sided case. Fixed.
 A single-sided draw applies the front reference to both faces
@@ -584,7 +626,7 @@ VK builds `m_fbo_images` in `get_rtt_indexes` order and asserts
 `mrt_buffers_count == m_draw_buffers.size()` (`VKGSRender.cpp:2697-2712,804`). The
 pass rated this a mis-render; it is a crash.
 
-### E3 — `attachment_count` in the PSO key. Open, decision recorded. (pass label F3)
+### E3 — `attachment_count` in the PSO key. Won't fix: the decision stands. (pass label F3)
 The pass proposed `MTL4RenderPipelineColorAttachmentDescriptor
 .setColorAttachmentMap` to keep one PSO across attachment counts. Recorded, not
 taken: the map bridges a *logical-to-physical* index gap, and E2's fix leaves no
@@ -689,6 +731,19 @@ already holds permits an equality cheap-out. Not folded into a fix: the harness
 asserts the decode (the C5 and C6 precedent), so pruning the fields is a harness
 decision.
 
+### E14 — the state-latch hashes truncated their enum fields. Fixed. (found by the state tests)
+`hash_depth_stencil_state` packed each stencil face into a `u32` with three bits per
+operation (`MTLDepthStencil.cpp`), but `rsx::stencil_op` is a 16-bit GL constant:
+`keep` is `0x1E00` and `zero` is `0`, so three bits could not separate them and the
+operation bits also overlapped the mask fields. `hash_sampler_state` had the same
+defect in a milder form — a four-bit slot for the 16-bit `comparison_function`,
+overlapping `depth_compare` in the highest bits, which survived only because the
+current comparison values are `0x0200..0x0207`. An `unordered_map` stays correct on a
+collision (`operator==` still decides), so the cost was extra probes on a cache that
+holds thousands of objects, and the risk was that a later value set would collapse
+more states. Both now fold each field at its own width through `hash64`. The state
+tests' "hash tracks every field" cases caught the depth/stencil one.
+
 ## Parked for review
 
 These are the findings a fix cannot settle from the tree alone. Each needs either
@@ -697,12 +752,11 @@ harness owns. They are parked, not closed.
 
 | ID | The question to answer first |
 |---|---|
-| A7 | Does Metal's native `sampler2DShadow` compare match the emulated RSX shadow compare? A measurement is required before `emulate_shadow_compare` can be flipped (`VKFragmentProgram.cpp:405,636` derives it from device support). |
-| B4 | The CPU readback wait: a flush is encoded mid-frame, so is a mid-frame commit plus a `MTL4CommitFeedback` wait the correct mechanism, or does the readback need to defer to the frame's own completion? |
-| B8 | The three questions in the entry: whether a blit may write a depth texture, which plane it touches and its row requirement, and whether the stencil plane is reachable at all. |
-| C1 | The logic-op MSL emulation: which mechanism reads the current attachment value in a Metal 4 fragment shader, and what the encoder and pipeline must set to enable it. |
+| A7 | Does Metal's native `sampler2DShadow` compare match the emulated RSX shadow compare? A measurement is required before `emulate_shadow_compare` can be flipped (`VKFragmentProgram.cpp:405,636` derives it from device support). A probe is running. |
+| B8 | The three questions in the entry: whether a blit may write a depth texture, which plane it touches and its row requirement, and whether the stencil plane is reachable at all. A probe is running. |
+| C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
-| F5 / F8 / F9 | The partial halves wait transitively on B4 and F10. |
+| F5 / F8 / F9 | The partial halves wait transitively on F10. |
 | F10 | The present output pipeline: overlay composite, video-out calibration and gamma, colour range, aspect and letterbox, capture and vsync. Design first, because the layer has no such pass. |
 | F11 | Wire the dead DMA, image and sync clusters into the backend or delete them. The choice is a design decision, because the clusters are also the dialect-contract coverage. |
 
