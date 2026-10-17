@@ -696,6 +696,15 @@ endif()
 if(TARGET 3rdparty_metal)
     target_sources(rpcs3_emu PRIVATE
         RSX/MTL/MTLDevice.cpp
+        RSX/MTL/MTLFormats.cpp
+        RSX/MTL/MTLSurfaceState.cpp
+        RSX/MTL/MTLDepthStencil.cpp
+        RSX/MTL/MTLRasterState.cpp
+        RSX/MTL/MTLVertexState.cpp
+        RSX/MTL/MTLSamplerState.cpp
+        RSX/MTL/MTLBlendState.cpp
+        RSX/MTL/MTLDrawState.cpp
+        RSX/MTL/MTLGSRender.cpp
     )
 endif()
 
