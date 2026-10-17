@@ -4,7 +4,7 @@
 
 namespace mtl
 {
-	encoder_state capture_encoder_state()
+	encoder_state capture_encoder_state(bool emulate_depth_range)
 	{
 		// One latch per cluster; the helpers consume it instead of re-reading the
 		// register file.
@@ -32,6 +32,10 @@ namespace mtl
 		state.stencil_front = references.front;
 		state.stencil_back = references.back;
 
+		const depth_bounds bounds = capture_depth_bounds(emulate_depth_range);
+		state.depth_bounds_min = bounds.min;
+		state.depth_bounds_max = bounds.max;
+
 		// The helper writes znear/zfar only when the range is inside [0,1], so the
 		// defaults (0.0, 1.0) survive the false case.
 		state.has_clip_range = capture_clip_range(raster, state.znear, state.zfar);
@@ -41,20 +45,25 @@ namespace mtl
 		state.clip_width = surface.clip_width;
 		state.clip_height = surface.clip_height;
 
+		state.depth_stencil = capture_depth_stencil_state();
+
 		return state;
 	}
 
-	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor)
+	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor, depth_stencil_cache& depth_cache)
 	{
 		if (encoder == nullptr)
 		{
 			return;
 		}
 
+		apply_depth_stencil_state(encoder, depth_cache, state.depth_stencil);
+
 		encoder->setCullMode(state.cull_mode);
 		encoder->setFrontFacingWinding(state.winding);
 		encoder->setTriangleFillMode(state.fill_mode);
 		encoder->setDepthClipMode(state.depth_clip_mode);
+		encoder->setDepthTestBounds(state.depth_bounds_min, state.depth_bounds_max);
 
 		// The RSX has no depth-bias clamp term (LLD-raster §3.4).
 		encoder->setDepthBias(state.depth_bias, state.depth_slope_scale, 0.0f);

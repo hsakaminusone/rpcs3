@@ -118,14 +118,22 @@ namespace mtl
 		cfg.supports_multidraw = false;
 		cfg.supports_hw_msaa = true;
 		cfg.supports_hw_a2c = true;
-		cfg.supports_hw_a2c_1spp = true;
+		cfg.supports_hw_a2c_1spp = false; // unverified at 1 spp; GL disables it too (GLGSRender.cpp:61)
 		cfg.supports_hw_a2one = true;
 		cfg.supports_hw_instanced_rendering = true;
 		cfg.supports_programmable_blending = true; // framebuffer fetch [[color(n)]] (HLD-01 §4.3)
 		cfg.supports_normalized_barycentrics = true;
-		cfg.supports_extended_depth_range = true;  // float depth targets, no clamp toggle
+		// Metal validates `MTLViewport.znear/zfar` to [0,1] and has no unrestricted
+		// depth range, so the general clip range is the shader zclip/depth-range
+		// transform (LLD-raster §3.2, invariant 4; VKDraw.cpp:1305-1320).
+		cfg.supports_extended_depth_range = false;
 		cfg.supports_framebufferless_rendering = true;
 		cfg.supports_asynchronous_compute = true;  // independent command buffers (HLD-04 §3.2)
+
+		// Metal has no logic-op state, so the ROP emulates it by reading the
+		// destination colour through the framebuffer fetch the programmable-blend
+		// path already owns (REVIEW-FINDINGS.md C1).
+		cfg.supports_native_logic_op = false;
 
 		// Forced-off on Metal 4 bring-up (docs/research/metal4/10 §2.2):
 		cfg.supports_hw_renormalization = false;   // Apple silicon is not NV silicon

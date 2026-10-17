@@ -6,6 +6,8 @@
 
 #include "Emu/RSX/gcm_enums.h"
 
+#include <array>
+
 namespace mtl
 {
 	// The latched `raster` cluster state (LLD-raster §2).  The latch is read once per
@@ -31,6 +33,13 @@ namespace mtl
 		// Vertex env (LLD-raster §2.2, §2.5, §2.7).
 		f32 clip_min = 0.0f;
 		f32 clip_max = 1.0f;
+
+		// Captured for the dial harness only (REVIEW-FINDINGS.md E13): no path in the
+		// backend consumes these, because the real consumer reads the register file at
+		// the point of use — point size reaches the shader through
+		// `vertex_context::point_size` (MTLGSRender.cpp:1007, MTLConstants.h:23).  They
+		// stay so the harness can assert the decode; pruning them is a harness
+		// decision, recorded in the E13 entry.
 		f32 point_size = 1.0f;
 		f32 line_width = 1.0f;
 		bool line_smooth = false;
@@ -38,7 +47,19 @@ namespace mtl
 
 		// Fragment program state (LLD-raster §2.6, §2.7).
 		bool stipple_enabled = false;
-		const void* stipple_pattern = nullptr;
+
+		// The RSX polygon stipple pattern is a 32-word register array
+		// (rsx_methods.h:1349, stipple_block_count = 8 blocks of four words).  The
+		// latch copies it rather than holding a guest pointer into register space, so a
+		// consumer that holds the latch across a register write cannot read retired
+		// data (E13); every other field of this struct copies its value.  The stipple
+		// heap copies from register space at the point of use, not from here
+		// (MTLGSRender.cpp:1013).
+		static constexpr u32 stipple_word_count = 32;
+		std::array<u32, stipple_word_count> stipple_pattern{};
+
+		// Captured for the dial harness only (E13), as with the vertex-env fields
+		// above.
 		bool point_sprite_enabled = false;
 		u16 point_sprite_mask = 0;
 	};

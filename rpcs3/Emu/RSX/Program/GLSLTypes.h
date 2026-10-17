@@ -54,6 +54,7 @@ namespace glsl
 		bool ROP_discard : 1;
 		bool ROP_channel_remap : 1;
 		bool ROP_programmable_blend : 1;
+		bool ROP_logic_op : 1;                  // Emulate the guest logic op, reading the destination colour
 		bool ROP_emulate_depth_range : 1;
 		bool ROP_depth_export : 1;
 

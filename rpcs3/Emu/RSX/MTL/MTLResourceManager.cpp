@@ -309,6 +309,18 @@ namespace mtl
 		return buffer;
 	}
 
+	u8 resource_manager::supported_sample_count(u8 count) const
+	{
+		// Apple lists 4 samples as universal and 2 as "some devices", so a request
+		// the device rejects folds up to 4 and keeps the antialiasing.
+		if (count > 1 && !m_device->supportsTextureSampleCount(count))
+		{
+			return 4;
+		}
+
+		return count;
+	}
+
 	MTL::Texture* resource_manager::new_texture(MTL::TextureDescriptor* descriptor, MTL::StorageMode storage)
 	{
 		descriptor->setStorageMode(storage);
@@ -333,7 +345,6 @@ namespace mtl
 			return nullptr;
 		}
 
-		track(texture, pool, heap, offset, required.size);
 		track(texture, pool, heap, offset, required.size);
 		m_residency.on_bind(texture);
 		return texture;
@@ -364,8 +375,10 @@ namespace mtl
 			return;
 		}
 
-		// The slot that follows this one is now free of every reference it could hold.
-		release_list(m_deferred[(index + 1) % static_cast<u32>(m_deferred.size())]);
+		// The slot that just went idle is the one the frame that just completed
+		// used, so the objects deferred during that frame are safe to release
+		// (HLD-02 I7).  The frames on later slots may still be in flight.
+		release_list(m_deferred[index]);
 	}
 
 	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size)
