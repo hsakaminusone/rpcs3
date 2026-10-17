@@ -342,7 +342,10 @@ TEST(MTLDialSpine, ReaderSeesTheInventory)
 
 TEST(MTLDialMapper, CompareFunctionIsInjective)
 {
-	EXPECT_EQ(image_size(compare_domain, mtl::get_compare_function), 8u);
+	// The sampler path adds a second argument, so the mapper is wrapped to keep the
+	// injectivity assertion about the one-argument mapping.
+	EXPECT_EQ(image_size(compare_domain, [](rsx::comparison_function op) { return mtl::get_compare_function(op); }), 8u);
+	EXPECT_EQ(image_size(compare_domain, [](rsx::comparison_function op) { return mtl::get_compare_function(op, true); }), 8u);
 }
 
 TEST(MTLDialMapper, StencilOperationIsInjective)

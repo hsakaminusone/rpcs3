@@ -212,7 +212,9 @@ namespace mtl
 
 		if (state.depth_compare)
 		{
-			descriptor->setCompareFunction(get_compare_function(state.compare));
+			// The sampler sees the reference first, the RSX compares the texel first,
+			// so a directed function is swapped (VKDraw.cpp:32-45, REVIEW-FINDINGS.md A7).
+			descriptor->setCompareFunction(get_compare_function(state.compare, true));
 		}
 
 		MTL::SamplerState* result = device->newSamplerState(descriptor);

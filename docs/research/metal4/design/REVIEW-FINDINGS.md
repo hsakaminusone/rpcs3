@@ -48,7 +48,7 @@ accepted deviation is marked **Limitation**.
 | A4 | Medium | depth-compare input bind | Fixed |
 | A5 | Medium | transform-constant ring size | Fixed |
 | A6 | Medium | `block_ring` growth | Fixed |
-| A7 | Medium | `emulate_shadow_compare` | Open |
+| A7 | Medium | `emulate_shadow_compare` | Fixed |
 | A8 | Low | `conditional_render_predicate` | Limitation |
 | B1 | High | depth/stencil mirror | Fixed |
 | B2 | High | depth-compare input | Fixed |
@@ -101,7 +101,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 58 findings, 39 fixed, 4 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 58 findings, 40 fixed, 4 partial, 0 blocked, 5 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -157,12 +157,32 @@ Growth allocated a replacement buffer of the same capacity, so a block larger
 than the capacity wrote past the end. Growth now takes
 `max(m_capacity, count)` and the ring grows to fit the block.
 
-### A7 — `emulate_shadow_compare` is forced false. Open.
+### A7 — `emulate_shadow_compare` is forced false. Fixed.
 GL and VK derive it from device depth-format support
-(`VKFragmentProgram.cpp:405,636`). The tree forces it false because the native
-compare sampler was not measured against the RSX. A native `sampler2DShadow` may
-differ from the emulation, so the flag needs a hardware measurement before it can
-be enabled.
+(`VKFragmentProgram.cpp:405,636`). The tree forced it false because the native
+compare sampler was not measured against the RSX. It is now measured, and
+`emulate_shadow_compare` stays false: the native path is correct once the operand
+order is compensated.
+
+Metal's `sample_compare` evaluates `reference OP texel`; the RSX evaluates
+`texel OP ref` (`comparison_passes` is called as `comparison_passes(texel, ref)`,
+`RSXFragmentTextureOps.glsl:106`, `RSXFragmentPrologue.glsl:137-149`). Native
+nearest returns exactly 0.0 or 1.0 for all eight functions, so the four directed
+functions invert and the four directionless ones do not: with a stored depth of
+0.5 and a reference of 0.25, native `less` is 1.0 where the RSX is 0.0. That is 32
+mismatches over 72 samples, and 0 of 72 once the sampler swaps the directed
+functions — which is the compensation `VKDraw.cpp:32-45,409` already applies. The
+sampler path therefore calls `get_compare_function(zfunc, true)` and the depth and
+stencil tests keep the direct order, because they compare the incoming value
+against the stored one.
+
+Three further measurements settle the surrounding behaviour. A linear compare
+sampler is a per-texel compare followed by the filter, not a filtered 0/1: a 2x2
+depth of {0.2, 0.4, 0.6, 0.8} sampled at uv (0.5, 0.5) returns exactly 1.0, 0.75,
+0.5, 0.25 or 0.0 for four, three, two, one or zero passing texels. The compare
+runs on the texels of the selected mip level, not on level 0. Equality is
+inclusive for `_or_equal` and exclusive for the strict functions, and the reversal
+does not change that: each side's pass set is the other's complement.
 
 ### A8 — the hardware conditional-render path is not implemented. Limitation.
 `conditional_render_predicate_slot` is reserved in the binding map but has no
@@ -752,7 +772,6 @@ harness owns. They are parked, not closed.
 
 | ID | The question to answer first |
 |---|---|
-| A7 | Does Metal's native `sampler2DShadow` compare match the emulated RSX shadow compare? A measurement is required before `emulate_shadow_compare` can be flipped (`VKFragmentProgram.cpp:405,636` derives it from device support). A probe is running. |
 | B8 | The three questions in the entry: whether a blit may write a depth texture, which plane it touches and its row requirement, and whether the stencil plane is reachable at all. A probe is running. |
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |

@@ -12,17 +12,17 @@
 
 namespace mtl
 {
-	MTL::CompareFunction get_compare_function(rsx::comparison_function op)
+	MTL::CompareFunction get_compare_function(rsx::comparison_function op, bool reverse)
 	{
 		switch (op)
 		{
 		case rsx::comparison_function::never: return MTL::CompareFunctionNever;
-		case rsx::comparison_function::less: return MTL::CompareFunctionLess;
+		case rsx::comparison_function::less: return reverse ? MTL::CompareFunctionGreater : MTL::CompareFunctionLess;
 		case rsx::comparison_function::equal: return MTL::CompareFunctionEqual;
-		case rsx::comparison_function::less_or_equal: return MTL::CompareFunctionLessEqual;
-		case rsx::comparison_function::greater: return MTL::CompareFunctionGreater;
+		case rsx::comparison_function::less_or_equal: return reverse ? MTL::CompareFunctionGreaterEqual : MTL::CompareFunctionLessEqual;
+		case rsx::comparison_function::greater: return reverse ? MTL::CompareFunctionLess : MTL::CompareFunctionGreater;
 		case rsx::comparison_function::not_equal: return MTL::CompareFunctionNotEqual;
-		case rsx::comparison_function::greater_or_equal: return MTL::CompareFunctionGreaterEqual;
+		case rsx::comparison_function::greater_or_equal: return reverse ? MTL::CompareFunctionLessEqual : MTL::CompareFunctionGreaterEqual;
 		case rsx::comparison_function::always: return MTL::CompareFunctionAlways;
 		default:
 			rsx_log.error("Metal 4: unknown compare function 0x%x", static_cast<u32>(op));
