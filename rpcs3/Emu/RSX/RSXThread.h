@@ -95,6 +95,10 @@ namespace rsx
 		bool supports_programmable_blending;     // Can handle programmable blending requests
 		bool supports_extended_depth_range;      // Depth values above 1 can be stored and tested. Float depth targets are emulated otherwise.
 		bool supports_framebufferless_rendering; // Can rasterize without any attachments bound (e.g for occlusion queries)
+		// The default member initializer is the default for a backend that does not
+		// know the flag: Vulkan and OpenGL have a native logic op, so only a backend
+		// without one sets it false (REVIEW-FINDINGS.md C1).
+		bool supports_native_logic_op = true;    // Host has a logic-op state. Emulated in the ROP otherwise.
 	};
 
 	struct desync_fifo_cmd_info

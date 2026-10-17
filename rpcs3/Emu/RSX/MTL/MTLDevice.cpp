@@ -130,6 +130,11 @@ namespace mtl
 		cfg.supports_framebufferless_rendering = true;
 		cfg.supports_asynchronous_compute = true;  // independent command buffers (HLD-04 §3.2)
 
+		// Metal has no logic-op state, so the ROP emulates it by reading the
+		// destination colour through the framebuffer fetch the programmable-blend
+		// path already owns (REVIEW-FINDINGS.md C1).
+		cfg.supports_native_logic_op = false;
+
 		// Forced-off on Metal 4 bring-up (docs/research/metal4/10 §2.2):
 		cfg.supports_hw_renormalization = false;   // Apple silicon is not NV silicon
 		cfg.supports_passthrough_dma = false;      // no host-pointer device DMA (HLD-02 §2.1)

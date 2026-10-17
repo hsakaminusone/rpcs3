@@ -735,10 +735,19 @@ MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_STIPPLE)
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_STIPPLE_PATTERN)
 {
-	// The pattern is the register array itself, so the latch carries the guest
-	// pointer and not a copy.
-	EXPECT_EQ(mtl::capture_raster_state().stipple_pattern,
-		static_cast<const void*>(rsx::method_registers.registers.data() + NV4097_SET_POLYGON_STIPPLE_PATTERN));
+	// The latch copies the 32-word pattern instead of holding a guest pointer into
+	// register space, so a consumer that holds the latch across a register write
+	// cannot read retired data (E13).  The row asserts the copy.
+	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN, 0x0000'0001);
+	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN + 1, 0xffff'0000);
+
+	const auto pattern = mtl::capture_raster_state().stipple_pattern;
+	EXPECT_EQ(pattern[0], 0x0000'0001u);
+	EXPECT_EQ(pattern[1], 0xffff'0000u);
+
+	// A later write to the register file must not change a latch already taken.
+	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN, 0x0000'0002);
+	EXPECT_EQ(pattern[0], 0x0000'0001u);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POINT_SPRITE_CONTROL)
@@ -1091,6 +1100,107 @@ TEST(MTLDialBindings, EverySlotMatchesTheRsxAbi)
 		ASSERT_NE(row, rows.end()) << entry.name;
 		EXPECT_EQ(to_u32((*row)[1]), entry.abi) << entry.name;
 	}
+}
+
+TEST(MTLDialBindings, TheMslIndexCapsHoldTheAbiMap)
+{
+	// MSL caps the shader-side index of each space: a [[buffer(n)]] index at 30, a
+	// [[sampler(n)]] index at 15 and a [[texture(n)]] index at 127
+	// (REVIEW-FINDINGS.md A9).  A declaration above its cap makes the library fail
+	// to build, so every slot the map hands to a shader must stay inside its cap.
+	// The header asserts this at compile time; this row restates the numbers so a
+	// future edit fails a test instead of a shader library.
+	constexpr u32 buffer_cap = 30;
+	constexpr u32 sampler_cap = 15;
+	constexpr u32 texture_cap = 127;
+
+	// Every buffer slot of either stage, plus the fill's own slot.
+	const u32 buffers[] = {
+		mtl::vertex_context_slot,
+		mtl::vertex_constants_slot,
+		mtl::vertex_buffers_slot,
+		mtl::vertex_volatile_slot,
+		mtl::vertex_draw_parameters_slot,
+		mtl::conditional_render_predicate_slot,
+		mtl::instancing_lut_slot,
+		mtl::instancing_constants_slot,
+		mtl::vertex_draw_params_slot,
+		mtl::fragment_constants_slot,
+		mtl::fragment_state_slot,
+		mtl::fragment_texture_params_slot,
+		mtl::fragment_stipple_slot,
+		mtl::fragment_blend_slot,
+		mtl::fill_values_slot,
+	};
+
+	for (const u32 slot : buffers)
+	{
+		EXPECT_LE(slot, buffer_cap);
+	}
+
+	// Every texture slot of either stage.
+	const u32 textures[] = {
+		mtl::texture_slot_base,
+		mtl::texture_slot_base + mtl::fragment_texture_count - 1,
+		mtl::vertex_texture_slot(0),
+		mtl::vertex_texture_slot(mtl::vertex_texture_count - 1),
+		mtl::fragment_stencil_slot_base,
+		mtl::fragment_stencil_slot_base + mtl::fragment_texture_count - 1,
+		mtl::fragment_depth_input_slot,
+	};
+
+	for (const u32 slot : textures)
+	{
+		EXPECT_LE(slot, texture_cap);
+	}
+
+	// MSL has no combined image sampler, so a texture unit takes its position in
+	// the stage's texture range as the sampler index instead of its texture index
+	// (MTLShader.cpp remaps, MTLArgumentBinds.cpp writes).  The two must agree, the
+	// index must stay inside the sampler cap, and no two units may share one index:
+	// MSL rejects a duplicate sampler index outright.
+	std::set<u32> unit_samplers;
+
+	for (u32 index = 0; index < mtl::fragment_texture_count; ++index)
+	{
+		const u32 texture = mtl::texture_slot_base + index;
+		EXPECT_EQ(mtl::texture_sampler_index(texture), index);
+		EXPECT_LE(mtl::texture_sampler_index(texture), sampler_cap);
+		EXPECT_TRUE(unit_samplers.insert(mtl::texture_sampler_index(texture)).second);
+	}
+
+	for (u32 index = 0; index < mtl::vertex_texture_count; ++index)
+	{
+		const u32 texture = mtl::vertex_texture_slot(index);
+		EXPECT_EQ(mtl::texture_sampler_index(texture), index);
+		EXPECT_LE(mtl::texture_sampler_index(texture), sampler_cap);
+	}
+
+	EXPECT_EQ(unit_samplers.size(), static_cast<std::size_t>(mtl::fragment_texture_count));
+
+	// The argument table must be at least as wide as the highest index it receives.
+	EXPECT_GT(mtl::argument_buffer_count, mtl::fill_values_slot);
+	EXPECT_GT(mtl::argument_texture_count, mtl::fragment_depth_input_slot);
+
+	// The table's sampler space has a cap of its own, the same value as the MSL
+	// declaration cap (REVIEW-FINDINGS.md A9): the argument table descriptor must not
+	// ask for more than 16 sampler entries.  It must still be wide enough for every
+	// sampler a stage uses, which is one per texture unit.
+	constexpr u32 table_sampler_cap = 16;
+	EXPECT_LE(mtl::argument_sampler_count, table_sampler_cap);
+	EXPECT_GE(mtl::argument_sampler_count, mtl::fragment_texture_count);
+	EXPECT_GE(mtl::argument_sampler_count, mtl::vertex_texture_count);
+
+	// Only a texture unit carries a sampler; the depth-as-texture inputs take one
+	// index each with no sampler.  That rule is what keeps every sampler the writer
+	// binds inside the table's sampler space: the validation layer aborts on a bind
+	// past the declared count, so a slot that wrongly claimed a sampler would abort
+	// the process on the validation layer rather than fail a draw.
+	EXPECT_TRUE(mtl::slot_has_sampler(mtl::texture_slot_base));
+	EXPECT_TRUE(mtl::slot_has_sampler(mtl::texture_slot_base + mtl::fragment_texture_count - 1));
+	EXPECT_FALSE(mtl::slot_has_sampler(mtl::fragment_stencil_slot_base));
+	EXPECT_FALSE(mtl::slot_has_sampler(mtl::fragment_stencil_slot_base + mtl::fragment_texture_count - 1));
+	EXPECT_FALSE(mtl::slot_has_sampler(mtl::fragment_depth_input_slot));
 }
 
 TEST(MTLDialInventory, TheCountsAreExhaustive)

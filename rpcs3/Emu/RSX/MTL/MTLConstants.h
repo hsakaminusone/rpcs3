@@ -69,7 +69,9 @@ namespace mtl
 	static_assert(sizeof(sampler_info) == 48);
 
 	// The programmable-blend push constant (MTLFragmentProgram.cpp:183).  Bytes
-	// 0..3 are the block's reserved word, so blend_eqn is at offset 4.
+	// 0..3 are the block's reserved word, so blend_eqn is at offset 4.  logic_op
+	// carries the guest logic op for the emulation and is unused when the program
+	// does not emulate it (REVIEW-FINDINGS.md C1).
 	struct blend_values
 	{
 		u32 reserved;
@@ -77,8 +79,9 @@ namespace mtl
 		u32 blend_sfactors;
 		u32 blend_dfactors;
 		f32 blend_constants[4];
+		u32 logic_op;
 	};
-	static_assert(sizeof(blend_values) == 32);
+	static_assert(sizeof(blend_values) == 36);
 
 	// The built-in fill's values (MTLFill.h).  Bytes 0..15 are the colour and byte
 	// 16 is the depth, which is the MSL struct the fill library declares.  A fill

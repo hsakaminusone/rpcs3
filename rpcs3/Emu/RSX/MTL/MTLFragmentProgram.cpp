@@ -54,6 +54,15 @@ namespace mtl
 			OS << "#extension GL_ARB_shader_texture_image_samples: require\n";
 		}
 
+		// The stencil mirror and the depth input are separate textures rather than
+		// combined image samplers, so they are read with an unfiltered texel fetch
+		// (REVIEW-FINDINGS.md, A9).  The extension also carries textureSize and
+		// textureSamples on a separate texture.
+		if (properties.redirected_sampler_mask || (m_prog.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE))
+		{
+			OS << "#extension GL_EXT_samplerless_texture_functions: require\n";
+		}
+
 		if (m_prog.ctrl & RSX_SHADER_CONTROL_ATTRIBUTE_INTERPOLATION)
 		{
 			OS << "#extension GL_EXT_fragment_shader_barycentric: require\n";
@@ -105,24 +114,41 @@ namespace mtl
 
 				if (properties.redirected_sampler_mask & mask)
 				{
-					OS << "layout(set=0, binding=" << (fragment_stencil_slot_base + static_cast<u32>(index)) << ") uniform u" << samplerType << " " << PI.name << "_stencil;\n";
+					// The mirror is a separate texture, not a combined image sampler: a
+					// combined one takes a sampler index of its own, and MSL caps that
+					// index at 15 while the 16 units already use every one of them
+					// (REVIEW-FINDINGS.md, A9).  It is a 2D depth image.
+					if (samplerType != "sampler2D" && samplerType != "sampler2DMS")
+					{
+						rsx_log.error("Metal: unexpected redirected image type '%s'", samplerType);
+					}
+
+					const std::string_view mirror_type = (properties.multisampled_sampler_mask & mask)
+						? "utexture2DMS"sv
+						: "utexture2D"sv;
+
+					OS << "layout(set=0, binding=" << (fragment_stencil_slot_base + static_cast<u32>(index)) << ") uniform " << mirror_type << " " << PI.name << "_stencil;\n";
 				}
 			}
 		}
 
 		if (m_prog.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
 		{
+			// A separate texture, for the same reason as the mirror (REVIEW-FINDINGS.md
+			// A9): the shared ROP epilogue already reads it with texelFetch.
 			const auto frag_depth_type = (m_prog.ctrl & RSX_SHADER_CONTROL_ROP_MULTISAMPLED)
-				? "sampler2DMS"
-				: "sampler2D";
+				? "texture2DMS"
+				: "texture2D";
 
 			OS << "layout(set=0, binding=" << fragment_depth_input_slot << ") uniform " << frag_depth_type << " frag_depth;\n";
 		}
 
-		if (m_prog.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
+		if (m_prog.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
 		{
 			// The post-pass turns each subpass input into a [[color(i)]] fetch
-			// (HLD-05 §2.4, §3.2), so the Vulkan binding is an intermediate.
+			// (HLD-05 §2.4, §3.2), so the Vulkan binding is an intermediate.  The
+			// programmable-blend path reads the destination it blends with; the
+			// logic-op path reads every output (REVIEW-FINDINGS.md C1).
 			const std::string_view att_type = (m_prog.ctrl & RSX_SHADER_CONTROL_ROP_MULTISAMPLED)
 				? "subpassInputMS"sv
 				: "subpassInput"sv;
@@ -175,10 +201,12 @@ namespace mtl
 		OS << "	uvec4 stipple_pattern[];\n";
 		OS << "};\n\n";
 
-		if (m_prog.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
+		if (m_prog.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
 		{
 			// MSL has no push constants; MTLShader.cpp maps this block onto the
-			// substituted slot fragment_blend_slot (HLD-05 §3.3, §3.2 †).
+			// substituted slot fragment_blend_slot (HLD-05 §3.3, §3.2 †).  The op
+			// travels here so a change of op does not recompile the shader
+			// (REVIEW-FINDINGS.md C1).
 			OS <<
 				"layout(push_constant) uniform push_constants_block\n"
 				"{\n"
@@ -186,6 +214,7 @@ namespace mtl
 				"	uint blend_sfactors;\n"
 				"	uint blend_dfactors;\n"
 				"	vec4 blend_constants;\n"
+				"	uint logic_op;\n"
 				"};\n\n";
 		}
 	}
@@ -266,6 +295,7 @@ namespace mtl
 		m_shader_props.ROP_discard = !!(m_prog.ctrl & RSX_SHADER_CONTROL_USES_KIL);
 		m_shader_props.ROP_channel_remap = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP);
 		m_shader_props.ROP_programmable_blend = !!(m_prog.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING);
+		m_shader_props.ROP_logic_op = !!(m_prog.ctrl & RSX_SHADER_CONTROL_LOGIC_OP);
 
 		m_shader_props.require_tex1D_ops = properties.has_tex1D;
 		m_shader_props.require_tex2D_ops = properties.has_tex2D;
@@ -299,6 +329,49 @@ namespace mtl
 			"#define TEX_PARAM(index) texture_parameters_##index\n\n";
 
 		glsl::insert_glsl_legacy_function(OS, m_shader_props);
+
+		// The shared snippets read the stencil mirror with texture() on a combined
+		// image sampler, which MSL cannot express without spending a sampler index the
+		// 16 units already use (REVIEW-FINDINGS.md, A9).  The mirror is a separate
+		// texture, so the two macros that read it are re-defined here.  Its state is
+		// clamp-to-border with an opaque black border, nearest, no mip
+		// (MTLSamplerState.cpp:187-196), so a coordinate outside the texture reads zero
+		// and one inside reads the nearest texel.
+		if (m_shader_props.require_depth_conversion)
+		{
+			OS <<
+				"uint _mtl_stencil_fetch(utexture2D tex, vec2 coord)\n"
+				"{\n"
+				"	const ivec2 size = textureSize(tex, 0);\n"
+				"	const ivec2 texel = clamp(ivec2(coord * vec2(size)), ivec2(0), size - ivec2(1));\n"
+				"	const bool inside = all(greaterThanEqual(coord, vec2(0.))) && all(lessThan(coord, vec2(1.)));\n"
+				"	return inside ? texelFetch(tex, texel, 0).x : 0u;\n"
+				"}\n"
+				"#undef ZS_READ\n"
+				"// The depth half still comes from the unit, which keeps its sampler.\n"
+				"#define ZS_READ(index, coord) vec2(texture(TEX_NAME(index), coord).r, float(_mtl_stencil_fetch(TEX_NAME_STENCIL(index), coord).x))\n\n";
+		}
+
+		if (m_shader_props.require_depth_conversion && m_shader_props.require_msaa_ops)
+		{
+			// The multisampled mirror read is the samplerless counterpart of
+			// texelFetch2DMS (RSXFragmentTextureMSAAOpsInternal.glsl:2-11).  That
+			// helper is emitted once per combined sampler type, so it cannot take a
+			// separate texture; the coordinate derivation is the same.
+			OS <<
+				"uint _mtl_stencil_fetch_ms(utexture2DMS tex, vec2 coord, sampler_info tex_params)\n"
+				"{\n"
+				"	const vec2 sample_count = vec2(2., textureSamples(tex) * 0.5);\n"
+				"	const vec2 normalized_coords = texture2DMSCoord(_texcoord_xform(coord, tex_params), tex_params.flags);\n"
+				"	const ivec2 image_size = ivec2(textureSize(tex) * sample_count);\n"
+				"	const vec2 resolve_coords = clamp(vec2(ivec2(normalized_coords * vec2(image_size))), vec2(0.), vec2(image_size - ivec2(1)));\n"
+				"	const vec2 aa_coords = floor(resolve_coords / sample_count);\n"
+				"	const vec2 sample_loc = fma(aa_coords, -sample_count, resolve_coords);\n"
+				"	return texelFetch(tex, ivec2(aa_coords), int(fma(sample_loc.y, sample_count.y, sample_loc.x))).x;\n"
+				"}\n"
+				"#undef ZS_READ_MS\n"
+				"#define ZS_READ_MS(index, coord) vec2(sampleTexture2DMS(TEX_NAME(index), coord, TEX_PARAM(index)).r, float(_mtl_stencil_fetch_ms(TEX_NAME_STENCIL(index), coord, TEX_PARAM(index)).x))\n\n";
+		}
 	}
 
 	void MTLFragmentDecompilerThread::insertMainStart(std::stringstream& OS)

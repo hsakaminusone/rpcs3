@@ -22,7 +22,7 @@ float decode_emulated_depth(const in float stored)
 #define _mrt_color_t f16vec4
 #endif
 
-#if defined(_ENABLE_ROP_OUTPUT_ROUNDING) || defined(_ENABLE_PROGRAMMABLE_BLENDING)
+#if defined(_ENABLE_ROP_OUTPUT_ROUNDING) || defined(_ENABLE_PROGRAMMABLE_BLENDING) || defined(_ENABLE_LOGIC_OP)
 // Truncate float by discarding lower 12-bits of the mantissa
 #define _fx12_truncate(x) uintBitsToFloat(floatBitsToUint(x) & 0xfffff000u)
 
@@ -217,6 +217,51 @@ vec4 remap_ROP_input(const in vec4 col, const in uint remap_index)
 		// Lucky for us this opens up the optimization opportunity to not need PB for such formats when only DST_A is referenced. SRC_A is another matter altogether.
 		return vec4(col.rgb, 1.f);
 	}
+}
+#endif
+
+#ifdef _ENABLE_LOGIC_OP
+// The guest logic op is a bitwise operation on the source and destination colours in
+// the destination's 8-bit unorm encoding, and the host has no state for it
+// (REVIEW-FINDINGS.md C1).  The op is the guest enum value (gcm_enums.h:1627-1645).
+uvec4 _logic_op_quantize(const in vec4 v4)
+{
+	return uvec4(clamp(round_to_8bit(v4), vec4(0.), vec4(1.)) * 255.);
+}
+
+uint _logic_op_byte(const in uint s, const in uint d, const in uint op)
+{
+	switch (op)
+	{
+	default:
+	case 0x1500u: return 0u;                // CLEAR
+	case 0x1501u: return s & d;             // AND
+	case 0x1502u: return s & ~d & 0xFFu;    // AND_REVERSE
+	case 0x1503u: return s;                 // COPY
+	case 0x1504u: return ~s & d & 0xFFu;    // AND_INVERTED
+	case 0x1505u: return d;                 // NOOP
+	case 0x1506u: return (s ^ d) & 0xFFu;   // XOR
+	case 0x1507u: return (s | d) & 0xFFu;   // OR
+	case 0x1508u: return ~(s | d) & 0xFFu;  // NOR
+	case 0x1509u: return ~(s ^ d) & 0xFFu;  // EQUIV
+	case 0x150Au: return ~d & 0xFFu;        // INVERT
+	case 0x150Bu: return (s | ~d) & 0xFFu;  // OR_REVERSE
+	case 0x150Cu: return ~s & 0xFFu;        // COPY_INVERTED
+	case 0x150Du: return (~s | d) & 0xFFu;  // OR_INVERTED
+	case 0x150Eu: return ~(s & d) & 0xFFu;  // NAND
+	case 0x150Fu: return 0xFFu;             // SET
+	}
+}
+
+vec4 _logic_op_apply(const in vec4 src, const in vec4 dst, const in uint op)
+{
+	const uvec4 s = _logic_op_quantize(src);
+	const uvec4 d = _logic_op_quantize(dst);
+	return vec4(
+		_logic_op_byte(s.x, d.x, op),
+		_logic_op_byte(s.y, d.y, op),
+		_logic_op_byte(s.z, d.z, op),
+		_logic_op_byte(s.w, d.w, op)) / 255.;
 }
 #endif
 

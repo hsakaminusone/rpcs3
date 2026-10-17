@@ -718,6 +718,14 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLZCULL.cpp
         RSX/MTL/MTLMetalLayer.mm
     )
+
+    # SPIRV-Cross reports an unsupported or malformed module by throwing, and the
+    # project builds without exceptions (ConfigureCompiler.cmake:33).  This one
+    # file is the exception, so the throw becomes a failed pipeline instead of a
+    # process abort (REALISATION.md, "The remaining risk").  A source property is
+    # appended after the directory options, so it wins.  The Metal block is
+    # Apple-only, so no non-clang host reaches this.
+    set_source_files_properties(RSX/MTL/MTLShader.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions")
 endif()
 
 if(NOT WIN32)

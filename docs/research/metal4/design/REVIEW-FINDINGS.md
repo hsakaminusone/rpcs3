@@ -50,7 +50,7 @@ accepted deviation is marked **Limitation**.
 | A6 | Medium | `block_ring` growth | Fixed |
 | A7 | Medium | `emulate_shadow_compare` | Fixed |
 | A8 | Low | `conditional_render_predicate` | Limitation |
-| A9 | Critical | MSL binding index limits | Open |
+| A9 | Critical | MSL binding index limits | Fixed |
 | B1 | High | depth/stencil mirror | Fixed |
 | B2 | High | depth-compare input | Fixed |
 | B3 | High | transfer-read barrier | Fixed |
@@ -66,8 +66,8 @@ accepted deviation is marked **Limitation**.
 | B13 | Medium | deferred-release slot | Fixed |
 | B14 | Low | MSAA swizzle view | Fixed |
 | B15 | High | combined-format copy no-op | Fixed |
-| B16 | High | depth read-back encode | Open |
-| C1 | High | logic op | Open |
+| B16 | High | depth read-back encode | Partial |
+| C1 | High | logic op | Fixed |
 | C2 | High | two-sided stencil ref | Fixed |
 | C3 | High | extended depth range | Fixed |
 | C4 | Medium | point polygon mode | Limitation |
@@ -101,10 +101,12 @@ accepted deviation is marked **Limitation**.
 | E10 | Low | 2-sample capability | Fixed |
 | E11 | Low | PSO key hash | Fixed |
 | E12 | Low | key completeness | Limitation |
-| E13 | Low | latch dataflow and dead fields | Open |
+| E13 | Low | latch dataflow and dead fields | Partial |
 | E14 | Medium | state-latch hash truncation | Fixed |
+| G1 | High | flat shading | Open |
+| G2 | Low | `supports_multidraw` | Limitation |
 
-Totals: 61 findings, 45 fixed, 3 partial, 0 blocked, 4 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 63 findings, 47 fixed, 5 partial, 0 blocked, 1 open, 7 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -198,7 +200,7 @@ the shared front end take the CPU skip (`RSXThread.cpp:939`), so the RSX
 conditional render is reproduced without the hardware path. Enabling the flag
 needs both ends: a producer for the predicate word and a shader that tests it.
 
-### A9 — the MSL binding indices exceed the compiler limits. Open.
+### A9 — the MSL binding indices exceeded the compiler limits. Fixed.
 The Metal 4 shader compiler rejects the index map in `MTLArgumentBinds.h`. An MSL
 `[[buffer(n)]]` index must be at most 30, a `[[sampler(n)]]` index at most 15 and a
 `[[texture(n)]]` index at most 127. The measurement is on Apple A18 Pro, macOS
@@ -209,26 +211,133 @@ between 0 and 15"; index 127 compiles and index 128 fails. The language version
 does not move the three limits: 3.1, 3.2 and 4.0 give the same result. The
 argument table is not the limit: `setMaxBufferBindCount` accepts 100000.
 
-Two sites break. First, `fill_values_slot` is 51 (`MTLArgumentBinds.h:61`), so the
-fill library cannot be created: `MTLFill.cpp:39` declares the values at
-`[[buffer(51)]]`, so `fill_pass::init` logs "fill library creation failed", leaves
-`m_library` null, and every clear and every output pass is then dropped. The
-failure reproduces with the backend's own source string and the backend's own
-compiler construction. Second, the fragment sampler range cannot fit: `spv_to_msl`
-sets `msl_sampler = binding` (`MTLShader.cpp:53`), and the fragment decompiler
-declares each texture at `texture_slot_base + index`, that is 12 to 27
-(`MTLFragmentProgram.cpp:104`), each stencil mirror at
-`fragment_stencil_slot_base + index`, that is 30 to 45 (`:108`), and the depth
-input at 50 (`:119`). The indices 16 to 27, 30 to 45 and 50 exceed the sampler
-limit, so a fragment shader that samples any texture unit cannot be compiled. The
-four vertex textures at 12 to 15 stay inside the limit.
+Four sites broke.
 
-No compiler setting moves the limits. The map must use the two namespaces apart:
-`MSLResourceBinding` carries `msl_texture` and `msl_sampler` separately, so a
-texture can keep a high index while its sampler takes a per-stage index at or
-below 15. Every buffer index must also stay at or below 30, which moves
-`fill_values_slot` and each fragment slot above 30. No fix is applied yet: the
-change moves the fixed ABI map, so the design decision comes first.
+**The fill values, fixed.** `fill_values_slot` was 51, so the fill library could
+not be created: the fill MSL declared the values at `[[buffer(51)]]`, so
+`fill_pass::init` logged "fill library creation failed", left `m_library` null, and
+every clear and every output pass was then dropped. The slot is now 30, the last
+index the buffer cap allows, and `argument_buffer_count` follows it to 31. Index 30
+is also the first stencil-mirror texture, which is no collision: a buffer and a
+texture are separate spaces, and no buffer slot of either stage reaches 30. The
+header asserts the two caps, so a later edit cannot silently re-break them.
+
+**The texture units, fixed.** `spv_to_msl` set `msl_sampler` to the binding, and
+the decompiler declares each texture unit at `texture_slot_base + index`, that is
+12 to 27 for the fragment units and 12 to 15 for the four VTF units. Every one of
+those indices exceeds the sampler cap, so **no fragment shader that sampled any
+texture unit could be compiled**, and no vertex shader that used a VTF unit. The
+sampler index is now decoupled from the texture index: a unit takes its position
+inside its stage's texture range, `texture_sampler_index(slot) = slot -
+texture_slot_base`, so the fragment units take 0 to 15 and the VTF units take 0 to
+3. `MSLResourceBinding` carries the two indices separately, the texture index
+stays the RSX ABI number, and the table writer now takes both indices per unit. A
+stage has at most `fragment_texture_count` sampler-bearing units, so the whole
+range fits the cap, asserted in the header. This half is what first light needed:
+an ordinary RSX draw samples textures, so no draw rendered without it.
+
+**The argument table, fixed.** The table's sampler space shares the cap: the
+argument table descriptor must not ask for more than 16 sampler entries, and
+`argument_sampler_count` was `argument_texture_count`, so every frame slot's
+descriptor asked for 51. The release driver tolerates it, which is why the probe's
+own tables worked while the validation layer aborted the process on the assertion
+"max sampler state bind count must not be more than 16". The count is now 16, and
+the static assertions tie it to the unit counts in both directions: the table must
+be wide enough for one sampler per texture unit, and no wider than the cap. The
+mirror and the depth input still ask for sampler indices the table cannot address,
+which is inert while their shaders already fail to build.
+
+**The depth mirrors, landed.** The stencil mirror of a redirected depth unit is
+declared at `fragment_stencil_slot_base + index`, that is 30 to 45
+(`MTLFragmentProgram.cpp`), and the emulated depth compare declares `frag_depth` at
+50. Both were combined image samplers, so both took the binding as the sampler index
+and both exceeded the cap, and a fragment shader that used either feature could not
+be compiled. Both are now separate, samplerless textures: the mirror is an integer
+`utexture2D` (`utexture2DMS` when multisampled), which is the exact type for an
+unfiltered texel read, and the depth input is a `texture2D` (`texture2DMS`), which
+the shared ROP epilogue already reads with `texelFetch`. The extension
+`GL_EXT_samplerless_texture_functions` is required when either feature is on. The
+non-integer mirror types are unreachable but log an error rather than declaring a
+float read. The table writer binds no sampler for either entry — a bind past the
+declared sampler count aborts the process on the validation layer (measured,
+`/tmp/flprobe/tbl.mm`, exit 134) — so the sampler the two producers used to build is
+gone with the declaration.
+
+**The form is now measured.** A probe measured the target MSL on the floor device
+through the same `MTL4::Compiler::newLibrary` call the backend uses (`/tmp/a9probe`,
+Apple A18 Pro, macOS 27.0.1). The 16-unit form plus a samplerless `texture2d<uint>`
+at `[[texture(30)]]` and a samplerless `texture2d<float>` at `[[texture(50)]]`, both
+read with `read()`, compiles: the library builds, and a pipeline and an argument
+table build on top of it. The current form fails on the sampler index, verbatim:
+`'sampler' attribute parameter is out of bounds: must be between 0 and 15`. Three
+facts bound the fix. The mirror and the depth input keep their texture indices — 30
+and 50 are legal with or without a sampler. The reads must be `read()` and never
+`sample()`, because `sample()` forces a sampler declaration and re-breaks the cap.
+And the form sits exactly on the limit: 16 samplers for 16 units alongside 18
+textures, nothing over a cap. The escape hatch measured too: an argument buffer
+holding the whole set compiled with no ceiling found up to 8000 entries, so the
+fallback is real if a guest program ever needs more sampler states than the form
+allows.
+
+The remaining half is a real constraint, not a slot that moved. Metal has no
+combined image sampler: a GLSL `sampler2D` becomes an MSL texture plus an MSL
+sampler, one sampler index each, and the compiler rejects two samplers that share
+an index ("cannot reserve 'sampler' resource location at index 0"; measured). The
+declarations the tree emits today need 16 unit samplers, one per mirror (up to 16
+more) and one for the depth input, so a program that uses both features needs up
+to 33 sampler entries against a cap of 16. The states are fewer than the entries:
+every mirror and the depth input share one state (`stencil_mirror_sampler()`, read
+by `load_texture_env` and by the depth-input resolve). Declaring a mirror as a
+separate texture instead of a combined sampler lets several of them share one
+sampler entry, which is what brings the count down, but the arithmetic still ends
+at 16 units plus one shared entry, one over the cap.
+
+Two forms remove the constraint, and the first is now measured:
+
+- **Preferred: fetch the mirrors without a sampler.** The stencil half is read as
+  an integer, so an unfiltered texel read is the exact operation, and `frag_depth`
+  is already read with `texelFetch` in the shared ROP epilogue. Declaring the
+  mirror as a separate `utexture2D` and the depth input as a separate `texture2D`
+  removes both from the sampler space, so all 16 indices stay with the units and
+  nothing is over the cap. The two macros that express the fetch are defined by the
+  shared GLSL snippets and are re-definable per backend, which is the same seam the
+  Metal wrapper already uses for its own header. The coordinate must be clamped,
+  because a texel read returns zero out of range where the mirror's state clamps,
+  and `GL_EXT_samplerless_texture_functions` is owed for the depth input.
+
+The shortcut of making only the two reads samplerless is ruled out, and that is a
+measurement rather than an inference. A probe compiled the six vendored SPIRV-Cross
+translation units and drove `CompilerMSL` with the backend's own options and resource
+couplings (`/tmp/scprobe`). The vendored cross-compiler emits an MSL `[[sampler(n)]]`
+argument for a combined image sampler that is only ever fetched — declared but never
+referenced — because it pushes a sampler for every sampled-image type and has no
+fetch-only check (`spirv_msl.cpp:15557-15661`). It emits the argument even when no
+binding mapping is supplied, so no choice of mapping avoids it. A separate texture
+(SPIR-V `Sampled = 2`) fetched with `read()` emits no sampler argument, which is why
+the preferred form above is the form that works. The one alternative that keeps the
+combined declaration is a constexpr sampler, which does suppress the argument but
+bakes sampler state into the shader as constants.
+- **Escape hatch: an argument buffer.** A resource struct bound at one buffer
+  index lifts all three caps at once: 200 textures and 200 samplers in one struct
+  compile (measured on the same device). It is the standard Metal answer and it is
+  what to reach for if a guest program ever needs more sampler states than the
+  unions above can express. The cost is that the shader must index arrays instead
+  of naming declarations, which changes the decompiler's texture contract.
+
+The preferred form is landed, and it leaves no sampler over the cap, including for a
+program that declares all 16 units: the mirror and the depth input leave the sampler
+space entirely. The two macros that express the fetch are re-defined after
+`insert_glsl_legacy_function`, so the mirror is read with `texelFetch` while the
+depth half of the read still comes from the unit, which keeps its sampler. The fetch
+clamps to the texture size and returns zero outside `[0, 1]`, which is the mirror's
+state: `stencil_mirror_sampler()` is clamp-to-border with an opaque-black border and
+nearest (`MTLSamplerState.cpp:187-196`), so an out-of-range coordinate reads zero
+either way. One correction to the register: the earlier claim that the mirror's
+state clamps is wrong, and the samplerless form agrees with the border rather than
+with a clamp.
+
+What no test in the tree reaches is the GLSL-to-MSL hop, so the first real
+verification of the emitted declarations is first light.
 
 ## B — the surface and texture cache
 
@@ -373,18 +482,49 @@ addressable, so the marker is an open item and not a permanent limit.
 Reachability: the path runs only when `needs_cpu_upload()` holds, that is with
 `read_depth_buffer` enabled or `force_data_load` set, so it is off by default.
 
-### B16 — the depth read-back writes the host plane, not the guest pack. Open.
+### B16 — the depth read-back writes the host plane, not the guest pack. Partial.
 `write_to_memory` and `copy_texture` now name the depth plane of a combined source
 (B15), so the copy no longer fails, but the bytes written are the host depth plane:
-a little-endian binary32 at 4 bytes per texel.  The guest expects the RSX pack
+a little-endian binary32 at 4 bytes per texel. The guest expects the RSX pack
 instead — a z24s8 destination wants the 24-bit depth in bits 31:8 and the stencil
 byte in bits 7:0 of each 4-byte word, and a z16 destination wants the depth in bits
-15:0 of a 2-byte word.  The read-back therefore needs the inverse of
-`decode_depth_plane`, and the z16 case needs a float-to-half conversion, which is
-the VK `cs_fconvert_task<f32,f16>` path (`ShuffleBytes.glsl`).  The stencil plane is
-not written at all, so a stencil read-back of a combined surface is lost.  Nothing
-reaches this path today, so the item is open rather than wrong in a reachable
-state.
+15:0 of a 2-byte word.
+
+**The inverse is written and tested.** `encode_depth_plane` (MTLFormats.cpp) inverts
+`decode_depth_plane`: it takes the host plane, one f32 per texel, and writes the
+guest pack at the destination stride, per format. A unorm pack rounds the depth back
+(z16, z24s8); a z16 float pack re-encodes E4M12 as the scalar form of
+`pack_e4m12_pack16` (`E4M12Conversion.glsl:5-12`); a z24s8 float pack takes the
+float's own top 24 bits. The VK `cs_fconvert_task<f32,f16>` path does not apply here,
+because this backend's plane is `Depth32Float` and its decode is E4M12, not f16. A
+null stencil plane writes a zero stencil byte instead of leaving whatever the guest
+buffer held. Two state-suite rows cover it: a round trip back through
+`decode_depth_plane` for ten words across all four formats, and the zero-stencil case.
+
+**Two encode defects fell out of the new tests and were fixed.** `encode_unorm`
+computed `value * range + 0.5` in f32; `65535 + 0.5` rounds up to 2^16 and
+`16777215 + 0.5` rounds up to 2^24, and the z24s8 pack then shifts the overflow out
+of the word, so a depth of 1.0 encoded as zero. The arithmetic is now f64 and the
+result is clamped to the range. The byte order is confirmed against the decode tables
+rather than assumed: z24s8 puts the stencil in bits 7:0 and the depth in bits 31:8
+(`rsx_decode.h:3404`, `clear_z24` and `clear_stencil`), and z16 puts the depth in bits
+15:0. A third defect was in the test itself: the zero-stencil case asserted the wrong
+byte order and was corrected to `packed[0] = 0x00`, `packed[1..3] = 0xFF`.
+
+**The encode applies exactly when `depth_format_needs_decode` holds.** That is the
+same predicate the upload uses, and it agrees with the host format table: a z16_uint
+surface is `Depth16Unorm`, whose plane is already the guest pack, while z16_float is
+`Depth32Float` and z24s8 is `Depth32Float_Stencil8`, whose planes are not.
+
+**What remains is the completion point.** The encode is a CPU pass, so it must run
+after the copy that fills the guest buffer has completed. The read-back path
+(`MTLSurfaceCache.cpp:203-213` → `MTLSurface::write_to_memory`) records that copy into
+the open compute encoder, and the transform then needs a synchronisation point after
+the frame slot commits — in Metal 4 the form is `signalEvent` plus
+`waitUntilSignaledValue` (HLD-03). That point is not written, because nothing reaches
+this path today and a synchronisation point is not something to add unprofiled. The
+stencil plane is still not written for a combined surface, so a stencil read-back of a
+combined surface is still lost.
 
 ### B9 — `erase_bkgnd` was never initialised. Fixed.
 VK clears the surface and marks it ready when the read-buffers configuration is
@@ -473,47 +613,62 @@ without one.
 
 ## C — the state latches and the clear path
 
-### C1 — the logic op has no implementation. Open: mechanism identified, design decided.
+### C1 — the logic op has no implementation. Fixed.
 The RSX logic op is a real operation: VK bakes it into the pipeline
 (`VKGSRender.cpp:322-326`) and GL enables `GL_COLOR_LOGIC_OP`
 (`GLDraw.cpp:199-201`). Metal has no logic-op state — neither
 `MTL4::RenderPipelineDescriptor` nor `MTL4::RenderCommandEncoder` exposes one — so a
-logic-op draw is currently a plain write. Pass E6 re-confirms it: the operation is
-latched and keyed and then never consumed, and `MTLBlendState.cpp:111` disables
-blending when it wins, so the draw writes plainly with no diagnostic.
+logic-op draw was a plain write. Pass E6 re-confirmed it: the operation was latched
+and keyed and then never consumed, and `MTLBlendState.cpp:111` disables blending
+when it wins, so the draw wrote plainly with no diagnostic.
 
 The mechanism that reads the destination colour in a Metal 4 fragment shader is the
 `[[color(n)]]` input, and the tree already owns it: the programmable-blending path
 declares `layout(input_attachment_index = n, set = 0, binding = 46 + n) uniform
 subpassInput frag_src_n` and reads it with `subpassLoad`
-(`RSXROPPrologue.glsl:53-77`; `MTLFragmentProgram.cpp:124-132`), and
-`MTLShader.cpp:78` sets `use_framebuffer_fetch_subpasses`, so SPIRV-Cross lowers the
-subpass input to an MSL `[[color(n)]]` parameter. The logic op needs no encoder
-state and no binding of its own: the same declaration, plus the op applied in the
-epilogue.
+(`RSXROPPrologue.glsl:53-77`), and `MTLShader.cpp:78` sets
+`use_framebuffer_fetch_subpasses`, so SPIRV-Cross lowers the subpass input to an MSL
+`[[color(n)]]` parameter. The logic op needs no encoder state and no binding of its
+own: the same declaration, plus the op applied in the epilogue.
 
-Design, not landed:
-- A capability `backend_configuration::supports_native_logic_op` (default true), set
-  false in `MTLDevice.cpp` beside the other capability flags.
-- `rsx::thread` folds a synthesized `RSX_SHADER_CONTROL_LOGIC_OP` into
-  `current_fragment_program.ctrl` when `logic_op_enabled()` holds and the capability
-  is false — the `RSX_SHADER_CONTROL_ALPHA_TEST` precedent (`RSXThread.cpp:2442`).
-  The bit goes in the enum's "Custom" range (`gcm_enums.h:457`).
-- The shared ROP prologue declares and loads `mrt_colorN` under `_ENABLE_LOGIC_OP`,
-  and the epilogue applies the op where it applies blending. The load must **not**
-  reuse the programmable-blending gate `IS_MRT_BLEND_ENABLED(n)`, because the ROP
-  blend-target bits are written only under `RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING`
-  (`Core/RSXDrawCommands.cpp:693-696`) and a logic-op guest need not enable blending.
-- The op is a uniform in the fragment push-constant block, so changing the op does
-  not recompile the shader.
+Landed:
+- A capability `backend_configuration::supports_native_logic_op`, true through a
+  default member initializer, so Vulkan and OpenGL — which never set it — keep their
+  native logic op, and `MTLDevice.cpp` sets it false.
+- `RSX_SHADER_CONTROL_LOGIC_OP` (`0x00001000`, the enum's "Custom" range,
+  `gcm_enums.h:459`). `rsx::thread` folds it into `current_fragment_program.ctrl`
+  when `logic_op_enabled()` holds and the capability is false — the
+  `RSX_SHADER_CONTROL_ALPHA_TEST` precedent (`RSXThread.cpp:2445-2452`).
+- `GLSLTypes.h` `ROP_logic_op` drives `_ENABLE_LOGIC_OP` (`GLSLCommon.cpp:384-387`),
+  and only the Metal fragment program sets the property, so no other backend's shader
+  changes.
+- The shared ROP prologue declares and loads `mrt_colorN` under `_ENABLE_LOGIC_OP`
+  through `MRTn_LOAD_DO`. The load must **not** reuse the programmable-blending gate
+  `IS_MRT_BLEND_ENABLED(n)`, because the ROP blend-target bits are written only under
+  `RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING` (`Core/RSXDrawCommands.cpp:693-696`)
+  and a logic-op guest need not enable blending; under the logic op the load is
+  unconditional, and `MRTn_BLEND_DO` is left for the blend apply alone.
+- `RSXFragmentPrologue.glsl` gains `_logic_op_quantize`, `_logic_op_byte` and
+  `_logic_op_apply`, and the epilogue applies `_logic_op_apply` to every output
+  between the blend block and the channel remap. The op is the guest enum value
+  (`gcm_enums.h:1627-1645`); the apply is a 16-entry switch on one byte.
+- The op travels in the fragment push-constant block (`MTLConstants.h`
+  `blend_values.logic_op`, `sizeof` 32 to 36), and the `subpassInput`s are declared
+  under `PROGRAMMABLE_BLENDING | LOGIC_OP`, so a change of op does not recompile the
+  shader. `MTLGSRender.cpp` allocates and fills the block when either bit is set.
 - Scope: the emulation quantizes source and destination to the guest's 8-bit unorm
-  encoding. Vulkan forbids `logicOpEnable` on a floating-point attachment and GL
-  leaves the result undefined for a non-fixed-point framebuffer, so a float target
-  has no logic op to reproduce.
+  encoding with `round_to_8bit`. Vulkan forbids `logicOpEnable` on a floating-point
+  attachment and GL leaves the result undefined for a non-fixed-point framebuffer, so
+  a float target has no logic op to reproduce. The PSO key still carries the inert
+  `blend.logic_op_*` fields (E12), and they stay inert.
 
-Not landed in this pass: no test in the tree reaches the GLSL-to-MSL hop, so the
-emulation cannot be verified before first light, and it would otherwise land into a
-programmable-blending path that has never executed. The fix follows first light.
+The blend block grew from 32 to 36 bytes, so
+`MTLConstantsLayout.StructSizesMatchTheShaderAbi` was updated to expect the new size
+and to pin `offsetof(blend_values, logic_op) == 32`; the old assertion still expected
+32 and failed.
+
+The emulation is not executed end to end: no test in the tree reaches the
+GLSL-to-MSL hop, so first light is the first verification of it.
 
 ### C2 — the stencil reference ignored the single-sided case. Fixed.
 A single-sided draw applies the front reference to both faces
@@ -792,7 +947,7 @@ transform owns the general case") and Apple's [0,1] validation of
 ### E6 — the logic op is a no-op. Duplicate of C1. (pass label F6)
 Confirms C1 exactly: `logic_operation` is latched, keyed and then never consumed,
 and `MTLBlendState.cpp:111` disables blending when the logic op wins, so the draw
-writes plainly. C1 stays Open (it needs the MSL ROP emulation).
+writes plainly. C1 now carries the MSL ROP emulation and is Fixed.
 
 ### E7 — the depth-bounds test was absent. Fixed. (pass label F7)
 The RSX has `depth_bounds_test_enabled`/`depth_bounds_min`/`depth_bounds_max`
@@ -853,22 +1008,42 @@ C1/E6. `write_mask` at or above `attachment_count` is always zero and is now a
 constant term. No behaviour change; recorded so a later PSO-reuse audit does not
 read the key as all-live state.
 
-### E13 — the latch dataflow is not single-read and holds unconsumed state. Open. (pass §3)
-Three perf and robustness items from the same pass. First, the headers say the
-latch is "read once per draw", but `capture_encoder_state` composes
-`capture_raster_state`/`capture_surface_state` and `capture_pipeline_properties`
-then re-runs `capture_blend_state`/`capture_raster_state`/
-`capture_anti_aliasing_state`, so the register file is traversed two to three
-times per clause. Second, `point_size`, `line_width`, `line_smooth`,
-`point_sprite_*`, `stipple_*` and `user_clip_control` are captured and read only
-by the dial harness, and `stipple_pattern` is a raw `const void*` into register
-space (`MTLRasterState.cpp:31`) where every other field copies its value, so a
-later consumer that holds the latch across a register write reads stale or
-retired data. Third, `apply_encoder_state` re-issues viewport, scissor, stencil
-references, blend colour, bias and cull every clause although the struct it
-already holds permits an equality cheap-out. Not folded into a fix: the harness
-asserts the decode (the C5 and C6 precedent), so pruning the fields is a harness
-decision.
+### E13 — the latch dataflow is not single-read and holds unconsumed state. Partial. (pass §3)
+Four items from the same pass.
+
+**The aliased stipple pattern, fixed.** `stipple_pattern` was a raw `const void*`
+into register space (`MTLRasterState.cpp:31`) while every other field of
+`raster_state` copies its value, so a consumer that held the latch across a register
+write would read stale or retired data. The latch now copies the 32-word pattern
+(`raster_state::stipple_word_count`), and the harness row asserts the copy instead of
+the pointer.
+
+**The harness-only fields, kept and marked.** `point_size`, `line_width`,
+`line_smooth`, `point_sprite_*` and `user_clip_control` are captured and read only by
+the dial harness: the real consumer reads the register file at the point of use, so
+point size reaches the shader through `vertex_context::point_size`
+(`MTLGSRender.cpp:1007`). The header now marks them as captured for the harness rather
+than pruning them, because they are what pins the decode (the C5 and C6 precedent).
+Pruning them is a harness decision and stays open below.
+
+**The repeated traversal, already resolved.** The entry's first item no longer matches
+the tree. `capture_encoder_state` calls `capture_raster_state` and
+`capture_surface_state` once each (`MTLEncoderState.cpp:11-12`) and re-runs nothing.
+The other two captures belong to `capture_pipeline_properties`
+(`MTLGSRender.cpp:218-220`), which is a separate latch for a separate consumer — the
+pipeline key, not the encoder state. Each register file is therefore read once per
+cluster per clause by design, and the duplicated traversal the entry described does
+not exist in the current revision.
+
+**The per-clause re-issue, deferred.** `apply_encoder_state`
+(`MTLEncoderState.cpp:53-82`) writes cull mode, winding, fill mode, depth clip mode,
+depth bounds, depth bias, stencil references, blend colour, viewport and scissor on
+every clause, although the state it already holds permits an equality cheap-out. It
+would need `operator==(const encoder_state&, const encoder_state&)`, a held previous
+state, and a key on the encoder pointer so the held state is dropped when a pass opens
+a new encoder. Not written now: it is a performance change on a path that has never
+executed, so it cannot be measured, and this backend does not add unmeasurable work.
+The shape is recorded here so the change is mechanical when a frame can be profiled.
 
 ### E14 — the state-latch hashes truncated their enum fields. Fixed. (found by the state tests)
 `hash_depth_stencil_state` packed each stencil face into a `u32` with three bits per
@@ -883,6 +1058,36 @@ holds thousands of objects, and the risk was that a later value set would collap
 more states. Both now fold each field at its own width through `hash64`. The state
 tests' "hash tracks every field" cases caught the depth/stencil one.
 
+## G — the capability parity pass
+
+This pass read the backend against the capability struct the shared code consults, and
+against the two shipping backends.
+
+### G1 — the flat-shading path is disabled on Metal. Open.
+
+RSX flat shading takes its value from the provoking vertex, which for the RSX is the
+last vertex of the primitive. Vulkan and OpenGL select that vertex with a
+last-provoking-vertex state and set
+`backend_configuration::supports_last_provoking_vertex`; Metal exposes no such state,
+so `MTLDevice.cpp` leaves the capability false. The shared code then clears
+`RSX_SHADER_CONTROL_FLAT_SHADING` (`RSXThread.cpp:2368-2373`), so a flat-shaded
+attribute is interpolated smoothly instead of taking one vertex's value, and the Metal
+vertex program's own flat path (`MTLVertexProgram.cpp:246`) is dead code.
+
+Metal has no native expression of the RSX last-vertex convention. Two candidates
+exist and neither is written or measured: an index rotation that moves the provoking
+vertex to the first slot, and an explicit replicate of the provoking attribute in the
+vertex program. Settle it with first light against a title that flat-shades, or record
+it as an accepted limitation.
+
+### G2 — `supports_multidraw` is inert. Limitation.
+
+`rsx::thread` declares `supports_multidraw` (`RSXThread.h:82`); all three backends
+assign it; a repository-wide search finds no reader. The field is a capability the
+shared code never consults, so it is inert in the same way as the E12 key fields. On
+Metal the `false` costs nothing, because the flag changes no code path, but the field
+should be either consumed or recorded as inert.
+
 ## Parked for review
 
 These are the findings a fix cannot settle from the tree alone. Each needs either
@@ -891,10 +1096,10 @@ harness owns. They are parked, not closed.
 
 | ID | The question to answer first |
 |---|---|
-| A9 | How to express the fixed RSX slot map inside the MSL index caps: which slots move below 30, and whether the sampler index is decoupled from the texture index. The change moves the ABI map, so the decision comes before the patch. |
-| B16 | Which side owns the inverse depth transform on the read-back: the CPU, as `decode_depth_plane` does on the upload, or a GPU pass as VK does. The z16 case needs a float-to-half step either way. |
-| C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
-| E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
+| A9 | The indices, the fill slot, the units, the sampler table and the two samplerless declarations are all landed and all under their caps. The depth-mirror form is measured (a samplerless `read()`, `read()` never `sample()`, indices 30/50 kept) and the sampler-count question is answered: the argument-buffer escape hatch compiled with no ceiling found up to 8000 entries. What remains is the in-tree GLSL-to-MSL hop, which no test reaches, so first light is the first verification. |
+| B16 | Only the completion point: the encode is written and tested, and the predicate is settled (`depth_format_needs_decode`). What is unfinished is where the CPU pass runs, which needs a synchronisation point after the frame slot commits, and the stencil plane of a combined read-back. |
+| E13 | Which of the harness-only latch fields the harness will release. The per-clause re-issue is deferred with its shape recorded in the entry. |
 | F5 / F9 | The present output mode landed with F10, so neither partial half waits on it any more: F5 still does not consume the display-buffer pitch and format or the stereo second eye, and F9 still sizes the drawable from the source rather than the view. Both need a re-check against the landed output tier. |
+| G1 | Which expression is the cheaper — an index rotation or a provoking-attribute replicate — and does first light show a title that flat-shades at all? |
 
 <!-- doc-end -->

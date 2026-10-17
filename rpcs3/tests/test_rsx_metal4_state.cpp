@@ -536,7 +536,7 @@ TEST(MTLConstantsLayout, StructSizesMatchTheShaderAbi)
 	EXPECT_EQ(sizeof(mtl::draw_parameters), 168u);
 	EXPECT_EQ(sizeof(mtl::fragment_context), 32u);
 	EXPECT_EQ(sizeof(mtl::sampler_info), 48u);
-	EXPECT_EQ(sizeof(mtl::blend_values), 32u);
+	EXPECT_EQ(sizeof(mtl::blend_values), 36u);
 	EXPECT_EQ(sizeof(mtl::fill_values), 32u);
 	EXPECT_EQ(sizeof(mtl::vec4_block), 16u);
 }
@@ -568,6 +568,9 @@ TEST(MTLConstantsLayout, FieldOffsetsMatchTheShaderAbi)
 	EXPECT_EQ(offsetof(mtl::blend_values, blend_sfactors), 8u);
 	EXPECT_EQ(offsetof(mtl::blend_values, blend_dfactors), 12u);
 	EXPECT_EQ(offsetof(mtl::blend_values, blend_constants), 16u);
+	// The logic op travels in the same block, behind the blend constants
+	// (REVIEW-FINDINGS.md C1), so a change of op does not recompile the shader.
+	EXPECT_EQ(offsetof(mtl::blend_values, logic_op), 32u);
 
 	// The built-in fill reads the colour at 0..15 and the depth at 16.
 	EXPECT_EQ(offsetof(mtl::fill_values, color), 0u);
@@ -1769,6 +1772,87 @@ TEST(MTLFormatsDepthPlane, DecodesTheGuestDepthPack)
 		SCOPED_TRACE(static_cast<u32>(entry.format));
 		EXPECT_FLOAT_EQ(value, entry.expected);
 	}
+}
+
+// =============================================================================
+// 17b. The guest depth pack encode: the read-back's inverse
+//      (MTLFormats.cpp encode_depth_plane; REVIEW-FINDINGS B16)
+// =============================================================================
+
+TEST(MTLFormatsDepthPlane, EncodesTheGuestDepthPack)
+{
+	// The read-back writes the guest pack, not the host depth plane, so the encode
+	// must invert the upload's decode for every word a format can represent.  A z24s8
+	// word also carries the stencil byte in bits 7:0, which the depth plane does not
+	// hold, so the stencil plane is named separately.
+	struct row
+	{
+		rsx::surface_depth_format2 format;
+		u32 raw;
+		u32 stencil;
+	};
+
+	const row table[] = {
+		{ rsx::surface_depth_format2::z16_uint, 0x0000, 0 },
+		{ rsx::surface_depth_format2::z16_uint, 0x8000, 0 },
+		{ rsx::surface_depth_format2::z16_uint, 0xFFFF, 0 },
+		{ rsx::surface_depth_format2::z24s8_uint, 0x000000, 0x00 },
+		{ rsx::surface_depth_format2::z24s8_uint, 0x800000, 0x5C },
+		{ rsx::surface_depth_format2::z24s8_uint, 0xFFFFFF, 0xAB },
+		{ rsx::surface_depth_format2::z16_float, 0x0000, 0 },
+		{ rsx::surface_depth_format2::z16_float, 0xF000, 0 },
+		{ rsx::surface_depth_format2::z16_float, 0xFFFF, 0 },
+		{ rsx::surface_depth_format2::z24s8_float, (std::bit_cast<u32>(0.5f) >> 7) & 0xFFFFFF, 0x11 },
+	};
+
+	for (const row& entry : table)
+	{
+		const u32 bpp = rsx::get_format_block_size_in_bytes(entry.format);
+
+		// The guest word the hardware holds.
+		u8 guest[8]{};
+		if (bpp == 4)
+		{
+			const u32 word = (entry.raw << 8) | entry.stencil;
+			std::memcpy(guest, &word, 4);
+		}
+		else
+		{
+			const u16 word = static_cast<u16>(entry.raw);
+			std::memcpy(guest, &word, 2);
+		}
+
+		// The upload's decode, which is what the read-back has to invert.
+		u8 plane[4]{};
+		mtl::decode_depth_plane(plane, guest, 1, 1, bpp, bpp, entry.format);
+
+		// The read-back's encode, with the stencil byte taken from its own plane.
+		const u8 stencil = static_cast<u8>(entry.stencil);
+		u8 packed[8]{};
+		mtl::encode_depth_plane(packed, plane, 1, 1, bpp, bpp, entry.format,
+			bpp == 4 ? &stencil : nullptr, bpp == 4 ? 1u : 0u);
+
+		SCOPED_TRACE(static_cast<u32>(entry.format));
+		EXPECT_EQ(std::memcmp(packed, guest, bpp), 0);
+	}
+}
+
+TEST(MTLFormatsDepthPlane, EncodesZeroWhenNoStencilPlaneIsNamed)
+{
+	// A depth-only read-back names no stencil plane, and the stencil byte of a z24s8
+	// word must then be zero rather than whatever the buffer already held
+	// (REVIEW-FINDINGS.md B16: the stencil plane is not written today).  The guest
+	// word holds the stencil in bits 7:0 and the depth in bits 31:8
+	// (rsx_decode.h:3404, clear_z24 is bf_decoder<8, 24>), so the zero byte is first.
+	const f32 depth = 1.0f;
+	u8 packed[4] = { 0xEE, 0xEE, 0xEE, 0xEE };
+
+	mtl::encode_depth_plane(packed, &depth, 1, 1, 4, 4, rsx::surface_depth_format2::z24s8_uint);
+
+	EXPECT_EQ(packed[0], 0x00u);
+	EXPECT_EQ(packed[1], 0xFFu);
+	EXPECT_EQ(packed[2], 0xFFu);
+	EXPECT_EQ(packed[3], 0xFFu);
 }
 
 #endif // RSX_ENABLE_METAL4

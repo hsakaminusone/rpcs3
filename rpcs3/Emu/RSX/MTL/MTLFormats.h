@@ -40,6 +40,16 @@ namespace mtl
 	void decode_depth_plane(void* dst, const void* src, u32 width, u32 height,
 		u32 src_pitch, u32 src_bpp, rsx::surface_depth_format2 format);
 
+	// Encode the Metal depth plane back into the guest depth pack: the inverse of
+	// decode_depth_plane.  dst rows are dst_pitch bytes apart with dst_bpp bytes per
+	// texel; src rows are width * 4 bytes, one f32 per texel.  A z24s8 pack carries
+	// the stencil byte in bits 7:0, which the depth plane does not hold, so a stencil
+	// plane may be named: stencil_src is one byte per texel at stencil_pitch bytes per
+	// row, and a null pointer writes zero there (REVIEW-FINDINGS.md, B16).
+	void encode_depth_plane(void* dst, const void* src, u32 width, u32 height,
+		u32 dst_pitch, u32 dst_bpp, rsx::surface_depth_format2 format,
+		const void* stencil_src = nullptr, u32 stencil_pitch = 0);
+
 	// The guest texture format (HLD-02 §2.7; LLD-texture §4).  A sampled texture is
 	// read through the unit's remap, so the packed colour formats expand to their
 	// natural channel count instead of a surface layout.
