@@ -331,8 +331,7 @@ word, so a zeroed fixture stops on a valid dial.
 
 C1 is the `rsx::thread` execution path. The backend objects come up in
 `on_init_thread` and go down in `on_exit`, in reverse order, and `flip` presents
-the frame. This unit lands the frame lifetime and the clear path; the draw path is
-the next one.
+the frame. This unit lands the frame lifetime, the clear path and the draw path.
 
 **The framebuffer is the pass descriptor.** Metal has no framebuffer object, so
 `MTLFramebuffer` holds the bound attachment set — the colour targets and the depth
@@ -358,8 +357,8 @@ the decision stays the surface cluster's and not this unit's.
 no write-flag setter, so the latch must be built into a cached object and applied
 (`CONFLICTS.md` C7). The fill applies its own two objects — a write one and a read
 one, both with an always-passing compare, because a clear must not be rejected by
-the state it is clearing. The draw path needs the cache and the apply, and it is
-recorded here as the next item rather than left as a silent no-op.
+the state it is clearing. The draw path applies the latched object through the
+same cache.
 
 **The scissor is cached.** `rsx::thread::get_scissor` returns false both for an
 unchanged region and for an invalid one, and it fills the region only in the first
@@ -367,11 +366,66 @@ case, so the caller caches the rectangle and reads the flag to tell the two apar
 The clear asks for the unclipped form, which is the rule the draw context uses in
 the Vulkan backend (`VKGSRender.cpp:2618`).
 
-**What still has no consumer.** `emit_geometry` is the base no-op, so no draw is
-executed and the surface store stays empty: `flip` finds no surface, and a clear
-is the only thing this unit can put on a screen. The draw path needs the vertex
-stream upload, the index expansion the shared `draw_command_processor` already
-does, the texture cache, and the depth-stencil cache above. `on_semaphore_acquire_wait`
-is the base no-op too, so a mid-frame semaphore wait does not yet force a submit.
+**The draw path.** `end()` runs before `rsx::thread::end()`, which owns the
+post-execute cleanup, and it drives the whole clause: the programs, the pipeline,
+the pass and the encoder state are per clause, and each subdraw uploads its own
+vertex streams, fills its own ABI blocks and dispatches. `emit_geometry` is the
+per-subdraw half, so the split matches the clause's own iteration
+(`draw_call.begin()` / `next()` / `end()`).
+
+**The pipeline is the shared program cache's object.** The Metal PSO key *is*
+`pipeline_properties`, so no second cache exists and the key is exactly the
+pipeline's inputs. The key holds the colour format, the attachment count, the
+sample count, the A2C/A2one pair, the collapsed `MTL::PrimitiveTopologyClass`, the
+whole `blend` latch and the per-attachment write masks — and nothing else. Cull
+mode, front face, fill mode, depth clip mode, depth bias, the viewport, the
+scissor, the stencil references, the blend colour and the depth-stencil object all
+live on the encoder (`CONFLICTS.md` C7), so they cost no pipeline object.
+
+**The vertex streams are `R8Uint` texture buffers.** One view spans a whole
+per-slot ring, so a draw's data is a starting offset inside `attrib_data`, not a
+new view, and the view is rebuilt only when the ring grows. The shared GLSL's byte
+addressing therefore works unchanged: one texel is one byte, so no MSL post-pass
+and no byte expansion exists. The ring is per frame slot, and a growth within a
+frame retires the old pair to the deferred-release sink.
+
+**Every per-draw value lives in its own ring block.** A Metal 4 command buffer
+does not snapshot a buffer's contents at encode time, so the draw-parameter block,
+the vertex context, the fragment context, the texture parameters, the stipple
+pattern, the fragment literals and the substituted push-constant words are all
+written into the slot's rings and never read back. A block the shader indexes by
+offset travels as an index; a block the shader reads at offset zero (the two
+substituted push constants) is bound at its own address. The transform-constant
+file is the one exception: it is gated on the shared
+`transform_constants_dirty` flag and its 468-vec4 upload happens only when the
+file changes.
+
+**Argument tables are snapshotted at bind time.** A probe confirmed that
+`MTL4RenderCommandEncoder::setArgumentTable` captures the table, so a write that
+follows the bind is invisible to the draw. The order is therefore
+mutate-then-bind-then-draw, and `argument_binder::bind` returns whether it wrote
+any slot so the draw path re-binds the table only when it must. One table per
+stage per frame slot is enough: no table ring exists.
+
+**The texture units resolve before the programs.** A draw clause resolves its
+referenced units once, in `load_texture_env`, before
+`get_current_vertex_program` and `get_current_fragment_program`, because the
+builders dereference the resolved descriptors (`RSXThread.cpp:2488`). A unit the
+program does not reference is skipped. The unit's image and its sampler are two
+entries, because MSL has no combined image sampler.
+
+## Open work
+
+The findings register (`REVIEW-FINDINGS.md`) holds the itemised list of places
+where the tree does not yet reproduce the RSX behaviour, with the evidence for
+each. The blocked set shares one cause: **the pass scheduler is not wired**, so
+`emit_barrier`'s pass-split request has no resolver, and the depth-as-texture
+stencil mirror (A3/B1), the `EQUAL` depth-test input (A4/B2), the texture
+barrier (B10) and the MSAA depth resolve (B6) all wait on it. The open set is the
+surface initialisation and transfer path (B4, B7, B8, B9, B14), the logic op
+(C1), the extended depth range (C3) and the two shader-feature flags (A7, A8).
+The limitation set is the Metal state the RSX has and Metal does not: point
+polygon mode (C4), the per-primitive polygon-offset enables (C7), the line width,
+the depth bounds and the dither (C10).
 
 <!-- doc-end -->

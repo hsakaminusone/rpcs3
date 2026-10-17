@@ -49,6 +49,12 @@ namespace mtl
 		// (LLD-raster §3.1, invariant 1).
 		u16 clip_width = 0;
 		u16 clip_height = 0;
+
+		// The depth-stencil latch.  Metal 4 reaches depth state only through
+		// setDepthStencilState, so the latch is the key of a cached object and the
+		// cache, not the encoder, owns the compare function and the write flag
+		// (CONFLICTS.md C7).
+		depth_stencil_state depth_stencil{};
 	};
 
 	// Capture the per-draw encoder state from the live registers.  It composes the
@@ -59,7 +65,7 @@ namespace mtl
 	// Apply the state to the open encoder.  The scissor is the caller's: it comes
 	// from rsx::thread::get_scissor, which owns the viewport-rect intersection, the
 	// window clamp and the invalid case (MTLRasterState.h).
-	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor);
+	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor, depth_stencil_cache& depth_cache);
 }
 
 #endif // RSX_ENABLE_METAL4

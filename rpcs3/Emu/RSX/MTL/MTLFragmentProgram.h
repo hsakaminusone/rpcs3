@@ -20,7 +20,12 @@ namespace mtl
 	// RSX fragment ucode -> Vulkan-rule GLSL 450 (HLD-05 §2.3 route A).  The seam
 	// mtl::decompile_fragment_program (MTLProgramPipeline.cpp) calls this and feeds
 	// the text to spirv::compile_glsl_to_spv.
-	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog);
+	//
+	// `constant_offsets` is the literal relocation table the decompiler decoded
+	// (FragmentProgramDecompiler.h:189).  The draw path needs it to fill the
+	// fragment constant file (ProgramStateCache.h:141), and the decompiler is the
+	// only thing that can produce it.
+	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets = nullptr);
 
 	// The subclass the base-class contract names (FragmentProgramDecompiler.h:8-21).
 	// It emits GLSL text only; the SPIR-V, MSL and library steps stay in

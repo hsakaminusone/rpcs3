@@ -334,7 +334,6 @@ namespace mtl
 		}
 
 		track(texture, pool, heap, offset, required.size);
-		track(texture, pool, heap, offset, required.size);
 		m_residency.on_bind(texture);
 		return texture;
 	}
@@ -364,8 +363,10 @@ namespace mtl
 			return;
 		}
 
-		// The slot that follows this one is now free of every reference it could hold.
-		release_list(m_deferred[(index + 1) % static_cast<u32>(m_deferred.size())]);
+		// The slot that just went idle is the one the frame that just completed
+		// used, so the objects deferred during that frame are safe to release
+		// (HLD-02 I7).  The frames on later slots may still be in flight.
+		release_list(m_deferred[index]);
 	}
 
 	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size)

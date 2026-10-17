@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Utilities/StrFmt.h"
 
@@ -26,8 +27,10 @@ namespace mtl
 
 	// RSX vertex ucode -> Vulkan-rule GLSL 450 (HLD-05 §2.3 route A).  The seam
 	// mtl::decompile_vertex_program (MTLProgramPipeline.cpp) calls this and feeds
-	// the text to spirv::compile_glsl_to_spv.
-	std::string decompile_vertex_glsl(const RSXVertexProgram& prog);
+	// the text to spirv::compile_glsl_to_spv.  The relocation table and the
+	// indexed-constants flag are the shared constant upload's inputs
+	// (GLVertexProgram.cpp:344-345).
+	std::string decompile_vertex_glsl(const RSXVertexProgram& prog, std::vector<u16>* constant_ids = nullptr, bool* has_indexed_constants = nullptr);
 
 	// The subclass the base-class contract names (VertexProgramDecompiler.h:9-18).
 	// It emits GLSL text only; the SPIR-V, MSL and library steps stay in

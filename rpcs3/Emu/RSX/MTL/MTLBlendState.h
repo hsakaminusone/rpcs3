@@ -25,8 +25,12 @@ namespace mtl
 		rsx::blend_equation equation_a = rsx::blend_equation::add;
 
 		// Shader material (LLD-blend §3.5, §3.6, §3.7).  The alpha test and the
-		// logic op change the MSL, so they key the shader, not the PSO.  Dither is
-		// absent: Metal has no dither state and the design drops it (§2.7).
+		// logic op change the MSL, so they key the shader, not the PSO.  The alpha
+		// function and the alpha reference are runtime fragment-context uniforms
+		// (MTLFragmentProgram.cpp:433-435), so the latch decodes them but the PSO
+		// key does not carry them: keying on them would create a pipeline object per
+		// reference value.  Dither is absent: Metal has no dither state and the
+		// design drops it (§2.7).
 		bool alpha_test_enabled = false;
 		rsx::comparison_function alpha_func = rsx::comparison_function::always;
 		f32 alpha_ref = 0.0f;

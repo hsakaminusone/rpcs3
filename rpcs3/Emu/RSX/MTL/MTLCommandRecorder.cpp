@@ -146,10 +146,18 @@ namespace mtl
 
 	MTL4::ComputeCommandEncoder* command_recorder::open_compute()
 	{
+		// A compute encoder is reused for consecutive copies, so a texture upload
+		// of N units costs one encoder rather than N (HLD-04 §3.1).
+		if (m_compute_encoder)
+		{
+			return m_compute_encoder;
+		}
+
 		close_encoder();
 
 		MTL4::ComputeCommandEncoder* encoder = m_slots[m_slot].command_buffer->computeCommandEncoder();
 		m_encoder = encoder;
+		m_compute_encoder = encoder;
 		return encoder;
 	}
 
@@ -160,6 +168,8 @@ namespace mtl
 			m_encoder->endEncoding();
 			m_encoder = nullptr;
 		}
+
+		m_compute_encoder = nullptr;
 	}
 
 	void command_recorder::on_feedback(u32 index, MTL4::CommitFeedback* feedback)

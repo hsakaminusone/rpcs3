@@ -7,6 +7,7 @@
 #include "MTLPipeline.h"
 
 #include "../Program/ProgramStateCache.h"
+#include "../Program/program_util.h"
 
 #include <functional>
 #include <memory>
@@ -19,8 +20,12 @@ namespace mtl
 	// shader front-end unit (mirrors VKVertexProgram; HLD-05 §2.1); the traits
 	// call this seam so the SPIR-V -> MSL step, the library and the pipeline can
 	// land first.  These are the only hop not implemented by this unit.
-	std::string decompile_vertex_program(const RSXVertexProgram& program);
-	std::string decompile_fragment_program(const RSXFragmentProgram& program);
+	//
+	// The fragment seam also returns the literal relocation table, which the draw
+	// path needs to fill the fragment constant file
+	// (ProgramStateCache.h:141; MTLFragmentProgram.h).
+	std::string decompile_vertex_program(const RSXVertexProgram& program, std::vector<u16>& constant_ids, bool& has_indexed_constants);
+	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets);
 
 	// One compiled guest shader: the SPIR-V, the MSL and the MTL::Library that
 	// owns the entry.  The library is per program id, not per pipeline, because
@@ -28,10 +33,14 @@ namespace mtl
 	// the MTL4::Compiler is first available.
 	struct shader_program
 	{
-		u32 id = 0;
 		std::vector<u32> spv;
 		std::string msl;
 		u32 color_output_mask = 0; // bit i set when the stage writes [[color(i)]]
+
+		// The fragment literal relocation table, in vec4 units
+		// (FragmentProgramDecompiler.h:189).  Empty for a vertex program, and for a
+		// fragment program with no literals.
+		std::vector<u32> constant_offsets;
 
 		shader_program() = default;
 		~shader_program();
@@ -52,8 +61,16 @@ namespace mtl
 		mutable MTL::Library* m_library = nullptr;
 	};
 
-	using vertex_program = shader_program;
-	using fragment_program = shader_program;
+	// The vertex program also carries the constant relocation table that the
+	// shared constant upload consumes (program_util.h:59-66; VKVertexProgram.h:56).
+	struct vertex_program : shader_program, rsx::VertexProgramBase
+	{
+	};
+
+	struct fragment_program : shader_program
+	{
+		u32 id = 0;
+	};
 
 	// The linked object: one MTL::RenderPipelineState.  The two shader_program
 	// objects own their libraries, so the pipeline does not (HLD-05 §3.4).

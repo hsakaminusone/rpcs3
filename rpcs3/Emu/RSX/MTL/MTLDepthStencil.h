@@ -6,6 +6,8 @@
 
 #include "Emu/RSX/gcm_enums.h"
 
+#include <unordered_map>
+
 namespace mtl
 {
 	// One stencil face (LLD-depth-rop §3.1).  The reference is deliberately absent:
@@ -42,6 +44,12 @@ namespace mtl
 	depth_stencil_state capture_depth_stencil_state();
 	stencil_references capture_stencil_references();
 
+	// The latch is the key of the cached MTL::DepthStencilState, so it needs value
+	// semantics.  A memcmp would read the padding the members leave behind.
+	bool operator==(const stencil_face& a, const stencil_face& b);
+	bool operator==(const depth_stencil_state& a, const depth_stencil_state& b);
+	u64 hash_depth_stencil_state(const depth_stencil_state& state);
+
 	// NV4097_SET_ANTI_ALIASING_CONTROL (LLD-depth-rop §2.4).  Alpha-to-coverage and
 	// alpha-to-one are descriptor state on Metal 4, not encoder state, so they are
 	// captured here and consumed by the pipeline key (CONFLICTS.md C7;
@@ -65,6 +73,33 @@ namespace mtl
 
 	// Build the immutable object (LLD-depth-rop §3.1).  The caller owns the result.
 	MTL::DepthStencilState* create_depth_stencil_state(MTL::Device* device, const depth_stencil_state& state);
+
+	// The depth-stencil object cache (HLD-05 §3.4).  The latch has few bits and
+	// the RSX cycles through a handful of states, so a state object is built once
+	// and reused.  The object is never released while the cache lives, because a
+	// Metal 4 command buffer holds no strong reference to the state it binds
+	// (HLD-02 I7).
+	class depth_stencil_cache
+	{
+	public:
+		void init(MTL::Device* device) { m_device = device; }
+		void shutdown();
+
+		MTL::DepthStencilState* get(const depth_stencil_state& state);
+
+	private:
+		struct hasher
+		{
+			usz operator()(const depth_stencil_state& state) const { return hash_depth_stencil_state(state); }
+		};
+
+		MTL::Device* m_device = nullptr;
+		std::unordered_map<depth_stencil_state, MTL::DepthStencilState*, hasher> m_cache;
+	};
+
+	// Bind the cached object for the latch.  This is the only path by which depth
+	// state reaches the encoder (CONFLICTS.md C7).
+	void apply_depth_stencil_state(MTL4::RenderCommandEncoder* encoder, depth_stencil_cache& cache, const depth_stencil_state& state);
 
 	MTL::CompareFunction get_compare_function(rsx::comparison_function op);
 	MTL::StencilOperation get_stencil_operation(rsx::stencil_op op);
