@@ -40,9 +40,35 @@ if [ -f "$KK_CACHE_DIR/$KK_LIBRARY" ]; then
 else
   echo "== Building KosmicKrisp $KK_MESA_TAG =="
   LLVM_VER="${LLVM_COMPILER_VER:-22}"
-  sudo port -N install meson ninja pkgconfig "libclc-$LLVM_VER" spirv-tools "spirv-llvm-translator-$LLVM_VER"
+  sudo port -N install pkgconfig "libclc-$LLVM_VER" spirv-tools "spirv-llvm-translator-$LLVM_VER"
   export PATH="/opt/local/libexec/llvm-$LLVM_VER/bin:/opt/local/bin:/opt/local/sbin:$PATH"
-  export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+
+  # MacPorts clang has no default sysroot of its own. Point the driver at the
+  # active Xcode SDK so every compile and link probe can find libSystem.
+  SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+  export SDKROOT
+
+  # Mesa needs one single Python (>= 3.10) that provides mako, packaging and
+  # PyYAML for its code generation, and it scans every python on PATH until one
+  # passes all module probes. The macOS runner images carry several incomplete
+  # Pythons (MacPorts, Homebrew, Xcode CLT, python.org) and none of them has all
+  # three modules, so meson setup fails. Bootstrap a private toolchain instead: a
+  # venv owns meson, ninja and the codegen modules, so the build no longer
+  # depends on the Python state of the runner image.
+  KK_PYTHON=""
+  for candidate in python3.16 python3.15 python3.14 python3.13 python3.12 python3.11 python3; do
+    if command -v "$candidate" > /dev/null 2>&1 &&
+       "$candidate" -c 'import sys; sys.exit(1 if sys.version_info < (3, 10) else 0)'
+    then
+      KK_PYTHON="$candidate"
+      break
+    fi
+  done
+  [ -n "$KK_PYTHON" ] || { echo "ERROR: no Python >= 3.10 found for the Mesa build"; exit 1; }
+
+  "$KK_PYTHON" -m venv "$TMP/venv"
+  "$TMP/venv/bin/python" -m pip install --quiet "meson>=1.4" ninja mako packaging pyyaml
+  export PATH="$TMP/venv/bin:$PATH"
 
   git clone --depth 1 --branch "$KK_MESA_TAG" "$KK_MESA_REPO" "$TMP/mesa"
   meson setup "$TMP/build" "$TMP/mesa" \
