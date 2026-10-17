@@ -435,15 +435,36 @@ hazard was recorded and `emit_barrier` had no caller. The scheduler is now drive
 depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
 and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
-The open set is the texture initialisation path (B8, whose mechanism a probe has
-now measured, and B15, the combined-format copy the Metal 4 compute encoder does
-not perform), the logic op (C1/E6), the latch dataflow and its dead fields (E13)
-and the DMA, image and sync clusters (F11). Each
-carries its open question in `REVIEW-FINDINGS.md`, "Parked for review", because
-none can be settled from the tree alone: they wait on a hardware measurement, a
-Metal 4 behaviour check, or a decision the acceptance harness owns. The PSO
-attachment-count key (E3) is closed without a change: the proposed
-colour-attachment map bridges a gap the RSX renumbering does not leave.
+The open set is the depth read-back encode (B16, the inverse of the B8 decode and
+its z16 half-to-float step), the logic op (C1/E6), the latch dataflow and its dead
+fields (E13) and the DMA, image and sync clusters. Each carries its open question
+in `REVIEW-FINDINGS.md`, "Parked for review", because none can be settled from the
+tree alone: they wait on a hardware measurement, a Metal 4 behaviour check, or a
+decision the acceptance harness owns. The PSO attachment-count key (E3) is closed
+without a change: the proposed colour-attachment map bridges a gap the RSX
+renumbering does not leave. The DMA, image and sync units (F11) closed by deletion:
+they were decode-only duplicates of the shared NV47 handlers, and the device reports
+no passthrough DMA and no host GPU labels.
+
+The texture initialisation path (B8) and the combined-format copy (B15) closed. B8
+now decodes the guest depth pack into the host plane with
+`rsx::get_depth_clear_value`, the transform VK already uses, so no second codec
+exists; the combined-format stencil stays marked unknown because the upload
+direction has no plane option for a colour source. B15 is a call defect and not a
+driver defect: an un-named copy of a combined format is invalid API, and the named
+plane form writes and reads back bit-exact on private and on shared storage, so no
+Metal 3 blit and no render pass is needed.
+
+A9 is the one item that blocks first light. The Metal 4 shader compiler caps an MSL
+`[[buffer(n)]]` index at 30, a `[[sampler(n)]]` index at 15 and a `[[texture(n)]]`
+index at 127, and no language version from 3.1 to 4.0 moves the caps. The map in
+`MTLArgumentBinds.h` names buffer 51 for the fill values and sampler indices above
+15 for the fragment textures, so the fill library cannot be created and no fragment
+shader that samples a texture can be compiled. A device-level ladder outside the
+tree reproduced the caps and confirmed the rest of the encode path: a clear, one
+triangle, one sampled texture, a depth test and a depth write each produce the
+expected pixels, and a draw captures the argument table when the encoder binds it,
+which is the semantics the map's re-bind depends on.
 
 The partial set is the flip preamble (F5), the drawable layer setup (F9) and the
 sampler LOD clamp (E8, which implements the clamp and records the bias as a

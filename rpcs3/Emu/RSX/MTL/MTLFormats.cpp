@@ -2,6 +2,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Common/TextureUtils.h"
+
 #include "util/logs.hpp"
 
 namespace mtl
@@ -80,6 +82,67 @@ namespace mtl
 		default:
 			rsx_log.error("Metal 4: unsupported surface depth format 0x%x", static_cast<u32>(format));
 			return MTL::PixelFormat::PixelFormatDepth32Float;
+		}
+	}
+
+	MTL::BlitOption get_depth_plane_option(MTL::PixelFormat format, bool stencil_plane)
+	{
+		if (format != MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
+		{
+			return MTL::BlitOptionNone;
+		}
+
+		return stencil_plane ? MTL::BlitOptionStencilFromDepthStencil : MTL::BlitOptionDepthFromDepthStencil;
+	}
+
+	bool depth_format_needs_decode(rsx::surface_depth_format2 format)
+	{
+		switch (format)
+		{
+		case rsx::surface_depth_format2::z16_uint:
+			return false;
+		case rsx::surface_depth_format2::z16_float:
+		case rsx::surface_depth_format2::z24s8_uint:
+		case rsx::surface_depth_format2::z24s8_float:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool get_depth_texture_decode_format(u32 gcm_format, rsx::surface_depth_format2& format)
+	{
+		switch (gcm_format)
+		{
+		case CELL_GCM_TEXTURE_DEPTH16:
+		case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
+		case CELL_GCM_TEXTURE_DEPTH24_D8:
+		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
+			format = rsx::get_compatible_surface_depth_format(rsx::classify_format(gcm_format));
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	void decode_depth_plane(void* dst, const void* src, u32 width, u32 height, u32 src_pitch, u32 src_bpp, rsx::surface_depth_format2 format)
+	{
+		ensure(depth_format_needs_decode(format) || format == rsx::surface_depth_format2::z16_uint);
+
+		const u8* src_row = static_cast<const u8*>(src);
+		u8* dst_row = static_cast<u8*>(dst);
+
+		for (u32 y = 0; y < height; ++y)
+		{
+			for (u32 x = 0; x < width; ++x)
+			{
+				const u32 word = src_bpp == 4 ? read_from_ptr_unsafe<u32>(src_row, x * 4) : read_from_ptr_unsafe<u16>(src_row, x * 2);
+				const f32 value = rsx::get_depth_clear_value(format, src_bpp == 4 ? (word >> 8) : (word & 0xFFFF));
+				std::memcpy(dst_row + x * 4, &value, sizeof(value));
+			}
+
+			src_row += src_pitch;
+			dst_row += width * 4;
 		}
 	}
 
