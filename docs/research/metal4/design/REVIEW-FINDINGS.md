@@ -64,6 +64,7 @@ accepted deviation is marked **Limitation**.
 | B12 | Medium | border colour SNORM | Fixed |
 | B13 | Medium | deferred-release slot | Fixed |
 | B14 | Low | MSAA swizzle view | Fixed |
+| B15 | High | combined-format copy no-op | Open |
 | C1 | High | logic op | Open |
 | C2 | High | two-sided stencil ref | Fixed |
 | C3 | High | extended depth range | Fixed |
@@ -101,7 +102,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 58 findings, 40 fixed, 4 partial, 0 blocked, 5 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 59 findings, 40 fixed, 4 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -283,7 +284,7 @@ re-initialises the surface instead of keeping stale contents
 (`VKRenderTargets.cpp:1118-1125`), and the write is recorded with
 `on_write_copy(newest_tag, optimize_copy)`.
 
-### B8 — `load_background` uses the guest texel size. Open (parked for research).
+### B8 — `load_background` uses the guest texel size. Open: the mechanism is measured.
 The guest z24s8 surface is 4 bytes per texel and its host image is
 `Depth32Float_Stencil8`, 8 bytes per texel, so a raw `copyFromBuffer` cannot be
 correct: the destination row exceeds the source row stride, and Metal validates
@@ -294,40 +295,39 @@ colour rows match. The depth formats split three ways — `z16_uint` →
 `z24s8_uint`/`z24s8_float` → `Depth32Float_Stencil8` (8 vs 4)
 (`MTLFormats.cpp:44-61`; `TextureUtils.cpp:1376-1388`).
 
-Parked, because three questions must be answered before a fix is written:
+The device answered all three questions, so the fix has a determined mechanism.
 
-1. Does a Metal blit legally write a depth texture (`copyFromBuffer` with a
-   `Depth32Float` or `Depth32Float_Stencil8` destination)? The readback path
-   (`surface::write_to_memory`, `cached_texture_section::copy_texture`) already
-   blits a depth texture to a buffer and has never been exercised.
-2. Which plane does such a blit touch, and does it still demand a source row of
-   `width * host_bpp` bytes when only the depth plane is written?
-3. Can the stencil plane be initialised from guest memory at all? Metal writes
-   stencil only through a render pass and the per-texel value is not
-   shader-writable, so a background upload may restore the depth plane only. If
-   so the fix must mark the stencil unknown (`stencil_init_flags |= (1 << 9)`,
-   the marker `on_write_copy` already sets) rather than leave a cleared value.
+1. A blit may read and write a depth texture, but a combined format is
+   conditional. `Depth16Unorm` and `Depth32Float` accept a plain copy in both
+   directions. `Depth32Float_Stencil8` rejects `MTLBlitOptionNone` in both
+   directions — and rejects the no-option overload as well — with
+   `option (MTLBlitOptionNone) is not a valid MTLBlitOption for … pixel format
+   MTLPixelFormatDepth32Float_Stencil8`, so a combined copy must name its plane.
+2. One copy carries exactly one plane. `MTLBlitOptionDepthFromDepthStencil`
+   transfers the depth plane at 4 bytes per texel and
+   `MTLBlitOptionStencilFromDepthStencil` the stencil plane at 1 byte per texel;
+   a depth copy and a stencil copy in one command buffer place each plane in its
+   own buffer with no cross-contamination. The depth plane keeps a colour row
+   rule (`>= width * 4`, a multiple of 4), the stencil plane takes
+   `>= width * 1`, and `Depth16Unorm` takes `>= width * 2` at a multiple of 2.
+   The depth read-back is bit-exact: the option returns `0000003f` at every texel
+   for a clear depth of 0.5.
+3. The stencil plane of a combined image cannot be uploaded. It is addressable
+   in both directions only as an explicit `StencilFromDepthStencil` copy, and the
+   upload direction has no plane option for a colour source, so the guest stencil
+   cannot reach the image. The stencil therefore stays marked unknown
+   (`stencil_init_flags |= (1 << 9)`, the marker `on_write_copy` already sets)
+   rather than left cleared.
 
-VK needs none of this: its host depth format reuses the guest texel size, so its
-upload is the same format-aware path as its colour upload
-(`VKRenderTargets.cpp:695-800`). Once the questions are answered the fix is a
-depth-plane decode into a staging buffer (24-bit unorm or IEEE half to float32)
-followed by the existing blit, gated to the formats whose byte sizes differ.
+The fix is therefore a depth-plane decode into a staging buffer (24-bit unorm or
+IEEE half to float32) followed by a blit that names the plane, gated to the
+formats whose byte sizes differ.  It cannot reuse the format-aware colour upload
+VK uses, because VK's host depth format keeps the guest texel size
+(`VKRenderTargets.cpp:695-800`).  The write path must also avoid the Metal 4
+compute-encoder copy, which does not perform a combined-format write at all (B15).
 
 Reachability: the path runs only when `needs_cpu_upload()` holds, that is with
 `read_depth_buffer` enabled or `force_data_load` set, so it is off by default.
-
-A device probe answered part of the question set. The blit-option read-back
-(`copyFromTexture … MTLBlitOptionDepthFromDepthStencil`) returns the depth plane at
-4 bytes per texel for the 32-bit formats and 2 for `Depth16Unorm`, and a same-format
-depth→depth copy is bit-exact, so the readback and the mirror paths are sound and a
-staging buffer must be sized per format. A combined format requires a non-`None`
-option, which answers question 2. The stencil plane is reachable only through a
-`MTLBlitOptionStencilFromDepthStencil` blit (one byte per texel) or an
-`X32_Stencil8` view; the option writes it *out*, and the stencil is never
-shader-writable, so question 3 stands and an upload of the stencil plane from guest
-memory remains unestablished — the stencil stays marked unknown. Question 1 was not
-measured for a `copyFromBuffer` *into* a depth-stencil texture.
 
 ### B9 — `erase_bkgnd` was never initialised. Fixed.
 VK clears the surface and marks it ready when the read-buffers configuration is
@@ -386,6 +386,21 @@ a texture view made from a multisampled source can carry a channel swizzle
 and that a view cannot change the texture type. `get_view` now builds the swizzled
 view for a multisample texture as well, with the source's own
 `TextureType2DMultisample`, so the remap stays at the view.
+
+### B15 — the Metal 4 compute encoder does not write a combined depth-stencil image. Open.
+A `copyFromBuffer` into a `Depth32Float_Stencil8` texture on
+`MTL4::ComputeCommandEncoder` is accepted by the validation layer and reports no
+command-buffer error, and it writes nothing: the destination keeps its cleared
+value with an explicit `MTL4` barrier, in private and in shared storage, read back
+by both a Metal 4 and a Metal 3 path. The same copy on `MTL::BlitCommandEncoder`
+performs the write and is bit-exact. Copies into `Depth32Float` and `Depth16Unorm`
+are performed by the compute encoder, so the defect is confined to the combined
+format. `surface::load_background` (`MTLSurface.cpp:357`), the texture upload
+(`MTLTextureCache.cpp:61`) and the read-back (`MTLTextureCache.cpp:142`) all use
+the compute encoder, so every combined-format transfer the backend encodes is
+unaffected today only because no such transfer is reached yet. The workaround is a
+render pass or a Metal 3 blit encoder for a combined-format copy; the choice waits
+on whether an ordering rule between the two encoder families is needed.
 
 ## C — the state latches and the clear path
 
@@ -772,7 +787,8 @@ harness owns. They are parked, not closed.
 
 | ID | The question to answer first |
 |---|---|
-| B8 | The three questions in the entry: whether a blit may write a depth texture, which plane it touches and its row requirement, and whether the stencil plane is reachable at all. A probe is running. |
+| B8 | The mechanism is measured (see the entry). What remains is the implementation: a depth-plane decode into a staging buffer, a blit that names the plane, and the stencil-unknown marker. |
+| B15 | Whether the Metal 4 compute-encoder copy of a combined depth-stencil image is a platform defect or a probe artefact, and whether a Metal 3 blit encoder needs an ordering rule against a Metal 4 command buffer. |
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
 | F5 / F8 / F9 | The partial halves wait transitively on F10. |

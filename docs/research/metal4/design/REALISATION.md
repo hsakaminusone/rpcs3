@@ -427,14 +427,15 @@ hazard was recorded and `emit_barrier` had no caller. The scheduler is now drive
 depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
 and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
-The open set is the texture initialisation path (B8), the logic op (C1/E6), the
-latch dataflow and its dead fields (E13), the present output pipeline (F10) and the
-DMA, image and sync clusters (F11). Each carries its open question in
-`REVIEW-FINDINGS.md`, "Parked for review", because none can be settled from the
-tree alone: they wait on a hardware measurement, a Metal 4 behaviour check, or a
-decision the acceptance harness owns. The PSO attachment-count key (E3) is closed
-without a change: the proposed colour-attachment map bridges a gap the RSX
-renumbering does not leave.
+The open set is the texture initialisation path (B8, whose mechanism a probe has
+now measured, and B15, the combined-format copy the Metal 4 compute encoder does
+not perform), the logic op (C1/E6), the latch dataflow and its dead fields (E13),
+the present output pipeline (F10) and the DMA, image and sync clusters (F11). Each
+carries its open question in `REVIEW-FINDINGS.md`, "Parked for review", because
+none can be settled from the tree alone: they wait on a hardware measurement, a
+Metal 4 behaviour check, or a decision the acceptance harness owns. The PSO
+attachment-count key (E3) is closed without a change: the proposed
+colour-attachment map bridges a gap the RSX renumbering does not leave.
 
 The partial set is the flip preamble (F5), the access-violation result (F8), the
 drawable layer setup (F9) and the sampler LOD clamp (E8, which implements the
@@ -598,5 +599,11 @@ decision rather than a tracked bug; the floor measurement does not reproduce it
 (CONFLICTS.md X10). Only W13 and W7 stay live, and each is conditional: W13 needs
 index-buffer robustness to be enabled, and W7 needs a measurement against the RSX
 before anything relies on the stencil `sample_mask`.
+
+One defect on the floor is neither in the ledger nor a KosmicKrisp decision, and
+it is ours to record: the Metal 4 compute encoder accepts a copy into a combined
+depth-stencil image and writes nothing, while the Metal 3 blit encoder performs it
+(REVIEW-FINDINGS.md, B15). The ledger cannot be a complete filter, because it
+covers one driver's reach.
 
 <!-- doc-end -->
