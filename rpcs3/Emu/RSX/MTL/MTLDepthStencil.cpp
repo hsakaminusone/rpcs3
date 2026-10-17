@@ -3,9 +3,12 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/rsx_methods.h"
+#include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
 #include "util/fnv_hash.hpp"
 #include "util/logs.hpp"
+
+#include <algorithm>
 
 namespace mtl
 {
@@ -98,6 +101,31 @@ namespace mtl
 			: front;
 
 		return { front, back };
+	}
+
+	depth_bounds capture_depth_bounds(bool emulate_depth_range)
+	{
+		if (!rsx::method_registers.depth_bounds_test_enabled())
+		{
+			// The disabled bounds are an open range, which on Metal is [0,1]: the VK
+			// form (`VKDraw.cpp:251-256`) collapses into the clamp below.
+			return {};
+		}
+
+		const auto format = rsx::method_registers.surface_depth_fmt();
+		depth_bounds state;
+		state.min = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_min());
+		state.max = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_max());
+
+		if (emulate_depth_range)
+		{
+			state.min = rsx::encode_emulated_depth(state.min);
+			state.max = rsx::encode_emulated_depth(state.max);
+		}
+
+		state.min = std::clamp(state.min, 0.0f, 1.0f);
+		state.max = std::clamp(state.max, 0.0f, 1.0f);
+		return state;
 	}
 
 	anti_aliasing_state capture_anti_aliasing_state()

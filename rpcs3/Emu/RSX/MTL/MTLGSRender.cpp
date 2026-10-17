@@ -12,7 +12,10 @@
 #include "MTLDrawState.h"
 #include "MTLEncoderState.h"
 #include "MTLFill.h"
+#include "MTLFormats.h"
 #include "MTLFramebuffer.h"
+#include "MTLPassScheduler.h"
+#include "MTLPresent.h"
 #include "MTLPresenter.h"
 #include "MTLProgramPipeline.h"
 #include "MTLResourceManager.h"
@@ -20,7 +23,9 @@
 #include "MTLSurfaceCache.h"
 #include "MTLSurfaceState.h"
 #include "MTLTextureCache.h"
+#include "MTLZCULL.h"
 
+#include "Emu/Memory/vm.h"
 #include "Emu/RSX/Common/BufferUtils.h"
 #include "Emu/RSX/Common/io_buffer.h"
 #include "Emu/RSX/Core/RSXDrawCommands.h"
@@ -28,8 +33,17 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/Utils/rsx_utils.h"
+#include "util/video_provider.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <tuple>
+
+// The two media-capture triggers are owned by the Qt side and the shared report
+// path (RSXThread.cpp:43, VKPresent.cpp:16).
+extern atomic_t<bool> g_user_asked_for_screenshot;
+extern atomic_t<recording_mode> g_recording_mode;
 
 namespace mtl
 {
@@ -207,9 +221,14 @@ namespace mtl
 			properties.sample_count = surface.sample_count();
 			properties.alpha_to_coverage = aa.alpha_to_coverage;
 			properties.alpha_to_one = aa.alpha_to_one;
-			properties.raster_enabled = !culls_both_faces(raster);
 			properties.blend = blend;
 			properties.input_primitive_topology = get_primitive_topology_class(rsx::method_registers.current_draw_clause.primitive);
+
+			// The RSX culls triangles only and Metal has no cull-both mode, so a
+			// triangle-class cull-both draw drops the rasteriser while a point or
+			// line draw keeps it (VK_CULL_MODE_FRONT_AND_BACK spares them too;
+			// VKGSRender.cpp:212-218).
+			properties.raster_enabled = !(culls_both_faces(raster) && properties.input_primitive_topology == MTL::PrimitiveTopologyClassTriangle);
 
 			for (u32 index = 0; index < properties.attachment_count; ++index)
 			{
@@ -243,6 +262,7 @@ namespace mtl
 		framebuffer attachments;
 		fill_pass fill;
 		presenter present;
+		frame_output output;
 
 		// The draw path (HLD-05 §3.5).
 		constants_heap constants;
@@ -276,6 +296,19 @@ namespace mtl
 		// subdraw never changes the texture registers (HLD-05 §3.2).
 		std::array<texture_bind, fragment_texture_count> fragment_textures{};
 		std::array<texture_bind, vertex_texture_count> vertex_textures{};
+
+		// The depth-as-texture reads of the open clause.  A redirected depth unit
+		// reads the stencil view of its surface at [30..45]; the emulated depth
+		// compare reads the depth mirror at [50] (MTLArgumentBinds.h).
+		std::array<texture_bind, fragment_texture_count> fragment_stencil{};
+		texture_bind depth_input{};
+
+		// The hazard record of the frame and its pass boundaries (HLD-03 §2.4).
+		pass_scheduler scheduler;
+
+		// The occlusion-query counters.  One shared visibility buffer serves every
+		// pass of every slot (MTLZCULL.h).
+		zcull zcull_control;
 
 		// The open pass.  The header is metal-cpp-free, so the encoder lives here.
 		MTL4::RenderCommandEncoder* encoder = nullptr;
@@ -317,11 +350,23 @@ namespace mtl
 		m_frame_resources->depth_cache.init(m_device->dev());
 		m_frame_resources->samplers.init(m_device->dev());
 
+		// The occlusion counters, and every pass carries their buffer
+		// (MTLFramebuffer.cpp).  The base class owns the pointer, not the object.
+		m_frame_resources->zcull_control.init(*m_device, m_frame_resources->resources);
+		m_frame_resources->attachments.set_visibility_buffer(m_frame_resources->zcull_control.visibility_buffer(0));
+		zcull_ctrl.reset(&m_frame_resources->zcull_control);
+
 		// A frame without a native view is legal: the presenter stays invalid and
 		// the frame runs without a present (C7).
 		if (GSFrameBase* frame = get_frame())
 		{
 			m_frame_resources->present.init(*m_device, frame->handle());
+		}
+
+		// The output tier compiles its passes once, with the device (HLD-06 §2.6).
+		if (!m_frame_resources->output.init(*m_device, m_frame_resources->resources))
+		{
+			die("Metal: output pass initialization failed");
 		}
 
 		GSRender::on_init_thread();
@@ -333,6 +378,10 @@ namespace mtl
 		{
 			// The layer goes first, then the ring drains, then the resources go.
 			m_frame_resources->present.shutdown();
+			m_frame_resources->output.shutdown();
+			// The base class must let go of the backend before the backend goes.
+			zcull_ctrl.release();
+			m_frame_resources->zcull_control.shutdown();
 			m_frame_resources->textures.destroy();
 			m_frame_resources->samplers.shutdown();
 			m_frame_resources->depth_cache.shutdown();
@@ -358,7 +407,10 @@ namespace mtl
 		// so begin_frame waits on the commit feedback before it resets the
 		// allocator (HLD-04 §3.2).
 		m_frame_resources->recorder.begin_frame();
+		m_frame_resources->output.on_slot_complete(m_frame_resources->recorder.slot());
+		m_frame_resources->zcull_control.on_slot_complete(m_frame_resources->recorder.slot());
 		m_frame_resources->constants.begin_frame(m_frame_resources->recorder.slot());
+		m_frame_resources->scheduler.begin_frame();
 		m_frame_resources->binder.reset();
 		m_frame_resources->transform_constants_valid = false;
 		m_frame_open = true;
@@ -455,7 +507,9 @@ namespace mtl
 			// The clear is the whole attachment, so it is a load action and needs no
 			// draw (LLD-surface invariant 4).  The pass is opened so the clear is
 			// recorded, then closed.
-			attachments.open_pass(m_frame_resources->recorder, mask, state);
+			m_frame_resources->encoder = attachments.open_pass(m_frame_resources->recorder, mask, state);
+			record_pass_hazards(false);
+			m_frame_resources->encoder = nullptr;
 			m_frame_resources->recorder.close_encoder();
 			return;
 		}
@@ -472,6 +526,9 @@ namespace mtl
 		{
 			return;
 		}
+
+		m_frame_resources->encoder = encoder;
+		record_pass_hazards(false);
 
 		u16 x = static_cast<u16>(m_scissor.x1);
 		u16 y = static_cast<u16>(m_scissor.y1);
@@ -496,13 +553,25 @@ namespace mtl
 			static_cast<f32>(state.clear_color.alpha) };
 		const MTL::PixelFormat color_format = attachments.color_count() != 0 ? attachments.color(0)->pixel_format() : MTL::PixelFormatInvalid;
 
-		m_frame_resources->fill.fill(m_frame_resources->recorder.fragment_table(), encoder, color_format, attachments.sample_count(), color, state.clear_depth, write_color, write_depth);
+		// Every fill takes its own value block, because a Metal 4 command buffer does
+		// not snapshot buffer contents (MTLConstants.h fill_values).
+		if (const MTL::GPUAddress values = m_frame_resources->constants.alloc_fill_values(color, state.clear_depth))
+		{
+			m_frame_resources->fill.fill(m_frame_resources->recorder.fragment_table(), encoder, values, color_format, attachments.sample_count(), write_color, write_depth);
+		}
+
+		m_frame_resources->encoder = nullptr;
 		m_frame_resources->recorder.close_encoder();
 	}
 
 	void MTLGSRender::load_texture_env()
 	{
 		frame_resources& frame = *m_frame_resources;
+
+		// The stencil half of a redirected depth unit samples through its own
+		// sampler (VKDraw.cpp:707-717), shared by every unit of the clause.
+		MTL::SamplerState* stencil_sampler = frame.samplers.get(stencil_mirror_sampler());
+		frame.fragment_stencil = {};
 
 		// A unit the program does not reference is never sampled, so it is skipped
 		// (GLDraw.cpp:340-425).  The cache resolves the guest range to an image and
@@ -548,6 +617,19 @@ namespace mtl
 			frame.fragment_textures[i] = frame.textures.resolve_texture_bind(
 				descriptor,
 				frame.samplers.get(capture_fragment_sampler(static_cast<u8>(i))));
+
+			// A redirected depth unit also reads the stencil half of its surface,
+			// through a castable view (VKDraw.cpp:702-721).  The view is the surface
+			// itself when the surface carries no stencil, and the slot then stays
+			// unbound.
+			if ((current_fragment_program.texture_state.redirected_textures & (1u << i)) &&
+				stencil_sampler && descriptor->image_handle)
+			{
+				if (texture* stencil = descriptor->image_handle->stencil_view())
+				{
+					frame.fragment_stencil[i] = { stencil->resource_id(), stencil_sampler->gpuResourceID() };
+				}
+			}
 		}
 
 		for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
@@ -582,6 +664,51 @@ namespace mtl
 				descriptor,
 				frame.samplers.get(capture_vertex_sampler(static_cast<u8>(i))));
 		}
+	}
+
+	void MTLGSRender::record_pass_hazards(bool sample_textures)
+	{
+		frame_resources& frame = *m_frame_resources;
+		pass_scheduler& scheduler = frame.scheduler;
+
+		scheduler.begin_pass();
+
+		// The read set is the units the programs reference, not the whole resolved
+		// array: an unreferenced unit still holds the previous clause's image, and a
+		// barrier for it would consume a write record the frame still needs.
+		if (sample_textures)
+		{
+			for (u32 referenced = current_fp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			{
+				if ((referenced & 1) && frame.fragment_textures[i].texture._impl)
+				{
+					scheduler.note_read(frame.fragment_textures[i].texture, access_stages(rsx::surface_access::shader_read, false));
+				}
+			}
+
+			for (u32 referenced = current_vp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			{
+				if ((referenced & 1) && frame.vertex_textures[i].texture._impl)
+				{
+					scheduler.note_read(frame.vertex_textures[i].texture, access_stages(rsx::surface_access::shader_read, true));
+				}
+			}
+		}
+
+		// The attachment set is the pass's write set.
+		for (u32 index = 0; index < frame.attachments.color_count(); ++index)
+		{
+			scheduler.note_write(frame.attachments.color(index)->resource_id(), access_stages(rsx::surface_access::shader_write, false));
+		}
+
+		if (frame.attachments.has_depth())
+		{
+			scheduler.note_write(frame.attachments.depth()->resource_id(), access_stages(rsx::surface_access::shader_write, false));
+		}
+
+		// The carried edges of the pass that split, then this pass's own.
+		scheduler.emit_split_barriers(frame.encoder);
+		scheduler.flush(frame.encoder);
 	}
 
 	// The draw execution (HLD-05 §3.5).  One RSX draw clause is a sequence of
@@ -648,6 +775,22 @@ namespace mtl
 		frame.compiled_fragment = std::get<2>(data);
 		frame.compiled_vertex = std::get<1>(data);
 
+		// The emulated depth compare samples the depth surface, which this pass also
+		// holds as its depth attachment.  A render pass cannot read its own
+		// attachment, so the surface is copied to a mirror in its own encoder first
+		// and the shader reads the mirror (REALISATION.md, "The depth/stencil-as-
+		// texture cluster").
+		frame.depth_input = {};
+		if ((current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE) && frame.attachments.has_depth())
+		{
+			const MTL::ResourceID mirror = frame.attachments.depth()->mirror_depth(frame.recorder);
+			MTL::SamplerState* sampler = frame.samplers.get(stencil_mirror_sampler());
+			if (sampler && mirror._impl)
+			{
+				frame.depth_input = { mirror, sampler->gpuResourceID() };
+			}
+		}
+
 		MTL4::RenderCommandEncoder* encoder = frame.attachments.open_pass(frame.recorder, 0, surface);
 		if (!encoder)
 		{
@@ -656,10 +799,19 @@ namespace mtl
 		}
 
 		frame.encoder = encoder;
+		record_pass_hazards(true);
+
+		// The mirror copy ran in the encoder that open_pass closed, so the pass reads
+		// the mirror across a queue-scope edge.
+		if (frame.depth_input.texture._impl)
+		{
+			emit_queue_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
+		}
+
 		encoder->setRenderPipelineState(program->state);
 
 		MTL::ScissorRect scissor = build_scissor_rect(m_scissor.x1, m_scissor.y1, m_scissor.x1 + m_scissor.width(), m_scissor.y1 + m_scissor.height());
-		apply_encoder_state(encoder, capture_encoder_state(), scissor, frame.depth_cache);
+		apply_encoder_state(encoder, capture_encoder_state(!!(current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE)), scissor, frame.depth_cache);
 
 		// The indexed-constant tables of a hardware-instanced draw.  The shared
 		// helper replays the clause, so it runs before the subdraw loop
@@ -911,6 +1063,8 @@ namespace mtl
 		// The units resolved for this clause (HLD-05 §3.2).
 		binds.vertex_textures = frame.vertex_textures;
 		binds.fragment_textures = frame.fragment_textures;
+		binds.fragment_stencil = frame.fragment_stencil;
+		binds.fragment_depth_input = frame.depth_input;
 
 		if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
 		{
@@ -953,6 +1107,10 @@ namespace mtl
 		const MTL::PrimitiveType primitive = get_primitive_type(draw_call.primitive);
 		const u32 instance_count = draw_call.is_trivial_instanced_draw ? draw_call.pass_count() : 1;
 
+		// A ZCULL query that started or ended between draws takes effect on the
+		// encoder that carries the following draws (MTLZCULL.h).
+		frame.zcull_control.apply(encoder);
+
 		if (input.has_index_buffer)
 		{
 			encoder->drawIndexedPrimitives(
@@ -972,40 +1130,306 @@ namespace mtl
 	}
 
 
-	// C7.  The RSX output is the surface at the flip address, and it is presented
-	// through the one submit path the recorder owns (HLD-03 §4.9).
-	void MTLGSRender::flip(const rsx::display_flip_info_t& info)
+	// Resolve the image that carries the RSX output.  A surface at the display
+	// address wins, then a texture the cache already holds, then a copy of the guest
+	// bytes.  `width` and `height` come back as the image's own extent.
+	void MTLGSRender::get_present_source(u32 address, u32& width, u32& height, u32 pitch, u32 format, u8 eye,
+		MTL::Texture*& image)
 	{
-		if (m_frame_resources && m_frame_open)
-		{
-			// The presenter submits the frame it fills.  A frame that cannot be
-			// presented (a dropped frame, or no native view) is submitted here
-			// instead, so the ring advances either way.
-			bool presented = false;
+		auto& resources = *m_frame_resources;
+		const u32 format_bpp = rsx::get_format_block_size_in_bytes(static_cast<rsx::surface_color_format>(format));
 
-			if (m_frame_resources->present.valid())
+		const auto overlap_info = resources.cache.get_merged_texture_memory_region(
+			resources.recorder, address, width, height, pitch, format_bpp, rsx::surface_access::transfer_read);
+
+		if (!overlap_info.empty())
+		{
+			const auto& section = overlap_info.back();
+			surface* target = section.surface;
+
+			if (section.base_address >= address)
 			{
-				if (surface* source = m_frame_resources->cache.get_surface_at(info.buffer))
+				const u32 surface_width = target->get_surface_width<rsx::surface_metrics::samples>();
+				const u32 surface_height = target->get_surface_height<rsx::surface_metrics::samples>();
+				bool viable = false;
+
+				if (section.base_address == address)
 				{
-					if (texture* output = source->get_surface(rsx::surface_access::memory_read))
+					// The surface either fills the buffer or crops into it.
+					viable = (surface_width >= width && surface_height >= height);
+				}
+				else
+				{
+					// The surface sits inside the buffer, so the buffer carries a
+					// border and the insets must be symmetric (GLPresent.cpp:82).
+					const u32 inset_offset = section.base_address - address;
+					const u32 inset_y = inset_offset / pitch;
+					const u32 inset_x = (inset_offset % pitch) / format_bpp;
+
+					viable = ((surface_width + inset_x + inset_x) == width &&
+						(surface_height + inset_y + inset_y) == height);
+				}
+
+				if (viable)
+				{
+					// A transfer access resolves a multisampled surface, so the
+					// present always reads one sample per pixel
+					// (VKRenderTargets.cpp:839).
+					target->memory_barrier(resources.recorder, rsx::surface_access::transfer_read);
+
+					if (texture* output = target->get_surface(rsx::surface_access::transfer_read))
 					{
-						presented = m_frame_resources->present.present(output->value(), m_frame_resources->recorder);
+						image = output->value();
+
+						std::tie(width, height) = rsx::apply_resolution_scale<true>(
+							resolution_scaling_config, std::min(surface_width, width), std::min(surface_height, height));
+						return;
 					}
 				}
 			}
-
-			if (!presented)
-			{
-				m_frame_resources->recorder.submit();
-			}
-
-			// The cache retires the temporary subresources and the predictor state
-			// of the frame that just ended (GLPresent.cpp:535).
-			m_frame_resources->textures.on_frame_end();
-
-			m_frame_open = false;
+		}
+		else if (auto* cached = resources.textures.find_texture_from_dimensions<true>(address, format);
+			cached && cached->get_raw_texture() && cached->get_raw_texture()->width() >= width &&
+			cached->get_raw_texture()->height() >= height)
+		{
+			// The frame was drawn offscreen or in software and blitted to display.
+			image = cached->get_raw_texture()->value();
+			return;
 		}
 
+		rsx_log.warning("Metal: flip image was not in the cache, uploading the surface from the CPU");
+
+		const MTL::PixelFormat expected_format = mtl::get_texture_format(format);
+		const u32 pixel_size = get_pixel_size(expected_format);
+
+		if (!pixel_size || !address || !pitch)
+		{
+			return;
+		}
+
+		const u32 row_bytes = width * pixel_size;
+		const u64 length = static_cast<u64>(row_bytes) * height;
+
+		MTL::Texture*& scratch = m_flip_scratch[eye];
+
+		if (!scratch || scratch->width() != width || scratch->height() != height || scratch->pixelFormat() != expected_format)
+		{
+			if (scratch)
+			{
+				m_frame_resources->resources.defer_release(scratch);
+				scratch = nullptr;
+			}
+
+			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+			descriptor->setTextureType(MTL::TextureType2D);
+			descriptor->setPixelFormat(expected_format);
+			descriptor->setWidth(width);
+			descriptor->setHeight(height);
+			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageRenderTarget);
+			scratch = m_frame_resources->resources.new_texture(descriptor, MTL::StorageModePrivate);
+			descriptor->release();
+
+			if (!scratch)
+			{
+				return;
+			}
+
+			m_frame_resources->resources.make_persistent(scratch);
+		}
+
+		// The guest pitch may not be the host row length, so the staging copy
+		// repacks each row (GLPresent.cpp:127).
+		MTL::Buffer* staging = m_frame_resources->resources.new_buffer(utils::align(length, 0x1000), MTL::StorageModeShared);
+
+		if (!staging)
+		{
+			return;
+		}
+
+		const u8* guest = static_cast<const u8*>(vm::base(address));
+		u8* host = static_cast<u8*>(staging->contents());
+
+		if (!guest || !host)
+		{
+			m_frame_resources->resources.defer_release(staging);
+			return;
+		}
+
+		const u32 copy_bytes = std::min(row_bytes, pitch);
+
+		for (u32 row = 0; row < height; ++row)
+		{
+			std::memcpy(host + (static_cast<u64>(row) * row_bytes), guest + (static_cast<u64>(row) * pitch), copy_bytes);
+		}
+
+		MTL4::ComputeCommandEncoder* encoder = m_frame_resources->recorder.open_compute();
+
+		if (!encoder)
+		{
+			m_frame_resources->resources.defer_release(staging);
+			return;
+		}
+
+		encoder->copyFromBuffer(staging, 0, row_bytes, row_bytes * height, MTL::Size::Make(width, height, 1),
+			scratch, 0, 0, MTL::Origin::Make(0, 0, 0));
+
+		m_frame_resources->recorder.close_encoder();
+		m_frame_resources->resources.defer_release(staging);
+
+		image = scratch;
+	}
+
+	// C7.  The RSX output is the surface at the flip address.  It is composed into
+	// the drawable by the output tier and presented through the one submit path the
+	// recorder owns (HLD-03 §4.9, HLD-06 §2.4).
+	void MTLGSRender::flip(const rsx::display_flip_info_t& info)
+	{
+		if (!m_frame_resources || !m_frame_open)
+		{
+			GSRender::flip(info);
+			return;
+		}
+
+		auto& resources = *m_frame_resources;
+		const u32 slot = resources.recorder.slot();
+
+		// The recorder waited for this slot when the frame opened, so a capture that
+		// slot recorded its previous time round is readable now (HLD-06 §2.7).
+		resources.output.deliver(slot, *m_frame);
+
+		const auto& avconfig = g_fxo->get<rsx::avconf>();
+
+		u32 buffer_width = 0;
+		u32 buffer_height = 0;
+		u32 buffer_pitch = 0;
+		u32 av_format = CELL_GCM_TEXTURE_A8R8G8B8;
+		MTL::Texture* image = nullptr;
+		MTL::Texture* image2 = nullptr;
+
+		// A skipped frame is dropped, not presented late, and the display buffer's
+		// declared extent decides whether a present is attempted
+		// (GLPresent.cpp:164, :173-201).
+		if (!info.skip_frame && info.buffer < display_buffers_count)
+		{
+			buffer_width = display_buffers[info.buffer].width;
+			buffer_height = display_buffers[info.buffer].height;
+			buffer_pitch = display_buffers[info.buffer].pitch;
+
+			if (!buffer_width)
+			{
+				buffer_width = avconfig.resolution_x;
+				buffer_height = avconfig.resolution_y;
+			}
+
+			if (avconfig.state)
+			{
+				av_format = avconfig.get_compatible_gcm_format();
+
+				if (!buffer_pitch)
+				{
+					buffer_pitch = buffer_width * avconfig.get_bpp();
+				}
+
+				const size2u video_frame_size = avconfig.video_frame_size();
+				buffer_width = std::min(buffer_width, video_frame_size.width);
+				buffer_height = std::min(buffer_height, video_frame_size.height);
+			}
+			else if (!buffer_pitch)
+			{
+				buffer_pitch = buffer_width * 4;
+			}
+
+			if (buffer_width && buffer_height)
+			{
+				// The source is the surface at the display buffer's guest address,
+				// not the display-buffer index (VKPresent.cpp:551).
+				const u32 address = rsx::get_address(display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
+				get_present_source(address, buffer_width, buffer_height, buffer_pitch, av_format, 0, image);
+
+				if (!image)
+				{
+					buffer_width = 0;
+					buffer_height = 0;
+				}
+			}
+
+			if (image && avconfig.stereo_enabled) [[unlikely]]
+			{
+				// The second eye sits below the first, separated by the RSX blanking
+				// interval (VKPresent.cpp:565).
+				const auto [unused, min_expected_height] = rsx::apply_resolution_scale<true>(
+					resolution_scaling_config, RSX_SURFACE_DIMENSION_IGNORED, static_cast<u32>(display_buffers[info.buffer].height) + 30);
+
+				if (image->height() < min_expected_height)
+				{
+					const u32 image_offset = (display_buffers[info.buffer].height + 30) * buffer_pitch + display_buffers[info.buffer].offset;
+					get_present_source(rsx::get_address(image_offset, CELL_GCM_LOCATION_LOCAL), buffer_width, buffer_height, buffer_pitch, av_format, 1, image2);
+				}
+			}
+		}
+
+		present_source source{ image, image2, buffer_width, buffer_height };
+
+		// The capture reads the source before the output path scales it
+		// (VKPresent.cpp:684).
+		const bool user_asked_for_screenshot = g_user_asked_for_screenshot.exchange(false);
+		const bool user_is_recording = (g_recording_mode != recording_mode::stopped && m_frame->can_consume_frame());
+
+		if (source.image && (user_asked_for_screenshot || user_is_recording))
+		{
+			resources.output.request_capture(resources.recorder, resources.constants, source, user_asked_for_screenshot,
+				g_cfg.video.record_with_overlays.get(), m_overlay_manager);
+		}
+
+		const u32 target_width = static_cast<u32>(std::max(0, m_frame->client_width()));
+		const u32 target_height = static_cast<u32>(std::max(0, m_frame->client_height()));
+
+		MTL::Texture* drawable = nullptr;
+
+		if (source.image && target_width && target_height &&
+			resources.present.acquire(resources.recorder, target_width, target_height, drawable))
+		{
+			const areau display_area{0, 0, target_width, target_height};
+			const areau aspect = g_cfg.video.stretch_to_display_area.get()
+				? display_area
+				: avconfig.aspect_convert_region({ source.width, source.height }, { target_width, target_height });
+
+			MTL4::RenderPassDescriptor* pass = MTL4::RenderPassDescriptor::alloc()->init();
+			MTL::RenderPassColorAttachmentDescriptor* attachment = pass->colorAttachments()->object(0);
+			attachment->setTexture(drawable);
+			// The area outside the aspect rectangle is the letterbox, and it is black
+			// (GLPresent.cpp:279).
+			attachment->setLoadAction(MTL::LoadActionClear);
+			attachment->setStoreAction(MTL::StoreActionStore);
+			attachment->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
+
+			if (MTL4::RenderCommandEncoder* encoder = resources.recorder.open_pass(pass))
+			{
+				// The output tier samples images that the frame's earlier encoders
+				// wrote, and it is not an RSX pass, so the scheduler does not hold
+				// this edge.  The read is a later encoder, so the queue form
+				// applies (HLD-03 §2.1 item 6).
+				emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
+
+				resources.output.compose(encoder, resources.constants, drawable, source, aspect, display_area,
+					avconfig.gamma, !g_cfg.video.full_rgb_range_output.get(), avconfig.stereo_enabled, m_overlay_manager);
+			}
+			else
+			{
+				resources.present.drop();
+			}
+
+			pass->release();
+		}
+
+		// A frame that is not presented is still submitted, so the ring advances.
+		resources.present.present(resources.recorder);
+
+		// The cache retires the temporary subresources and the predictor state of
+		// the frame that just ended (GLPresent.cpp:535).
+		resources.textures.on_frame_end();
+
+		m_frame_open = false;
 		GSRender::flip(info);
 	}
 
@@ -1051,6 +1475,14 @@ namespace mtl
 			: rsx::invalidation_cause::deferred_read;
 
 		const auto result = m_frame_resources->textures.invalidate_address(m_frame_resources->recorder, address, cause);
+
+		if (result.invalidate_samplers)
+		{
+			// A cached image became invalid, so every unit re-resolves on its next
+			// draw (VKGSRender.cpp:1028).
+			m_textures_dirty.fill(true);
+			m_vertex_textures_dirty.fill(true);
+		}
 
 		if (!result.violation_handled)
 		{

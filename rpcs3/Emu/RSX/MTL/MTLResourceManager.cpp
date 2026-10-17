@@ -309,6 +309,18 @@ namespace mtl
 		return buffer;
 	}
 
+	u8 resource_manager::supported_sample_count(u8 count) const
+	{
+		// Apple lists 4 samples as universal and 2 as "some devices", so a request
+		// the device rejects folds up to 4 and keeps the antialiasing.
+		if (count > 1 && !m_device->supportsTextureSampleCount(count))
+		{
+			return 4;
+		}
+
+		return count;
+	}
+
 	MTL::Texture* resource_manager::new_texture(MTL::TextureDescriptor* descriptor, MTL::StorageMode storage)
 	{
 		descriptor->setStorageMode(storage);

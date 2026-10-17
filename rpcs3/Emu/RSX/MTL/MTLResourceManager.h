@@ -85,6 +85,11 @@ namespace mtl
 		// is the offset into it, so a load needs no staging copy.
 		MTL::Buffer* guest_buffer() const { return m_guest; }
 
+		// Metal's sample-count support is per device: Apple's table lists 4 as
+		// universal and 2 as "some devices", so a host request the device rejects
+		// folds up to 4 and keeps the antialiasing.
+		u8 supported_sample_count(u8 count) const;
+
 		void make_persistent(MTL::Allocation* allocation);
 		void on_frame_begin(u32 index);
 		void commit_frame();

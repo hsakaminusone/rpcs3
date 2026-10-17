@@ -66,16 +66,21 @@ namespace mtl
 		m_width = layout.width;
 		m_height = layout.height;
 
-		// The pass descriptor must list a contiguous prefix, so the count is the
-		// highest bound index plus one.
+		// The RSX renumbers the enabled targets into draw slots 0..n-1, so the guest
+		// holes are removed: a surface_b draw is draw slot 0 and resolves to guest
+		// target 1 (GLRenderTargets.cpp:291-294; VKGSRender.cpp:295,
+		// `m_draw_buffers`/`get_rtt_indexes`).  The pass descriptor and the PSO index
+		// the same slots, so a hole left at index 0 would bind no attachment there
+		// (and a `surface_b`-only draw left `m_color[0]` null).
+		u8 color_count = 0;
 		for (u32 index = 0; index < 4; ++index)
 		{
 			if (surface* target = cache.m_bound_render_targets[index].second)
 			{
-				m_color[index] = target;
-				m_color_count = static_cast<u8>(index + 1);
+				m_color[color_count++] = target;
 			}
 		}
+		m_color_count = color_count;
 
 		m_depth = cache.m_bound_depth_stencil.second;
 
@@ -100,6 +105,15 @@ namespace mtl
 		descriptor->setRenderTargetWidth(m_width);
 		descriptor->setRenderTargetHeight(m_height);
 
+		if (m_visibility)
+		{
+			// Accumulate, because a query's counter must survive every pass of the
+			// query and the reset form would clear it at each pass start
+			// (MTLZCULL.h).  The default with no counting enabled is disabled.
+			descriptor->setVisibilityResultBuffer(m_visibility);
+			descriptor->setVisibilityResultType(MTL::VisibilityResultTypeAccumulate);
+		}
+
 		const bool clear_color = (clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
 		const bool clear_depth = (clear_mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
 		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0;
@@ -112,11 +126,12 @@ namespace mtl
 			attachment->setStoreAction(MTL::StoreActionStore);
 
 			// A multisampled attachment resolves on store, so the resolved image is
-			// the samplable one (HLD-02 §2.2).
+			// the samplable one (HLD-02 §2.2).  The multisampled image survives the
+			// resolve, so a later write needs no unresolve.
 			if (texture* resolve = m_color[index]->resolve_surface.get())
 			{
 				attachment->setResolveTexture(resolve->value());
-				attachment->setStoreAction(MTL::StoreActionMultisampleResolve);
+				attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
 			}
 
 			if (clear_color)
@@ -130,6 +145,10 @@ namespace mtl
 			MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
 			depth->setTexture(m_depth->value());
 			depth->setLoadAction(clear_depth ? MTL::LoadActionClear : MTL::LoadActionLoad);
+			// The depth attachment always stores.  A depth or stencil render-pass
+			// resolve is not ordered by a Metal producer barrier, so the depth half of
+			// a multisampled surface resolves through a meta resolve instead, outside
+			// this pass (Mesa kk_cmd_buffer.c:1000-1005).
 			depth->setStoreAction(MTL::StoreActionStore);
 
 			if (clear_depth)

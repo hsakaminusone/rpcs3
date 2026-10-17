@@ -44,6 +44,18 @@ namespace mtl
 	depth_stencil_state capture_depth_stencil_state();
 	stencil_references capture_stencil_references();
 
+	// NV4097_SET_DEPTH_BOUNDS_MIN/MAX/TEST_ENABLE: dynamic encoder state.  The RSX
+	// range is saturated into the depth format's range and, when the shader
+	// compressed Z, encoded the same way (VKDraw.cpp:240-271; LLD-raster §3.2).
+	struct depth_bounds
+	{
+		f32 min = 0.0f;
+		f32 max = 1.0f;
+	};
+
+	// `emulate_depth_range` is the draw's RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE.
+	depth_bounds capture_depth_bounds(bool emulate_depth_range);
+
 	// The latch is the key of the cached MTL::DepthStencilState, so it needs value
 	// semantics.  A memcmp would read the padding the members leave behind.
 	bool operator==(const stencil_face& a, const stencil_face& b);

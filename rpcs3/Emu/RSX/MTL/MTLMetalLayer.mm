@@ -30,10 +30,22 @@ namespace mtl
 
 		CAMetalLayer* layer = [[CAMetalLayer alloc] init];
 		layer.device = static_cast<id<MTLDevice>>(device);
-		// The drawable is only ever a copy destination, never a sampled source, so
-		// the fast path is available (HLD-04 §4.1).
+		// The drawable is the output pass's render target and is never sampled, so
+		// the framebuffer-only fast path stays available (HLD-04 §4.1).
 		layer.framebufferOnly = YES;
 		layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+		// One drawable per frame slot, so the ring never starves the pool; a vsynced
+		// present; and a bounded acquire, because a nil drawable is a dropped frame
+		// and not a stall on the RSX thread (HLD-06 §2.2).
+		layer.maximumDrawableCount = 3;
+		layer.displaySyncEnabled = YES;
+		layer.allowsNextDrawableTimeout = YES;
+
+		// The guest output is sRGB-encoded, so the layer carries the sRGB colour
+		// space and the display applies no conversion.
+		CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+		layer.colorspace = colorspace;
+		CGColorSpaceRelease(colorspace);
 
 		ns_view.wantsLayer = YES;
 		ns_view.layer = layer;
@@ -51,25 +63,6 @@ namespace mtl
 		CAMetalLayer* metal_layer = static_cast<CAMetalLayer*>(layer);
 		metal_layer.pixelFormat = static_cast<MTLPixelFormat>(format);
 		metal_layer.drawableSize = CGSizeMake(width, height);
-	}
-
-	// The formats a CAMetalLayer accepts as a drawable.  The set is the one the
-	// display pipe can scan out; anything else must be converted before the present.
-	bool layer_supports_format(u32 format)
-	{
-		switch (static_cast<MTLPixelFormat>(format))
-		{
-		case MTLPixelFormatBGRA8Unorm:
-		case MTLPixelFormatBGRA8Unorm_sRGB:
-		case MTLPixelFormatRGBA8Unorm:
-		case MTLPixelFormatRGBA8Unorm_sRGB:
-		case MTLPixelFormatRGBA16Float:
-		case MTLPixelFormatBGRA10_XR:
-		case MTLPixelFormatBGRA10_XR_sRGB:
-			return true;
-		default:
-			return false;
-		}
 	}
 
 	void detach_metal_layer(void* view, void* layer)

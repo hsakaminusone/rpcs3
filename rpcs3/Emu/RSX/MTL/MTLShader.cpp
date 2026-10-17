@@ -55,7 +55,7 @@ namespace mtl
 		}
 	}
 
-	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask)
+	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask, u32 push_slot)
 	{
 		if (spv.empty())
 		{
@@ -112,7 +112,9 @@ namespace mtl
 			msl_binding.stage = stage;
 			msl_binding.desc_set = spirv_cross::kPushConstDescSet;
 			msl_binding.binding = spirv_cross::kPushConstBinding;
-			msl_binding.msl_buffer = is_vertex ? vertex_draw_params_slot : fragment_blend_slot;
+			msl_binding.msl_buffer = (push_slot == rsx_push_slot)
+				? (is_vertex ? vertex_draw_params_slot : fragment_blend_slot)
+				: push_slot;
 			compiler.add_msl_resource_binding(msl_binding);
 		}
 

@@ -56,6 +56,15 @@ namespace mtl
 		// after its previous frame has completed (HLD-04 §3.2).
 		void open_frame();
 
+		// Resolve the image that carries the frame's RSX output.  The surface store
+		// answers first, then the texture cache, then a CPU upload
+		// (GLPresent.cpp:57-139).  `width`/`height` come back as the image's extent.
+		void get_present_source(u32 address, u32& width, u32& height, u32 pitch, u32 format, u8 eye,
+			MTL::Texture*& image);
+
+		// The scratch images of the CPU upload path, one per stereo eye.
+		std::array<MTL::Texture*, 2> m_flip_scratch{};
+
 		// Bind the surfaces the context names and refresh the scissor.  False when
 		// there is no valid configuration to draw into.
 		bool bind_framebuffer(rsx::framebuffer_creation_context context);
@@ -68,6 +77,12 @@ namespace mtl
 		// Metal image and sampler of each.  It runs before the programs are built,
 		// because the builders read the resolved descriptors (RSXThread.cpp:2488).
 		void load_texture_env();
+
+		// Record the open pass's hazard set and emit the barriers it needs.  The
+		// attachment set is the pass's write and the resolved units its read, so a
+		// resource the frame already touched becomes a queue barrier (HLD-03 §2.4).
+		// `sample_textures` is false for a pass that samples nothing, such as a clear.
+		void record_pass_hazards(bool sample_textures);
 
 		std::unique_ptr<device> m_device;
 		std::unique_ptr<frame_resources> m_frame_resources;

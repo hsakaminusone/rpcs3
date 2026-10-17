@@ -6,6 +6,7 @@
 
 #include "util/fnv_hash.hpp"
 
+#include <algorithm>
 #include <bit>
 
 namespace mtl
@@ -136,8 +137,16 @@ namespace mtl
 			state.wrap_r = texture.wrap_r();
 			state.min_filter = texture.min_filter();
 			state.mag_filter = texture.mag_filter();
-			state.min_lod = texture.min_lod();
-			state.max_lod = texture.max_lod();
+
+			// The LOD range is clamped to the resident mip chain, because the guest
+			// value can exceed it (VKDraw.cpp:467-518).  Metal has no sampler LOD
+			// bias, so the guest bias is a recorded limitation (04 R19).
+			const u32 mipmaps = texture.get_exact_mipmap_count();
+			if (get_mip_filter(state.min_filter) != MTL::SamplerMipFilterNotMipmapped && mipmaps > 1)
+			{
+				state.min_lod = std::min(texture.min_lod(), static_cast<f32>(mipmaps - 1));
+				state.max_lod = std::min(texture.max_lod(), static_cast<f32>(mipmaps - 1));
+			}
 
 			const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 			state.depth_compare = (format >= CELL_GCM_TEXTURE_DEPTH24_D8 && format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT);
@@ -171,6 +180,17 @@ namespace mtl
 
 		state.border_color = get_closest_border_color(texture.remapped_border_color());
 		state.depth_compare = false;
+
+		return state;
+	}
+
+	sampler_state stencil_mirror_sampler()
+	{
+		// Clamp-to-border with an opaque-black border, nearest, no mip
+		// (VKDraw.cpp:707-717).
+		sampler_state state;
+		state.wrap_s = state.wrap_t = state.wrap_r = rsx::texture_wrap_mode::border;
+		state.border_color = MTL::SamplerBorderColorOpaqueBlack;
 
 		return state;
 	}

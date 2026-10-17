@@ -17,7 +17,6 @@ namespace mtl
 		}
 
 		if (remap.encoded == RSX_TEXTURE_REMAP_IDENTITY ||
-			sample_count() > 1 ||
 			(value()->textureType() != MTL::TextureType2D && value()->textureType() != MTL::TextureTypeCube))
 		{
 			return this;
@@ -31,9 +30,13 @@ namespace mtl
 		const auto layout = apply_swizzle_remap(m_native_layout, remap);
 		const MTL::TextureSwizzleChannels channels = MTL::TextureSwizzleChannels::Make(layout[1], layout[2], layout[3], layout[0]);
 
+		// A view cannot change the texture type, so a multisampled source keeps its
+		// type.  It may still carry a swizzle (REVIEW-FINDINGS.md, B14).
+		const MTL::TextureType type = (sample_count() > 1) ? MTL::TextureType2DMultisample : MTL::TextureType2D;
+
 		auto view = std::make_unique<texture>(m_resources);
 		view->m_image = this;
-		view->assign(value()->newTextureView(pixel_format(), MTL::TextureType2D,
+		view->assign(value()->newTextureView(pixel_format(), type,
 			NS::Range::Make(0, value()->mipmapLevelCount()),
 			NS::Range::Make(0, value()->arrayLength()),
 			channels));
@@ -41,6 +44,11 @@ namespace mtl
 		texture* result = view.get();
 		m_views.emplace(remap.encoded, std::move(view));
 		return result;
+	}
+
+	texture* texture::stencil_view()
+	{
+		return (m_image != this) ? m_image->stencil_view() : nullptr;
 	}
 }
 

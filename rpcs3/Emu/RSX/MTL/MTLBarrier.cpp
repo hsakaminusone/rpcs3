@@ -11,6 +11,12 @@ namespace mtl
 
 	bool emit_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec)
 	{
+		if (spec.cross_pass)
+		{
+			encoder->barrierAfterQueueStages(spec.producer, spec.consumer, spec.visibility);
+			return true;
+		}
+
 		if (!stages_legal_intra_pass(spec.producer))
 		{
 			return false;
@@ -18,6 +24,11 @@ namespace mtl
 
 		encoder->barrierAfterEncoderStages(spec.producer, spec.consumer, spec.visibility);
 		return true;
+	}
+
+	void emit_queue_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec)
+	{
+		encoder->barrierAfterQueueStages(spec.producer, spec.consumer, spec.visibility);
 	}
 }
 

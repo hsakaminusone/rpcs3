@@ -13,6 +13,12 @@ namespace mtl
 	// names its entry `main`, and SPIRV-Cross renames it to avoid the MSL `main`.
 	constexpr const char* msl_entry_point = "main0";
 
+	// The sentinel that selects the RSX substituted push-constant slots.  A pipeline
+	// that is not an RSX draw (an overlay or calibration pass, HLD-06 §2.6) passes
+	// its own MSL buffer index instead, because the RSX slots carry RSX state that
+	// the pass does not have.
+	constexpr u32 rsx_push_slot = ~0u;
+
 	// SPIR-V -> MSL (HLD-05 §2.3 route A).  `is_vertex` selects the stage.  The
 	// fixed RSX slot map (HLD-05 §3.1-§3.2) is applied with
 	// add_msl_resource_binding, so the emitted [[buffer(N)]]/[[texture(N)]]/
@@ -20,7 +26,7 @@ namespace mtl
 	// `color_output_mask` is not null it receives one bit per [[color(i)]] the
 	// stage writes.  Returns false and leaves `msl` untouched on a translation
 	// failure.
-	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask = nullptr);
+	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask = nullptr, u32 push_slot = rsx_push_slot);
 
 	// MSL -> MTL::Library (HLD-05 §3.4).  One MTL4::Compiler per device
 	// (workaround W11).  Null on a compile error; `error` carries the diagnostic.

@@ -4,7 +4,7 @@
 
 namespace mtl
 {
-	encoder_state capture_encoder_state()
+	encoder_state capture_encoder_state(bool emulate_depth_range)
 	{
 		// One latch per cluster; the helpers consume it instead of re-reading the
 		// register file.
@@ -31,6 +31,10 @@ namespace mtl
 		const stencil_references references = capture_stencil_references();
 		state.stencil_front = references.front;
 		state.stencil_back = references.back;
+
+		const depth_bounds bounds = capture_depth_bounds(emulate_depth_range);
+		state.depth_bounds_min = bounds.min;
+		state.depth_bounds_max = bounds.max;
 
 		// The helper writes znear/zfar only when the range is inside [0,1], so the
 		// defaults (0.0, 1.0) survive the false case.
@@ -59,6 +63,7 @@ namespace mtl
 		encoder->setFrontFacingWinding(state.winding);
 		encoder->setTriangleFillMode(state.fill_mode);
 		encoder->setDepthClipMode(state.depth_clip_mode);
+		encoder->setDepthTestBounds(state.depth_bounds_min, state.depth_bounds_max);
 
 		// The RSX has no depth-bias clamp term (LLD-raster §3.4).
 		encoder->setDepthBias(state.depth_bias, state.depth_slope_scale, 0.0f);

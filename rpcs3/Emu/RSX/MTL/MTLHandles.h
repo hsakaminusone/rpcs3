@@ -115,6 +115,12 @@ namespace mtl
 		// cached on the root and released with it.
 		texture* get_view(const rsx::texture_channel_remap_t& remap);
 
+		// The stencil read of a redirected depth unit (REALISATION.md, "The
+		// depth/stencil-as-texture cluster").  Only a depth surface has a castable
+		// stencil view, so the base returns null and a sampled view delegates to
+		// its root, which is the surface.
+		virtual texture* stencil_view();
+
 	private:
 		texture* m_image = nullptr;
 		std::unordered_map<u32, std::unique_ptr<texture>> m_views;

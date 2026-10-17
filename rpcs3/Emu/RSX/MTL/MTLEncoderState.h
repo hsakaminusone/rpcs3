@@ -33,6 +33,11 @@ namespace mtl
 		f32 depth_bias = 0.0f;
 		f32 depth_slope_scale = 0.0f;
 
+		// NV4097_SET_DEPTH_BOUNDS (MTLDepthStencil.h).  Dynamic encoder state, like
+		// the clip mode.
+		f32 depth_bounds_min = 0.0f;
+		f32 depth_bounds_max = 1.0f;
+
 		u8 stencil_front = 0;
 		u8 stencil_back = 0;
 
@@ -59,8 +64,9 @@ namespace mtl
 
 	// Capture the per-draw encoder state from the live registers.  It composes the
 	// latches in MTLRasterState, MTLDepthStencil and MTLBlendState; it does not
-	// re-read the register file.
-	encoder_state capture_encoder_state();
+	// re-read the register file.  `emulate_depth_range` is the draw's
+	// RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE, which only the caller holds.
+	encoder_state capture_encoder_state(bool emulate_depth_range);
 
 	// Apply the state to the open encoder.  The scissor is the caller's: it comes
 	// from rsx::thread::get_scissor, which owns the viewport-rect intersection, the

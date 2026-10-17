@@ -9,7 +9,6 @@
 
 #include "util/logs.hpp"
 
-#include <cstring>
 #include <string>
 
 namespace mtl
@@ -69,13 +68,6 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 }
 )";
 
-		// One fill value set: the colour and the depth, in the buffer the shader reads.
-		struct fill_values
-		{
-			f32 color[4];
-			f32 depth;
-		};
-
 		std::string build_fill_source()
 		{
 			std::string source = fill_msl;
@@ -117,17 +109,6 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 			return;
 		}
 
-		// The fill values are written on the CPU and read by the GPU, so the buffer
-		// is shared and stays resident for the recorder's lifetime (HLD-02 §2.6).
-		m_values = m_resources->new_buffer(sizeof(fill_values), MTL::StorageModeShared);
-		if (!m_values)
-		{
-			rsx_log.error("Metal: fill value buffer allocation failed");
-			return;
-		}
-
-		m_resources->make_persistent(m_values);
-
 		// Two immutable objects: a fill that writes depth and one that does not.  The
 		// depth test always passes, because a clear must not be rejected by the depth
 		// state it is clearing (CONFLICTS.md C2).
@@ -163,12 +144,6 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		{
 			m_depth_read->release();
 			m_depth_read = nullptr;
-		}
-
-		if (m_values)
-		{
-			m_resources->defer_release(m_values);
-			m_values = nullptr;
 		}
 
 		if (m_library)
@@ -239,17 +214,12 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		return state;
 	}
 
-	void fill_pass::fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::PixelFormat color_format, u8 sample_count, const std::array<f32, 4>& color, f32 depth, bool write_color, bool write_depth)
+	void fill_pass::fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, bool write_color, bool write_depth)
 	{
-		if (!table || !encoder || !m_library || !m_values)
+		if (!table || !encoder || !m_library || !values)
 		{
 			return;
 		}
-
-		fill_values values;
-		std::memcpy(values.color, color.data(), sizeof(values.color));
-		values.depth = depth;
-		std::memcpy(m_values->contents(), &values, sizeof(values));
 
 		const variant kind = write_color ? (write_depth ? variant::color_depth : variant::color) : variant::depth;
 		MTL::RenderPipelineState* state = pipeline(color_format, kind, sample_count);
@@ -260,7 +230,7 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 
 		// The values reach the fragment stage through the argument table: Metal 4 has
 		// no setBytes (MTLArgumentBinds.h).
-		table->setAddress(m_values->gpuAddress(), fill_values_slot);
+		table->setAddress(values, fill_values_slot);
 
 		encoder->setRenderPipelineState(state);
 		encoder->setArgumentTable(table, MTL::RenderStageFragment);
