@@ -202,6 +202,11 @@ namespace mtl
 
 	void surface_cache_traits::write_render_target_to_memory(command_list_type cmd, buffer_object_type bo, surface_type surface, u32 dst_offset, u32 src_offset, u32 write_length)
 	{
+		// The read makes the contents valid first: a pending resolve or an
+		// uninitialised background would otherwise be copied out stale
+		// (VKRenderTargets.h:643).
+		surface->read_barrier(cmd);
+
 		// The buffer object is a range of the guest window, so the guest address is
 		// the offset into it (HLD-02 §3.5).
 		surface->write_to_memory(cmd, bo->value(), bo->base_address + dst_offset, src_offset, write_length);

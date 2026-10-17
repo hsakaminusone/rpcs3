@@ -30,26 +30,6 @@ namespace mtl
 	{
 		return vertex_textures_slot + index;
 	}
-
-	// The vertex cluster state that the shader and PSO key need and that no shared
-	// helper holds (LLD-vertex §2.3, §3.2, §3.7, §3.8).  The streams, the transform
-	// constants and the VTF registers stay in rsx::method_registers and in
-	// rsx::draw_command_processor; this latch holds only the key inputs.
-	struct vertex_state
-	{
-		u16 input_mask = 0;
-		u32 output_mask = 0;
-		u32 program_start = 0;
-		u32 branch_bits = 0;
-		bool srgb_output = false;
-	};
-
-	vertex_state capture_vertex_state();
-
-	// Invariant 1 (LLD-vertex §5): a stream or a register value supplies each live
-	// attribute.  An attribute with neither is unwritten (RSXDrawCommands.cpp:106-116).
-	// Check it only for the attributes the input mask selects.
-	bool attribute_sourced(u32 index);
 }
 
 #endif // RSX_ENABLE_METAL4

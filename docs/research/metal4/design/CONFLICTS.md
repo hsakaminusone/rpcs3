@@ -267,6 +267,19 @@ is a *smaller* PSO key and a higher cache hit rate than the doc implies.  The
 `MTL4RenderCommandEncoder` setters.  Only the HLD-05 stage assignment is wrong,
 and it is left unchanged for its author to correct.
 
+**One further correction, found while wiring the clear.**  The depth test and the
+depth write are **not** individual encoder fields.  `MTL4RenderCommandEncoder`
+declares `setDepthStencilState(const MTL::DepthStencilState*)` (`:98`) and no
+`setDepthCompareFunction` and no `setDepthWriteEnabled`; the compare function and
+the write flag are fields of `MTL::DepthStencilDescriptor`, consumed when the
+immutable `MTL::DepthStencilState` is built.  So the `depth-rop` latch
+(`MTLDepthStencil.h`) is the key of a cached object, and that object is the only
+way the depth state reaches the encoder.  `create_depth_stencil_state`
+(`MTLDepthStencil.cpp:154`) builds it; the *cache* and the `setDepthStencilState`
+call are part of the draw path, so a backend that builds the object without
+applying it has no depth test at all.  The built-in fill applies its own two
+objects directly, because it must not be rejected by the state it is clearing.
+
 ---
 
 ## X3 — SPIRV-Cross is assumed but not vendored
@@ -289,6 +302,189 @@ post-passes (`:91-100`) stand. This is a prerequisite rather than a contradictio
 and it is recorded because it gates the whole shader layer and because the doc's
 wording invites the reader to assume the tool is already present. Vendoring
 SPIRV-Cross as plain files, on the model `06` uses for metal-cpp, is the open
-action.
+action. **Closed:** SPIRV-Cross is vendored at
+`300681bbcb8365a8d1eacdacdbdd0249bbf1d6b1` (Apache-2.0), as plain files under
+`3rdparty/spirv-cross`, with its provenance in
+`3rdparty/spirv-cross/RPCS3_VENDORING.md`.
+
+## X4 — the shader object names in `HLD-05` §3.4-§3.6
+
+**Design doc says.** `HLD-05-shader-binding-contract.md` §3.4 names
+`MTL4::Library` and `MTL4::RenderPipelineState` as the objects the shader layer
+produces; §3.5-§3.6 name a `build_program` entry point and an `ExtraData` block;
+and `pipeline_binding_table.h` is named as the binding table the backend fills.
+
+**The tree says.** `MTL4::Compiler::newLibrary` and
+`MTL4::Compiler::newRenderPipelineState` return `MTL::Library*` and
+`MTL::RenderPipelineState*` (metal-cpp `Metal/MTL4Compiler.hpp`), because Metal 4
+compiles the Metal 3 objects and then consumes them. The pipeline entry point in
+`MTLProgramPipeline` is `build_pipeline`, and there is no `ExtraData` block. The
+pipeline key is the generic `program_state_cache` `pipeline_properties`
+(`ProgramStateCache.h:165,174-179`). `pipeline_binding_table.h` is not used:
+`VKPipelineCompiler` fills the table at run time (`prepareBindingTable()`), and
+the Metal argument table is fixed and baked into the MSL at compile time.
+
+**Resolution.** No design decision changes. The doc names the API by its intent
+and the tree names it by what metal-cpp returns; the two are the same object. The
+Metal path declares its argument indices at compile time, which is why the
+binding table is inert for this backend and why the PSO key stays small.
+
+## X5 — the argument-table snapshot point
+
+**Design doc says.** `HLD-01-architecture.md:252-257`: "One long-lived
+`MTL4::ArgumentTable` ... The encoder snapshots the table at draw time, so it is
+safe to mutate between draws". `HLD-04-command-encoding.md:134` gives
+`m_tables[stage]` the lifetime "frame ring", and `:153` lists "argument tables"
+among the `mtl::frame_ring` contents.
+
+**The tree says.** Metal 4 takes the snapshot when the encoder **binds** the
+table, not when it draws. `MTL4::RenderCommandEncoder` exposes
+`setArgumentTable` as the only binding entry point
+(`MTL4RenderCommandEncoder.hpp:84`, implementation `:207-210`), and the draw
+calls take no table operand, so a mutation that is not followed by a
+`setArgumentTable` before the draw is never seen. The order is mutate →
+`setArgumentTable` → draw, not mutate-between-draws on one binding. The
+implementation already holds that order: `argument_binder::bind` writes only the
+slots that differ and reports whether it wrote any (`MTLArgumentBinds.h:125-131`),
+and the draw re-binds a stage's table only when it did (`MTLGSRender.cpp:1010-1020`).
+
+**Resolution.** No design decision changes. The table stays one per stage per
+frame slot (`frame_slot::vertex_table`/`fragment_table`,
+`MTLCommandRecorder.h:23-24`), which is `HLD-04`'s `m_tables[stage]`; there is no
+argument-table ring, because the binder's diff means an unchanged table need not
+be re-bound at all. The citation is corrected: the snapshot is at bind time, so
+the "safe to mutate between draws" guarantee holds only for the (mutate, re-bind)
+pairs the binder already emits.
+
+## C8 — the packed colour texture formats
+
+**Design doc says.** `HLD-02-resource-model.md:316-339` keeps a native or
+swizzled enum for most packed colour formats: `A1R5G5B5` → `BGR5A1Unorm`
+(emul, `:316`), `A4R4G4B4` → `ABGR4Unorm` + swizzle (emul, `:317`),
+`R6G5B5` → `B5G6R5Unorm` (direct, `:326`), `R5G5B5A1` → `B5G5R5A1Unorm`
+(direct, `:333`). Only `R5G6B5` carries the escape to `BGRA8Unorm`
+("RPCS3 X64-Apple path avoids it", `:318`) and the two `COMPRESSED_B8R8_*`
+substitutes (`:324-325`).
+
+**The tree says.** Every packed colour format maps to `BGRA8Unorm`
+(`MTLFormats.cpp:95-103` for `R5G6B5`, `A1R5G5B5`, `A4R4G4B4`, `R5G5B5A1`,
+`D1R5G5B5`, `R6G5B5`). The uploader the format table must agree with expands
+every packed colour format to BGRA8 on an Apple arm64 host
+(`TextureUtils.cpp:950-1015`), so the bytes in the image are BGRA8 whatever
+the guest format was, and a native 16-bit enum would make the image and its
+content disagree.
+
+**Resolution.** The implementation stands: the pixel format follows the bytes
+the uploader writes, which is the only rule that keeps a sampled image
+self-consistent. `HLD-02` §2.3's table records the *ideal* enum per guest
+format and its `verdict` column; for the six packed colour rows on this host
+the verdict is `sub` in practice. No doc edit is made here. The swizzle the
+`emul` rows name is not applied, because the expansion already produced the
+A-R-G-B order the shader reads.
+
+## X6 — `barrier_spec` field names and `emit_barrier` arity
+
+**Design doc says.** `HLD-03-synchronization-model.md:355` gives
+`mtl::barrier_spec` the fields `producer_stages`, `consumer_stages`,
+`MTL4VisibilityOptions`; `:373` gives the chokepoint the four-argument form
+`emit_barrier(encoder, producer_stages, consumer_stages, visibility)`.
+
+**The tree says.** `barrier_spec` carries `producer`, `consumer`,
+`visibility` and `cross_pass` (`MTLBarrier.h:16-24`), and `emit_barrier`
+takes the spec by reference (`MTLBarrier.h:35`). The fourth field has no
+design-doc counterpart: `cross_pass` selects the queue-scope form, which
+`HLD-03` §3.2 describes as a property of the *edge*, not of the spec.
+
+**Resolution.** Implementation stands; the field rename is cosmetic and the
+fourth field is the one bit `emit_barrier` needs to choose between
+`barrierAfterEncoderStages` and `barrierAfterQueueStages` without a second
+call site (`MTLBarrier.cpp`). No doc edit is made.
+
+## X7 — one stage mask per access class
+
+**Design doc says.** `HLD-03-synchronization-model.md:249-256` gives the
+`rsx::surface_access` table two columns, a producer mask and a consumer mask,
+one row per access class.
+
+**The tree says.** `mtl::access_stages(access, vertex_stage)`
+(`MTLPassScheduler.cpp:7-27`) returns one mask per access class, and the
+caller places it on the producer side for a write class and on the consumer
+side for a read class. The rows are otherwise the doc's: `shader_*` →
+`StageFragment`/`StageVertex`, `transfer_*` → `StageBlit | StageDispatch`,
+`memory_*` → `StageAll`, `gpu_reference` → 0.
+
+**Resolution.** Equivalent behaviour, one argument fewer. A read class has an
+empty producer column and a write class an empty consumer column in the doc's
+own table, so the class name already carries the side. No doc edit is made.
+
+## X8 — `z16_float` is absent from the surface-format table
+
+**Design doc says.** `HLD-02-resource-model.md:371-373` covers the surface
+depth formats with `Z16` → `Depth16Unorm` and `Z24S8` →
+`Depth32Float_Stencil8`, and does not name the `z16_float` variant.
+
+**The tree says.** `z16_uint` → `Depth16Unorm`, `z16_float` →
+`Depth32Float` (`MTLFormats.cpp:71-76`), the same choice Vulkan and OpenGL
+make (`VKFormats.cpp:15-16`, `GLRenderTargets.cpp:78-79`), because a unorm
+target cannot hold the float range.
+
+**Resolution.** Implementation stands; the doc omission is recorded here
+rather than patched into the doc. Recorded because a reader of the table
+alone would conclude `z16_float` is unsupported.
+
+## X9 — two Metal/Vulkan state-map divergences
+
+The mapping tests (`tests/test_rsx_metal4_mapping.cpp`) pin the RSX → Metal
+tables against the RSX source. Two entries differ from the Vulkan backend, and
+in both the tree follows the RSX source.
+
+- **Convolution minify filter.** `get_mip_filter(convolution_min)` returns
+  `SamplerMipFilterLinear` (`MTLSamplerState.cpp:83-85`), which the RSX comment
+  calls "looks close to linear_linear" (`gcm_enums.h:1532`). Vulkan reads the
+  same filter as no mipmaps (`VKFormats.cpp:44`).
+- **`A4R4G4B4` component order.** `get_texture_component_layout(A4R4G4B4)`
+  returns `{A,R,G,B}` (`MTLFormats.cpp:152`), as OpenGL does
+  (`GLTexture.cpp:223`); Vulkan returns a different order
+  (`VKFormats.cpp:146-147`).
+
+**Resolution.** RSX behaviour is the source of truth and the tree matches it in
+both cases, so nothing changes. Recorded because a reader comparing the Metal
+and Vulkan tables would otherwise read each difference as a bug.
+
+## X10 — the depth resolve follows the macOS 27 measurement, not KosmicKrisp
+
+**The reference says.** KosmicKrisp forces a meta resolve for depth and stencil:
+`src/kosmickrisp/vulkan/kk_cmd_buffer.c:1000-1005` bails out to the meta path for
+a non-colour resolve, with the comment "There appears to be a synchronization bug
+in Metal. Force meta resolves for depth and stencil for now." The bail-out arrived
+with the render-pass resolve itself, in `db5ab8de` (2026-07-23), and has not
+changed since. The workarounds page
+(`docs.mesa3d.org/drivers/kosmickrisp/workarounds.html`) does not list it and there
+is no Metal ticket for it, so it is a design decision rather than a tracked bug.
+
+**The tree says.** `surface::resolve` (`MTLSurface.cpp`) performs the depth
+resolve, and for a combined format the stencil resolve, in a render pass: both
+attachments `LoadActionLoad` + `StoreActionStoreAndMultisampleResolve` with the
+1-sample image as the target, and the pass emits a producer barrier
+(`emit_producer_barrier`, `MTLBarrier.cpp:34`) before later queue work. The
+measurement on the floor device (Apple A18 Pro, macOS 27.0.1, MTL4, 48 rounds per
+row):
+
+| case | no barrier | consumer `barrierAfterQueueStages` | producer `barrierAfterStages` |
+|---|---|---|---|
+| clear-only depth resolve → blit | 4/48 | 46/48 | **48/48** |
+| clear-only depth resolve → fragment | 46/48 | 46/48 | **48/48** |
+| draw-written depth resolve → blit | 3/48 | 45/48 | **48/48** |
+| draw-written depth resolve → fragment | 46/48 | 46/48 | **48/48** |
+| resolve and read in separate command buffers | 46/48 | 43/48 | **48/48** |
+| combined `Depth32Float_Stencil8`, depth and stencil resolve | 30/32 | — | **32/32** |
+| stencil resolve alone | **48/48** | 48/48 | 48/48 |
+
+**Resolution.** The backend floor is macOS 27, so a macOS 26 restriction does not
+bind it. The tree takes the producer-barrier form, which is 576 of 576 across the
+twelve measured configurations; the consumer form leaves a stale window of about
+five percent and no barrier is worse. A stencil resolve needs no barrier.
+Recorded because the reference implementation disagrees, so a reader would
+otherwise read the tree's resolve as the unsafe choice.
 
 <!-- doc-end -->

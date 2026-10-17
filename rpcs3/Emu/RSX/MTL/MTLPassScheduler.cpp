@@ -26,133 +26,99 @@ namespace mtl
 		return static_cast<MTL::Stages>(0);
 	}
 
-	void pass_scheduler::begin_pass()
+	void pass_scheduler::begin_frame()
 	{
-		m_writers.clear();
-		m_readers.clear();
+		m_records.clear();
 		m_pending.clear();
+		m_carried.clear();
+		m_pass = 0;
 		m_split = false;
 	}
 
-	bool pass_scheduler::note_write(MTL::ResourceID resource, MTL::Stages stages)
+	void pass_scheduler::begin_pass()
 	{
-		// WAR: an earlier read must complete before this write.  If the read cannot
-		// be ordered from inside the encoder, the pass must split instead.
-		for (const touch& reader : m_readers)
-		{
-			if (reader.resource._impl == resource._impl)
-			{
-				if (stages_legal_intra_pass(reader.stages))
-				{
-					m_pending.push_back(barrier_spec{ reader.stages, stages, MTL4::VisibilityOptionNone });
-				}
-				else
-				{
-					m_split = true;
-				}
-
-				break;
-			}
-		}
-
-		// Record the write, replacing an earlier writer of the same resource so each
-		// resource keeps one current stage set.
-		bool recorded = false;
-
-		for (touch& writer : m_writers)
-		{
-			if (writer.resource._impl == resource._impl)
-			{
-				writer.stages = stages;
-				recorded = true;
-				break;
-			}
-		}
-
-		if (!recorded)
-		{
-			m_writers.push_back(touch{ resource, stages });
-		}
-
-		if (m_writers.size() + m_readers.size() >= max_tracked_touches)
-		{
-			m_split = true;
-		}
-
-		return !m_split;
+		// The per-pass edges and the split request belong to the pass.  The record
+		// stays, and so does a carried edge: the caller emits it on the encoder this
+		// pass opens.
+		m_pending.clear();
+		m_pass++;
+		m_split = false;
 	}
 
-	bool pass_scheduler::note_read(MTL::ResourceID resource, MTL::Stages stages)
+	void pass_scheduler::note_read(MTL::ResourceID resource, MTL::Stages stages)
 	{
-		// RAW: an earlier write must complete before this read.  A resource that is
-		// both an attachment and a sampled texture is exactly this case, so the TBDR
-		// feedback rule needs no separate branch.  If the write cannot be ordered
-		// from inside the encoder, the pass must split instead.
-		for (const touch& writer : m_writers)
-		{
-			if (writer.resource._impl == resource._impl)
-			{
-				if (stages_legal_intra_pass(writer.stages))
-				{
-					m_pending.push_back(barrier_spec{ writer.stages, stages, MTL4::VisibilityOptionNone });
-				}
-				else
-				{
-					m_split = true;
-				}
+		// RAW: a completed write must reach this read.  A writer in an earlier encoder
+		// takes the queue form.  A writer in the open pass is the TBDR feedback case,
+		// which one encoder cannot order, so the edge carries to the encoder that
+		// follows this one (HLD-03 §2.4, §2.1 item 5).
+		record& entry = m_records[resource._impl];
 
-				break;
-			}
+		if (entry.write_stages)
+		{
+			m_pending.push_back(barrier_spec{ entry.write_stages, stages, MTL4::VisibilityOptionDevice, entry.write_pass != m_pass });
+			entry.write_stages = 0;
 		}
 
-		// Record the read, replacing an earlier reader of the same resource so each
-		// resource keeps one current stage set.
-		bool recorded = false;
-
-		for (touch& reader : m_readers)
-		{
-			if (reader.resource._impl == resource._impl)
-			{
-				reader.stages = stages;
-				recorded = true;
-				break;
-			}
-		}
-
-		if (!recorded)
-		{
-			m_readers.push_back(touch{ resource, stages });
-		}
-
-		if (m_writers.size() + m_readers.size() >= max_tracked_touches)
-		{
-			m_split = true;
-		}
-
-		return !m_split;
+		entry.read_stages = stages;
+		entry.read_pass = m_pass;
 	}
 
-	void pass_scheduler::note_edge(const barrier_spec& spec)
+	void pass_scheduler::note_write(MTL::ResourceID resource, MTL::Stages stages)
 	{
-		m_pending.push_back(spec);
+		// WAR: a completed read must reach this write.
+		record& entry = m_records[resource._impl];
+
+		if (entry.read_stages)
+		{
+			m_pending.push_back(barrier_spec{ entry.read_stages, stages, MTL4::VisibilityOptionDevice, entry.read_pass != m_pass });
+			entry.read_stages = 0;
+		}
+
+		entry.write_stages = stages;
+		entry.write_pass = m_pass;
 	}
 
 	void pass_scheduler::flush(MTL4::CommandEncoder* encoder)
 	{
 		if (!encoder)
 		{
+			m_pending.clear();
 			return;
 		}
 
 		for (const barrier_spec& spec : m_pending)
 		{
-			if (!emit_barrier(encoder, spec))
+			if (emit_barrier(encoder, spec))
 			{
-				m_split = true;
+				continue;
 			}
+
+			// The producer is a fragment or tile stage of this encoder, so the edge
+			// cannot be ordered inside it.  The pass splits: the next encoder emits
+			// it with the queue form, once this encoder's tile has flushed.
+			m_split = true;
+			m_carried.push_back(spec);
 		}
 
 		m_pending.clear();
+	}
+
+	bool pass_scheduler::emit_split_barriers(MTL4::CommandEncoder* encoder)
+	{
+		if (!encoder || m_carried.empty())
+		{
+			return false;
+		}
+
+		for (barrier_spec spec : m_carried)
+		{
+			spec.cross_pass = true;
+			emit_barrier(encoder, spec);
+		}
+
+		m_carried.clear();
+		m_split = false;
+		return true;
 	}
 }
 

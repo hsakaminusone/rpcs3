@@ -16,6 +16,10 @@ namespace rsx
 
 namespace mtl
 {
+	// The drawable ring bounds the frame slots (HLD-03 §4.9; HLD-04 §3.2).  The
+	// recorder, the resource residency and the per-draw ABI rings all size to it.
+	constexpr u32 frame_slot_count = 3;
+
 	struct features
 	{
 		bool metal4_family = false; // GPUFamilyMetal4 probe result

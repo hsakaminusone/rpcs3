@@ -13,34 +13,6 @@ namespace mtl
 
 	namespace
 	{
-		// A zero MTL::GPUAddress / MTL::ResourceID means "not bound this draw".  There
-		// is no unbind operation, so a zero is never written: a stale valid binding is
-		// safe because the shader only declares the units its program uses, whereas an
-		// invalid zero binding is not.  MTL::ResourceID has no operator==, so compare
-		// its _impl.
-		void set_address(MTL4::ArgumentTable* table, MTL::GPUAddress value, NS::UInteger index)
-		{
-			if (value != 0)
-			{
-				table->setAddress(value, index);
-			}
-		}
-
-		void set_texture(MTL4::ArgumentTable* table, MTL::ResourceID value, NS::UInteger index)
-		{
-			if (value._impl != 0)
-			{
-				table->setTexture(value, index);
-			}
-		}
-
-		void set_sampler(MTL4::ArgumentTable* table, MTL::ResourceID value, NS::UInteger index)
-		{
-			if (value._impl != 0)
-			{
-				table->setSamplerState(value, index);
-			}
-		}
 	}
 
 	void argument_binder::reset()
@@ -51,11 +23,11 @@ namespace mtl
 		m_has_bound[1] = false;
 	}
 
-	void argument_binder::bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds)
+	bool argument_binder::bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds)
 	{
 		if (table == nullptr)
 		{
-			return;
+			return false;
 		}
 
 		const u32 stage = vertex_stage ? 0u : 1u;
@@ -63,34 +35,47 @@ namespace mtl
 		// The first bind for a stage has nothing to compare against, so every
 		// non-zero slot is written; afterwards only a changed value is written.
 		const bool first_bind = !m_has_bound[stage];
+		bool changed = false;
 
 		// A slot is written when it is bound and either the stage has never been
-		// bound or the value changed.  set_* drops the unbound (zero) case.
+		// bound or the value changed.  A zero value is never written, so it does
+		// not count as a change.
 		const auto address = [&](MTL::GPUAddress value, MTL::GPUAddress old, NS::UInteger index)
 		{
-			if (first_bind || value != old)
+			if (value != 0 && (first_bind || value != old))
 			{
-				set_address(table, value, index);
+				table->setAddress(value, index);
+				changed = true;
 			}
 		};
 
 		const auto stream = [&](MTL::ResourceID value, MTL::ResourceID old, NS::UInteger index)
 		{
-			if (first_bind || value._impl != old._impl)
+			if (value._impl != 0 && (first_bind || value._impl != old._impl))
 			{
-				set_texture(table, value, index);
+				table->setTexture(value, index);
+				changed = true;
 			}
 		};
 
-		const auto unit = [&](const texture_bind& value, const texture_bind& old, NS::UInteger index)
+		// A unit's image and its state are two entries, and they take different
+		// indices: MSL caps the sampler index at 15 while the RSX ABI puts every unit
+		// at 12 or above, so the state takes the unit's position inside the stage's
+		// texture range (MTLArgumentBinds.h, texture_sampler_index).  A depth-as-
+		// texture entry takes one index and no sampler at all (slot_has_sampler),
+		// because its MSL form reads the image directly.  The rule lives in the
+		// header so the writer and the table shape cannot disagree.
+		const auto unit = [&](const texture_bind& value, const texture_bind& old, NS::UInteger texture_slot)
 		{
-			if (first_bind || value.texture._impl != old.texture._impl)
+			if (value.texture._impl != 0 && (first_bind || value.texture._impl != old.texture._impl))
 			{
-				set_texture(table, value.texture, index);
+				table->setTexture(value.texture, texture_slot);
+				changed = true;
 			}
-			if (first_bind || value.sampler._impl != old.sampler._impl)
+			if (slot_has_sampler(texture_slot) && value.sampler._impl != 0 && (first_bind || value.sampler._impl != old.sampler._impl))
 			{
-				set_sampler(table, value.sampler, index);
+				table->setSamplerState(value.sampler, texture_sampler_index(texture_slot));
+				changed = true;
 			}
 		};
 
@@ -123,10 +108,25 @@ namespace mtl
 			{
 				unit(binds.fragment_textures[index], previous.fragment_textures[index], texture_slot_base + index);
 			}
+
+			// The depth-as-texture inputs take one index each and carry no sampler:
+			// their MSL form is a separate texture read with read() (REVIEW-FINDINGS.md
+			// A9; MTLFragmentProgram.cpp declares them and reads them that way), so the
+			// writer binds the image only.
+			for (u32 index = 0; index < fragment_texture_count; ++index)
+			{
+				unit(binds.fragment_stencil[index], previous.fragment_stencil[index], fragment_stencil_slot_base + index);
+			}
+
+			unit(binds.fragment_depth_input, previous.fragment_depth_input, fragment_depth_input_slot);
 		}
 
 		m_bound[stage] = binds;
 		m_has_bound[stage] = true;
+
+		// The caller re-binds the table only when a slot was written, because
+		// Metal 4 snapshots the table at the encoder bind (REALISATION.md).
+		return changed;
 	}
 }
 

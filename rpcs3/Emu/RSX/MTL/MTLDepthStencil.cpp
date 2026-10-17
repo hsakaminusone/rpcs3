@@ -3,22 +3,26 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/rsx_methods.h"
+#include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
+#include "util/fnv_hash.hpp"
 #include "util/logs.hpp"
+
+#include <algorithm>
 
 namespace mtl
 {
-	MTL::CompareFunction get_compare_function(rsx::comparison_function op)
+	MTL::CompareFunction get_compare_function(rsx::comparison_function op, bool reverse)
 	{
 		switch (op)
 		{
 		case rsx::comparison_function::never: return MTL::CompareFunctionNever;
-		case rsx::comparison_function::less: return MTL::CompareFunctionLess;
+		case rsx::comparison_function::less: return reverse ? MTL::CompareFunctionGreater : MTL::CompareFunctionLess;
 		case rsx::comparison_function::equal: return MTL::CompareFunctionEqual;
-		case rsx::comparison_function::less_or_equal: return MTL::CompareFunctionLessEqual;
-		case rsx::comparison_function::greater: return MTL::CompareFunctionGreater;
+		case rsx::comparison_function::less_or_equal: return reverse ? MTL::CompareFunctionGreaterEqual : MTL::CompareFunctionLessEqual;
+		case rsx::comparison_function::greater: return reverse ? MTL::CompareFunctionLess : MTL::CompareFunctionGreater;
 		case rsx::comparison_function::not_equal: return MTL::CompareFunctionNotEqual;
-		case rsx::comparison_function::greater_or_equal: return MTL::CompareFunctionGreaterEqual;
+		case rsx::comparison_function::greater_or_equal: return reverse ? MTL::CompareFunctionLessEqual : MTL::CompareFunctionGreaterEqual;
 		case rsx::comparison_function::always: return MTL::CompareFunctionAlways;
 		default:
 			rsx_log.error("Metal 4: unknown compare function 0x%x", static_cast<u32>(op));
@@ -89,7 +93,39 @@ namespace mtl
 
 	stencil_references capture_stencil_references()
 	{
-		return { rsx::method_registers.stencil_func_ref(), rsx::method_registers.back_stencil_func_ref() };
+		// A single-sided RSX draw applies the front reference to both faces
+		// (GLDraw.cpp:148-156; VKGSRender.cpp:351-355).
+		const u8 front = rsx::method_registers.stencil_func_ref();
+		const u8 back = rsx::method_registers.two_sided_stencil_test_enabled()
+			? rsx::method_registers.back_stencil_func_ref()
+			: front;
+
+		return { front, back };
+	}
+
+	depth_bounds capture_depth_bounds(bool emulate_depth_range)
+	{
+		if (!rsx::method_registers.depth_bounds_test_enabled())
+		{
+			// The disabled bounds are an open range, which on Metal is [0,1]: the VK
+			// form (`VKDraw.cpp:251-256`) collapses into the clamp below.
+			return {};
+		}
+
+		const auto format = rsx::method_registers.surface_depth_fmt();
+		depth_bounds state;
+		state.min = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_min());
+		state.max = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_max());
+
+		if (emulate_depth_range)
+		{
+			state.min = rsx::encode_emulated_depth(state.min);
+			state.max = rsx::encode_emulated_depth(state.max);
+		}
+
+		state.min = std::clamp(state.min, 0.0f, 1.0f);
+		state.max = std::clamp(state.max, 0.0f, 1.0f);
+		return state;
 	}
 
 	anti_aliasing_state capture_anti_aliasing_state()
@@ -170,6 +206,82 @@ namespace mtl
 		back->release();
 		front->release();
 		return result;
+	}
+
+	bool operator==(const stencil_face& a, const stencil_face& b)
+	{
+		return a.compare == b.compare
+			&& a.fail == b.fail
+			&& a.zfail == b.zfail
+			&& a.zpass == b.zpass
+			&& a.read_mask == b.read_mask
+			&& a.write_mask == b.write_mask;
+	}
+
+	bool operator==(const depth_stencil_state& a, const depth_stencil_state& b)
+	{
+		return a.depth_compare == b.depth_compare
+			&& a.depth_write == b.depth_write
+			&& a.front == b.front
+			&& a.back == b.back;
+	}
+
+	u64 hash_depth_stencil_state(const depth_stencil_state& state)
+	{
+		// The comparison and stencil-op enums are 16-bit GL constants, so each
+		// field is hashed at its own width.  A packed bit field cannot hold them:
+		// three bits per operation overlapped the mask fields, and `keep` and
+		// `zero` share their low three bits, so distinct states collapsed.
+		auto hash_face = [](usz hash, const stencil_face& face)
+		{
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.compare));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.fail));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.zfail));
+			hash = rpcs3::hash64(hash, static_cast<u16>(face.zpass));
+			hash = rpcs3::hash64(hash, face.read_mask);
+			return rpcs3::hash64(hash, face.write_mask);
+		};
+
+		usz hash = rpcs3::hash64(rpcs3::fnv_seed, static_cast<u16>(state.depth_compare));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_write));
+		hash = hash_face(hash, state.front);
+		return hash_face(hash, state.back);
+	}
+
+	void depth_stencil_cache::shutdown()
+	{
+		for (const auto& [key, object] : m_cache)
+		{
+			object->release();
+		}
+
+		m_cache.clear();
+		m_device = nullptr;
+	}
+
+	MTL::DepthStencilState* depth_stencil_cache::get(const depth_stencil_state& state)
+	{
+		const auto found = m_cache.find(state);
+		if (found != m_cache.end())
+		{
+			return found->second;
+		}
+
+		MTL::DepthStencilState* object = create_depth_stencil_state(m_device, state);
+		if (object)
+		{
+			m_cache.emplace(state, object);
+		}
+
+		return object;
+	}
+
+	void apply_depth_stencil_state(MTL4::RenderCommandEncoder* encoder, depth_stencil_cache& cache, const depth_stencil_state& state)
+	{
+		if (MTL::DepthStencilState* object = cache.get(state))
+		{
+			encoder->setDepthStencilState(object);
+		}
 	}
 }
 

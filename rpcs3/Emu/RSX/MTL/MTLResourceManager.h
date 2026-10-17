@@ -85,6 +85,11 @@ namespace mtl
 		// is the offset into it, so a load needs no staging copy.
 		MTL::Buffer* guest_buffer() const { return m_guest; }
 
+		// Metal's sample-count support is per device: Apple's table lists 4 as
+		// universal and 2 as "some devices", so a host request the device rejects
+		// folds up to 4 and keeps the antialiasing.
+		u8 supported_sample_count(u8 count) const;
+
 		void make_persistent(MTL::Allocation* allocation);
 		void on_frame_begin(u32 index);
 		void commit_frame();
@@ -92,9 +97,9 @@ namespace mtl
 
 		// Deferred release (HLD-02 I7).  A Metal 4 command buffer holds no strong
 		// reference, so an object must survive until every frame that can reference it
-		// completes.  A release is queued on the frame slot that asks for it, and it
-		// runs when the frame after the next one completes, because the frames that
-		// follow it on the queue may still reference the object.
+		// completes.  A release is queued on the frame slot that asks for it and runs
+		// when that slot's frame completes, which is the first moment nothing on the
+		// queue can still reference it.
 		void defer_release(MTL::Allocation* allocation);
 		void garbage_collect();
 

@@ -33,6 +33,11 @@ namespace mtl
 		f32 depth_bias = 0.0f;
 		f32 depth_slope_scale = 0.0f;
 
+		// NV4097_SET_DEPTH_BOUNDS (MTLDepthStencil.h).  Dynamic encoder state, like
+		// the clip mode.
+		f32 depth_bounds_min = 0.0f;
+		f32 depth_bounds_max = 1.0f;
+
 		u8 stencil_front = 0;
 		u8 stencil_back = 0;
 
@@ -49,17 +54,24 @@ namespace mtl
 		// (LLD-raster §3.1, invariant 1).
 		u16 clip_width = 0;
 		u16 clip_height = 0;
+
+		// The depth-stencil latch.  Metal 4 reaches depth state only through
+		// setDepthStencilState, so the latch is the key of a cached object and the
+		// cache, not the encoder, owns the compare function and the write flag
+		// (CONFLICTS.md C7).
+		depth_stencil_state depth_stencil{};
 	};
 
 	// Capture the per-draw encoder state from the live registers.  It composes the
 	// latches in MTLRasterState, MTLDepthStencil and MTLBlendState; it does not
-	// re-read the register file.
-	encoder_state capture_encoder_state();
+	// re-read the register file.  `emulate_depth_range` is the draw's
+	// RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE, which only the caller holds.
+	encoder_state capture_encoder_state(bool emulate_depth_range);
 
 	// Apply the state to the open encoder.  The scissor is the caller's: it comes
 	// from rsx::thread::get_scissor, which owns the viewport-rect intersection, the
 	// window clamp and the invalid case (MTLRasterState.h).
-	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor);
+	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor, depth_stencil_cache& depth_cache);
 }
 
 #endif // RSX_ENABLE_METAL4

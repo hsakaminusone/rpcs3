@@ -5,6 +5,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "MTLArgumentBinds.h"
+
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -12,15 +14,6 @@
 
 namespace mtl
 {
-	// The drawable ring bounds the frame slots (HLD-03 §4.9; HLD-04 §3.2).
-	constexpr u32 frame_slot_count = 3;
-
-	// The argument-table shape (HLD-04 §3.3, HLD-05 §3.2).  The RSX slot map is one
-	// index space per stage.
-	constexpr u32 argument_buffer_count = 16;
-	constexpr u32 argument_texture_count = 28;
-	constexpr u32 argument_sampler_count = 28;
-
 	// One frame slot: one allocator, one reusable command buffer, and one argument
 	// table per stage (HLD-04 §3.1).
 	struct frame_slot
@@ -29,6 +22,8 @@ namespace mtl
 		MTL4::CommandBuffer* command_buffer = nullptr;
 		MTL4::ArgumentTable* vertex_table = nullptr;
 		MTL4::ArgumentTable* fragment_table = nullptr;
+		// Allocated once and reused: the slot index never changes, so the feedback
+		// handler is registered once instead of once per frame (HLD-04 §3.2).
 		MTL4::CommitOptions* commit_options = nullptr;
 		std::atomic_bool in_flight{false};
 	};
@@ -47,12 +42,27 @@ namespace mtl
 		void begin_frame();
 		void submit();
 
+		// A CPU readback must observe the copy it encoded, and a Metal 4 command
+		// buffer is the unit of submission, so the frame commits early and waits for
+		// the slot to come back.  The slot is re-entered, because the frame owns
+		// exactly one slot, and the present drawable is left for the frame's own
+		// submit (REVIEW-FINDINGS.md, B4).
+		void flush_for_readback();
+
 		MTL4::RenderCommandEncoder* open_pass(const MTL4::RenderPassDescriptor* descriptor, MTL4::RenderEncoderOptions options = MTL4::RenderEncoderOptionNone);
 		MTL4::ComputeCommandEncoder* open_compute();
 		void close_encoder();
 
 		MTL4::ArgumentTable* vertex_table() const { return m_slots[m_slot].vertex_table; }
 		MTL4::ArgumentTable* fragment_table() const { return m_slots[m_slot].fragment_table; }
+
+		// The open slot, so the per-frame rings size and reset with it.
+		u32 slot() const { return m_slot; }
+
+		// The drawable this frame presents (C7).  The recorder waits for it before
+		// it encodes and signals it after the commit, so a present stays on the one
+		// submit path (HLD-03 §4.9).  Null drops the present.
+		void set_present_drawable(MTL::Drawable* drawable);
 
 		// The resource layer, for the traits that allocate a surface.
 		resource_manager& resources() const { return *m_resources; }
@@ -67,6 +77,8 @@ namespace mtl
 		std::array<frame_slot, frame_slot_count> m_slots{};
 		u32 m_slot = 0;
 		MTL4::CommandEncoder* m_encoder = nullptr;
+		MTL4::ComputeCommandEncoder* m_compute_encoder = nullptr;
+		MTL::Drawable* m_drawable = nullptr;
 		std::mutex m_mutex;
 		std::condition_variable m_condition;
 	};

@@ -4,6 +4,11 @@
 
 #include "Emu/RSX/rsx_methods.h"
 
+#include "util/fnv_hash.hpp"
+
+#include <algorithm>
+#include <bit>
+
 namespace mtl
 {
 	MTL::SamplerAddressMode get_address_mode(rsx::texture_wrap_mode mode)
@@ -117,22 +122,75 @@ namespace mtl
 		return MTL::SamplerBorderColorTransparentBlack;
 	}
 
+	namespace
+	{
+		// The fields shared by the two texture classes.  The comparison sampler is
+		// selected by the sampled format: the RSX compares a fetched depth against
+		// the reference instead of filtering it (VKDraw.cpp:404-410).
+		template <typename Texture>
+		sampler_state capture_sampler(const Texture& texture)
+		{
+			sampler_state state;
+
+			state.wrap_s = texture.wrap_s();
+			state.wrap_t = texture.wrap_t();
+			state.wrap_r = texture.wrap_r();
+			state.min_filter = texture.min_filter();
+			state.mag_filter = texture.mag_filter();
+
+			// The LOD range is clamped to the resident mip chain, because the guest
+			// value can exceed it (VKDraw.cpp:467-518).  Metal has no sampler LOD
+			// bias, so the guest bias is a recorded limitation (04 R19).
+			const u32 mipmaps = texture.get_exact_mipmap_count();
+			if (get_mip_filter(state.min_filter) != MTL::SamplerMipFilterNotMipmapped && mipmaps > 1)
+			{
+				state.min_lod = std::min(texture.min_lod(), static_cast<f32>(mipmaps - 1));
+				state.max_lod = std::min(texture.max_lod(), static_cast<f32>(mipmaps - 1));
+			}
+
+			const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+			state.depth_compare = (format >= CELL_GCM_TEXTURE_DEPTH24_D8 && format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT);
+
+			return state;
+		}
+	}
+
 	sampler_state capture_fragment_sampler(u8 unit)
 	{
-		const rsx::fragment_texture& texture = rsx::method_registers.fragment_textures[unit];
+		const auto& texture = rsx::method_registers.fragment_textures[unit];
+		sampler_state state = capture_sampler(texture);
 
-		sampler_state state;
+		// The SNORM expansion is part of the RSX border colour
+		// (RSXTexture.cpp:376-378; VKDraw.cpp:412-413).
+		state.border_color = get_closest_border_color(texture.remapped_border_color(texture.argb_signed() != 0));
 
-		state.wrap_s = texture.wrap_s();
-		state.wrap_t = texture.wrap_t();
-		state.wrap_r = texture.wrap_r();
-		state.min_filter = texture.min_filter();
-		state.mag_filter = texture.mag_filter();
-		state.min_lod = texture.min_lod();
-		state.max_lod = texture.max_lod();
-		state.max_aniso = get_max_anisotropy(texture.max_aniso());
-		state.border_color = get_closest_border_color(texture.remapped_border_color());
+		// The comparison reference is SET_TEXTURE_ADDRESS.zfunc.
 		state.compare = texture.zfunc();
+		state.max_aniso = get_max_anisotropy(texture.max_aniso());
+
+		return state;
+	}
+
+	sampler_state capture_vertex_sampler(u8 unit)
+	{
+		// A vertex texture has no zfunc or signed-channel register, so it is never
+		// a comparison sampler and its border colour carries no expansion.
+		const auto& texture = rsx::method_registers.vertex_textures[unit];
+		sampler_state state = capture_sampler(texture);
+
+		state.border_color = get_closest_border_color(texture.remapped_border_color());
+		state.depth_compare = false;
+
+		return state;
+	}
+
+	sampler_state stencil_mirror_sampler()
+	{
+		// Clamp-to-border with an opaque-black border, nearest, no mip
+		// (VKDraw.cpp:707-717).
+		sampler_state state;
+		state.wrap_s = state.wrap_t = state.wrap_r = rsx::texture_wrap_mode::border;
+		state.border_color = MTL::SamplerBorderColorOpaqueBlack;
 
 		return state;
 	}
@@ -154,13 +212,77 @@ namespace mtl
 
 		if (state.depth_compare)
 		{
-			descriptor->setCompareFunction(get_compare_function(state.compare));
+			// The sampler sees the reference first, the RSX compares the texel first,
+			// so a directed function is swapped (VKDraw.cpp:32-45, REVIEW-FINDINGS.md A7).
+			descriptor->setCompareFunction(get_compare_function(state.compare, true));
 		}
 
 		MTL::SamplerState* result = device->newSamplerState(descriptor);
 
 		descriptor->release();
 		return result;
+	}
+
+	bool operator==(const sampler_state& a, const sampler_state& b)
+	{
+		return a.wrap_s == b.wrap_s
+			&& a.wrap_t == b.wrap_t
+			&& a.wrap_r == b.wrap_r
+			&& a.min_filter == b.min_filter
+			&& a.mag_filter == b.mag_filter
+			&& a.min_lod == b.min_lod
+			&& a.max_lod == b.max_lod
+			&& a.max_aniso == b.max_aniso
+			&& a.border_color == b.border_color
+			&& a.depth_compare == b.depth_compare
+			&& a.compare == b.compare;
+	}
+
+	u64 hash_sampler_state(const sampler_state& state)
+	{
+		// The comparison function is a 16-bit GL constant, so the fields are hashed
+		// at their own widths.  A packed word cannot hold them: a four-bit slot for
+		// `compare` overlapped `depth_compare` and survived only because the current
+		// comparison values happen to be small.
+		usz hash = rpcs3::hash64(rpcs3::fnv_seed, static_cast<u16>(state.wrap_s));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.wrap_t));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.wrap_r));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.min_filter));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.mag_filter));
+		hash = rpcs3::hash64(hash, static_cast<u32>(state.border_color));
+		hash = rpcs3::hash64(hash, static_cast<u16>(state.compare));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_compare));
+		hash = rpcs3::hash64(hash, state.max_aniso);
+		hash = rpcs3::hash64(hash, std::bit_cast<u32>(state.min_lod));
+		return rpcs3::hash64(hash, std::bit_cast<u32>(state.max_lod));
+	}
+
+	void sampler_cache::shutdown()
+	{
+		for (const auto& [key, object] : m_cache)
+		{
+			object->release();
+		}
+
+		m_cache.clear();
+		m_device = nullptr;
+	}
+
+	MTL::SamplerState* sampler_cache::get(const sampler_state& state)
+	{
+		const auto found = m_cache.find(state);
+		if (found != m_cache.end())
+		{
+			return found->second;
+		}
+
+		MTL::SamplerState* object = create_sampler_state(m_device, state);
+		if (object)
+		{
+			m_cache.emplace(state, object);
+		}
+
+		return object;
 	}
 }
 
