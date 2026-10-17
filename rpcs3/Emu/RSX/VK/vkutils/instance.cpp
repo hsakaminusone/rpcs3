@@ -2,9 +2,78 @@
 #include "instance.h"
 
 #include "Emu/system_config.h"
+#include "vk_driver_selection.h"
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <dirent.h>
+#include <cstdlib>
+#include <cstring>
+#endif
 
 namespace vk
 {
+#ifdef __APPLE__
+	namespace
+	{
+		std::string bundle_icd_dir()
+		{
+			uint32_t size = 0;
+			_NSGetExecutablePath(nullptr, &size);
+
+			std::string path(size, '\0');
+
+			if (_NSGetExecutablePath(path.data(), &size) != 0)
+			{
+				return {};
+			}
+
+			path.resize(std::strlen(path.c_str()));
+			return driver_selection::bundle_icd_dir_from_executable(path);
+		}
+
+		bool bundle_ships_icd_manifest(const std::string& icd_dir)
+		{
+			DIR* dir = opendir(icd_dir.c_str());
+
+			if (!dir)
+			{
+				return false;
+			}
+
+			bool found = false;
+
+			while (const dirent* entry = readdir(dir))
+			{
+				if (driver_selection::is_icd_manifest_filename(entry->d_name))
+				{
+					found = true;
+					break;
+				}
+			}
+
+			closedir(dir);
+			return found;
+		}
+
+		// Restrict the bundled loader's driver discovery to the app bundle so a system
+		// MoltenVK/KosmicKrisp install cannot duplicate the bundled devices. An explicit
+		// user override of the environment variable always wins; without a bundled ICD
+		// the system drivers must stay reachable, so the variable is left unset.
+		void restrict_icd_search_to_bundle()
+		{
+			const bool user_override = std::getenv(driver_selection::bundle_only_search_env_var) != nullptr;
+			const std::string icd_dir = bundle_icd_dir();
+
+			if (driver_selection::should_enable_bundle_only_search(!icd_dir.empty() && bundle_ships_icd_manifest(icd_dir), user_override))
+			{
+				setenv(driver_selection::bundle_only_search_env_var, "1", 0);
+				rsx_log.notice("Restricting Vulkan driver discovery to the application bundle");
+			}
+		}
+	}
+#endif
+
 	// Supported extensions
 	supported_extensions::supported_extensions(enumeration_class _class, const char* layer_name, VkPhysicalDevice pdev)
 	{
@@ -89,6 +158,11 @@ namespace vk
 #endif
 	bool instance::create(const char* app_name, bool fast)
 	{
+#ifdef __APPLE__
+		// Must run before the loader performs driver discovery.
+		restrict_icd_search_to_bundle();
+#endif
+
 		// Initialize a vulkan instance
 		VkApplicationInfo app = {};
 
@@ -128,7 +202,11 @@ namespace vk
 #ifdef __APPLE__
 			extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 			extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-			if (support.is_supported(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME))
+
+			// MoltenVK layer settings are inert for KosmicKrisp, so do not advertise the
+			// MoltenVK layer when the user has explicitly selected KosmicKrisp.
+			if (support.is_supported(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME) &&
+				g_cfg.video.vk.apple_driver != vulkan_apple_driver::kosmickrisp)
 			{
 				extensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
 
