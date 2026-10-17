@@ -46,6 +46,7 @@ enum class video_renderer
 	null,
 	opengl,
 	vulkan,
+	metal, // Apple silicon + macOS 26 at runtime (docs/research/metal4/10 §4.7)
 };
 
 enum class audio_renderer
