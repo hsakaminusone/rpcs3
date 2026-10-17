@@ -1,0 +1,5 @@
+id,name,group,cluster,addr,addr_dec,word,has_decoder,n_fields,binding_kind,handler,step,count,source,disposition,metal4_target,difficulty,risk,confidence,doc_ref
+M_NV4097_SET_FOG_MODE,NV4097_SET_FOG_MODE,NV4097,fixed-function,0x08cc,2252,563,1,0,,,,,gcm_enums.h,,,,,,
+M_NV4097_SET_FOG_PARAMS,NV4097_SET_FOG_PARAMS,NV4097,fixed-function,0x08d0,2256,564,1,0,,,,,gcm_enums.h,,,,,,
+M_NV4097_SET_SPECULAR_ENABLE,NV4097_SET_SPECULAR_ENABLE,NV4097,fixed-function,0x1428,5160,1290,0,0,,,,,gcm_enums.h,,,,,,
+M_NV4097_SET_TWO_SIDE_LIGHT_EN,NV4097_SET_TWO_SIDE_LIGHT_EN,NV4097,fixed-function,0x142c,5164,1291,1,0,,,,,gcm_enums.h,,,,,,

@@ -1,0 +1,16 @@
+{
+  "blend": 15,
+  "depth-rop": 38,
+  "draw": 13,
+  "fixed-function": 4,
+  "misc": 16,
+  "nv0039-dma": 12,
+  "nv2d-surface": 13,
+  "nv3089-image": 21,
+  "nv308a-image": 16,
+  "raster": 30,
+  "surface": 40,
+  "sync-flip": 18,
+  "texture": 16,
+  "vertex": 30
+}

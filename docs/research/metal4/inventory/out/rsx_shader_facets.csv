@@ -1,0 +1,276 @@
+id,kind,name,value,source
+SH_V_REG_TEMP,enum,RSX_VP_REGISTER_TYPE_TEMP,0x1,RSXVertexProgram.h
+SH_V_REG_INPUT,enum,RSX_VP_REGISTER_TYPE_INPUT,0x2,RSXVertexProgram.h
+SH_V_REG_CONSTANT,enum,RSX_VP_REGISTER_TYPE_CONSTANT,0x3,RSXVertexProgram.h
+SH_V_SCA_NOP,enum,RSX_SCA_OPCODE_NOP,0x0,RSXVertexProgram.h
+SH_V_SCA_MOV,enum,RSX_SCA_OPCODE_MOV,0x1,RSXVertexProgram.h
+SH_V_SCA_RCP,enum,RSX_SCA_OPCODE_RCP,0x2,RSXVertexProgram.h
+SH_V_SCA_RCC,enum,RSX_SCA_OPCODE_RCC,0x3,RSXVertexProgram.h
+SH_V_SCA_RSQ,enum,RSX_SCA_OPCODE_RSQ,0x4,RSXVertexProgram.h
+SH_V_SCA_EXP,enum,RSX_SCA_OPCODE_EXP,0x5,RSXVertexProgram.h
+SH_V_SCA_LOG,enum,RSX_SCA_OPCODE_LOG,0x6,RSXVertexProgram.h
+SH_V_SCA_LIT,enum,RSX_SCA_OPCODE_LIT,0x7,RSXVertexProgram.h
+SH_V_SCA_BRA,enum,RSX_SCA_OPCODE_BRA,0x8,RSXVertexProgram.h
+SH_V_SCA_BRI,enum,RSX_SCA_OPCODE_BRI,0x9,RSXVertexProgram.h
+SH_V_SCA_CAL,enum,RSX_SCA_OPCODE_CAL,0xa,RSXVertexProgram.h
+SH_V_SCA_CLI,enum,RSX_SCA_OPCODE_CLI,0xb,RSXVertexProgram.h
+SH_V_SCA_RET,enum,RSX_SCA_OPCODE_RET,0xc,RSXVertexProgram.h
+SH_V_SCA_LG2,enum,RSX_SCA_OPCODE_LG2,0xd,RSXVertexProgram.h
+SH_V_SCA_EX2,enum,RSX_SCA_OPCODE_EX2,0xe,RSXVertexProgram.h
+SH_V_SCA_SIN,enum,RSX_SCA_OPCODE_SIN,0xf,RSXVertexProgram.h
+SH_V_SCA_COS,enum,RSX_SCA_OPCODE_COS,0x10,RSXVertexProgram.h
+SH_V_SCA_BRB,enum,RSX_SCA_OPCODE_BRB,0x11,RSXVertexProgram.h
+SH_V_SCA_CLB,enum,RSX_SCA_OPCODE_CLB,0x12,RSXVertexProgram.h
+SH_V_SCA_PSH,enum,RSX_SCA_OPCODE_PSH,0x13,RSXVertexProgram.h
+SH_V_SCA_POP,enum,RSX_SCA_OPCODE_POP,0x14,RSXVertexProgram.h
+SH_V_VEC_NOP,enum,RSX_VEC_OPCODE_NOP,0x0,RSXVertexProgram.h
+SH_V_VEC_MOV,enum,RSX_VEC_OPCODE_MOV,0x1,RSXVertexProgram.h
+SH_V_VEC_MUL,enum,RSX_VEC_OPCODE_MUL,0x2,RSXVertexProgram.h
+SH_V_VEC_ADD,enum,RSX_VEC_OPCODE_ADD,0x3,RSXVertexProgram.h
+SH_V_VEC_MAD,enum,RSX_VEC_OPCODE_MAD,0x4,RSXVertexProgram.h
+SH_V_VEC_DP3,enum,RSX_VEC_OPCODE_DP3,0x5,RSXVertexProgram.h
+SH_V_VEC_DPH,enum,RSX_VEC_OPCODE_DPH,0x6,RSXVertexProgram.h
+SH_V_VEC_DP4,enum,RSX_VEC_OPCODE_DP4,0x7,RSXVertexProgram.h
+SH_V_VEC_DST,enum,RSX_VEC_OPCODE_DST,0x8,RSXVertexProgram.h
+SH_V_VEC_MIN,enum,RSX_VEC_OPCODE_MIN,0x9,RSXVertexProgram.h
+SH_V_VEC_MAX,enum,RSX_VEC_OPCODE_MAX,0xa,RSXVertexProgram.h
+SH_V_VEC_SLT,enum,RSX_VEC_OPCODE_SLT,0xb,RSXVertexProgram.h
+SH_V_VEC_SGE,enum,RSX_VEC_OPCODE_SGE,0xc,RSXVertexProgram.h
+SH_V_VEC_ARL,enum,RSX_VEC_OPCODE_ARL,0xd,RSXVertexProgram.h
+SH_V_VEC_FRC,enum,RSX_VEC_OPCODE_FRC,0xe,RSXVertexProgram.h
+SH_V_VEC_FLR,enum,RSX_VEC_OPCODE_FLR,0xf,RSXVertexProgram.h
+SH_V_VEC_SEQ,enum,RSX_VEC_OPCODE_SEQ,0x10,RSXVertexProgram.h
+SH_V_VEC_SFL,enum,RSX_VEC_OPCODE_SFL,0x11,RSXVertexProgram.h
+SH_V_VEC_SGT,enum,RSX_VEC_OPCODE_SGT,0x12,RSXVertexProgram.h
+SH_V_VEC_SLE,enum,RSX_VEC_OPCODE_SLE,0x13,RSXVertexProgram.h
+SH_V_VEC_SNE,enum,RSX_VEC_OPCODE_SNE,0x14,RSXVertexProgram.h
+SH_V_VEC_STR,enum,RSX_VEC_OPCODE_STR,0x15,RSXVertexProgram.h
+SH_V_VEC_SSG,enum,RSX_VEC_OPCODE_SSG,0x16,RSXVertexProgram.h
+SH_V_VEC_TXL,enum,RSX_VEC_OPCODE_TXL,0x19,RSXVertexProgram.h
+SH_F_REG_TEMP,enum,RSX_FP_REGISTER_TYPE_TEMP,0x0,RSXFragmentProgram.h
+SH_F_REG_INPUT,enum,RSX_FP_REGISTER_TYPE_INPUT,0x1,RSXFragmentProgram.h
+SH_F_REG_CONSTANT,enum,RSX_FP_REGISTER_TYPE_CONSTANT,0x2,RSXFragmentProgram.h
+SH_F_REG_UNKNOWN,enum,RSX_FP_REGISTER_TYPE_UNKNOWN,0x3,RSXFragmentProgram.h
+SH_F_PREC_REAL,enum,RSX_FP_PRECISION_REAL,0x0,RSXFragmentProgram.h
+SH_F_PREC_HALF,enum,RSX_FP_PRECISION_HALF,0x1,RSXFragmentProgram.h
+SH_F_PREC_FIXED12,enum,RSX_FP_PRECISION_FIXED12,0x2,RSXFragmentProgram.h
+SH_F_PREC_FIXED9,enum,RSX_FP_PRECISION_FIXED9,0x3,RSXFragmentProgram.h
+SH_F_PREC_SATURATE,enum,RSX_FP_PRECISION_SATURATE,0x4,RSXFragmentProgram.h
+SH_F_PREC_UNKNOWN,enum,RSX_FP_PRECISION_UNKNOWN,0x5,RSXFragmentProgram.h
+SH_F_OP_NOP,opcode,rsx_fp_op_names[0],NOP,RSXFragmentProgram.h
+SH_F_OP_MOV,opcode,rsx_fp_op_names[1],MOV,RSXFragmentProgram.h
+SH_F_OP_MUL,opcode,rsx_fp_op_names[2],MUL,RSXFragmentProgram.h
+SH_F_OP_ADD,opcode,rsx_fp_op_names[3],ADD,RSXFragmentProgram.h
+SH_F_OP_MAD,opcode,rsx_fp_op_names[4],MAD,RSXFragmentProgram.h
+SH_F_OP_DP3,opcode,rsx_fp_op_names[5],DP3,RSXFragmentProgram.h
+SH_F_OP_DP4,opcode,rsx_fp_op_names[6],DP4,RSXFragmentProgram.h
+SH_F_OP_DST,opcode,rsx_fp_op_names[7],DST,RSXFragmentProgram.h
+SH_F_OP_MIN,opcode,rsx_fp_op_names[8],MIN,RSXFragmentProgram.h
+SH_F_OP_MAX,opcode,rsx_fp_op_names[9],MAX,RSXFragmentProgram.h
+SH_F_OP_SLT,opcode,rsx_fp_op_names[10],SLT,RSXFragmentProgram.h
+SH_F_OP_SGE,opcode,rsx_fp_op_names[11],SGE,RSXFragmentProgram.h
+SH_F_OP_SLE,opcode,rsx_fp_op_names[12],SLE,RSXFragmentProgram.h
+SH_F_OP_SGT,opcode,rsx_fp_op_names[13],SGT,RSXFragmentProgram.h
+SH_F_OP_SNE,opcode,rsx_fp_op_names[14],SNE,RSXFragmentProgram.h
+SH_F_OP_SEQ,opcode,rsx_fp_op_names[15],SEQ,RSXFragmentProgram.h
+SH_F_OP_FRC,opcode,rsx_fp_op_names[16],FRC,RSXFragmentProgram.h
+SH_F_OP_FLR,opcode,rsx_fp_op_names[17],FLR,RSXFragmentProgram.h
+SH_F_OP_KIL,opcode,rsx_fp_op_names[18],KIL,RSXFragmentProgram.h
+SH_F_OP_PK4,opcode,rsx_fp_op_names[19],PK4,RSXFragmentProgram.h
+SH_F_OP_UP4,opcode,rsx_fp_op_names[20],UP4,RSXFragmentProgram.h
+SH_F_OP_DDX,opcode,rsx_fp_op_names[21],DDX,RSXFragmentProgram.h
+SH_F_OP_DDY,opcode,rsx_fp_op_names[22],DDY,RSXFragmentProgram.h
+SH_F_OP_TEX,opcode,rsx_fp_op_names[23],TEX,RSXFragmentProgram.h
+SH_F_OP_TXP,opcode,rsx_fp_op_names[24],TXP,RSXFragmentProgram.h
+SH_F_OP_TXD,opcode,rsx_fp_op_names[25],TXD,RSXFragmentProgram.h
+SH_F_OP_RCP,opcode,rsx_fp_op_names[26],RCP,RSXFragmentProgram.h
+SH_F_OP_RSQ,opcode,rsx_fp_op_names[27],RSQ,RSXFragmentProgram.h
+SH_F_OP_EX2,opcode,rsx_fp_op_names[28],EX2,RSXFragmentProgram.h
+SH_F_OP_LG2,opcode,rsx_fp_op_names[29],LG2,RSXFragmentProgram.h
+SH_F_OP_LIT,opcode,rsx_fp_op_names[30],LIT,RSXFragmentProgram.h
+SH_F_OP_LRP,opcode,rsx_fp_op_names[31],LRP,RSXFragmentProgram.h
+SH_F_OP_STR,opcode,rsx_fp_op_names[32],STR,RSXFragmentProgram.h
+SH_F_OP_SFL,opcode,rsx_fp_op_names[33],SFL,RSXFragmentProgram.h
+SH_F_OP_COS,opcode,rsx_fp_op_names[34],COS,RSXFragmentProgram.h
+SH_F_OP_SIN,opcode,rsx_fp_op_names[35],SIN,RSXFragmentProgram.h
+SH_F_OP_PK2,opcode,rsx_fp_op_names[36],PK2,RSXFragmentProgram.h
+SH_F_OP_UP2,opcode,rsx_fp_op_names[37],UP2,RSXFragmentProgram.h
+SH_F_OP_POW,opcode,rsx_fp_op_names[38],POW,RSXFragmentProgram.h
+SH_F_OP_PKB,opcode,rsx_fp_op_names[39],PKB,RSXFragmentProgram.h
+SH_F_OP_UPB,opcode,rsx_fp_op_names[40],UPB,RSXFragmentProgram.h
+SH_F_OP_PK16,opcode,rsx_fp_op_names[41],PK16,RSXFragmentProgram.h
+SH_F_OP_UP16,opcode,rsx_fp_op_names[42],UP16,RSXFragmentProgram.h
+SH_F_OP_BEM,opcode,rsx_fp_op_names[43],BEM,RSXFragmentProgram.h
+SH_F_OP_PKG,opcode,rsx_fp_op_names[44],PKG,RSXFragmentProgram.h
+SH_F_OP_UPG,opcode,rsx_fp_op_names[45],UPG,RSXFragmentProgram.h
+SH_F_OP_DP2A,opcode,rsx_fp_op_names[46],DP2A,RSXFragmentProgram.h
+SH_F_OP_TXL,opcode,rsx_fp_op_names[47],TXL,RSXFragmentProgram.h
+SH_F_OP_NULL,opcode,rsx_fp_op_names[48],NULL,RSXFragmentProgram.h
+SH_F_OP_TXB,opcode,rsx_fp_op_names[49],TXB,RSXFragmentProgram.h
+SH_F_OP_NULL_50,opcode,rsx_fp_op_names[50],NULL,RSXFragmentProgram.h
+SH_F_OP_TEXBEM,opcode,rsx_fp_op_names[51],TEXBEM,RSXFragmentProgram.h
+SH_F_OP_TXPBEM,opcode,rsx_fp_op_names[52],TXPBEM,RSXFragmentProgram.h
+SH_F_OP_BEMLUM,opcode,rsx_fp_op_names[53],BEMLUM,RSXFragmentProgram.h
+SH_F_OP_REFL,opcode,rsx_fp_op_names[54],REFL,RSXFragmentProgram.h
+SH_F_OP_TIMESWTEX,opcode,rsx_fp_op_names[55],TIMESWTEX,RSXFragmentProgram.h
+SH_F_OP_DP2,opcode,rsx_fp_op_names[56],DP2,RSXFragmentProgram.h
+SH_F_OP_NRM,opcode,rsx_fp_op_names[57],NRM,RSXFragmentProgram.h
+SH_F_OP_DIV,opcode,rsx_fp_op_names[58],DIV,RSXFragmentProgram.h
+SH_F_OP_DIVSQ,opcode,rsx_fp_op_names[59],DIVSQ,RSXFragmentProgram.h
+SH_F_OP_LIF,opcode,rsx_fp_op_names[60],LIF,RSXFragmentProgram.h
+SH_F_OP_FENCT,opcode,rsx_fp_op_names[61],FENCT,RSXFragmentProgram.h
+SH_F_OP_FENCB,opcode,rsx_fp_op_names[62],FENCB,RSXFragmentProgram.h
+SH_F_OP_NULL_63,opcode,rsx_fp_op_names[63],NULL,RSXFragmentProgram.h
+SH_F_OP_BRK,opcode,rsx_fp_op_names[64],BRK,RSXFragmentProgram.h
+SH_F_OP_CAL,opcode,rsx_fp_op_names[65],CAL,RSXFragmentProgram.h
+SH_F_OP_IFE,opcode,rsx_fp_op_names[66],IFE,RSXFragmentProgram.h
+SH_F_OP_LOOP,opcode,rsx_fp_op_names[67],LOOP,RSXFragmentProgram.h
+SH_F_OP_REP,opcode,rsx_fp_op_names[68],REP,RSXFragmentProgram.h
+SH_F_OP_RET,opcode,rsx_fp_op_names[69],RET,RSXFragmentProgram.h
+SH_V_BF_D0.addr_swz,bitfield,D0::addr_swz,bit 0:2,RSXVertexProgram.h
+SH_V_BF_D0.mask_w,bitfield,D0::mask_w,bit 2:2,RSXVertexProgram.h
+SH_V_BF_D0.mask_z,bitfield,D0::mask_z,bit 4:2,RSXVertexProgram.h
+SH_V_BF_D0.mask_y,bitfield,D0::mask_y,bit 6:2,RSXVertexProgram.h
+SH_V_BF_D0.mask_x,bitfield,D0::mask_x,bit 8:2,RSXVertexProgram.h
+SH_V_BF_D0.cond,bitfield,D0::cond,bit 10:3,RSXVertexProgram.h
+SH_V_BF_D0.cond_test_enable,bitfield,D0::cond_test_enable,bit 13:1,RSXVertexProgram.h
+SH_V_BF_D0.cond_update_enable_0,bitfield,D0::cond_update_enable_0,bit 14:1,RSXVertexProgram.h
+SH_V_BF_D0.dst_tmp,bitfield,D0::dst_tmp,bit 15:6,RSXVertexProgram.h
+SH_V_BF_D0.src0_abs,bitfield,D0::src0_abs,bit 21:1,RSXVertexProgram.h
+SH_V_BF_D0.src1_abs,bitfield,D0::src1_abs,bit 22:1,RSXVertexProgram.h
+SH_V_BF_D0.src2_abs,bitfield,D0::src2_abs,bit 23:1,RSXVertexProgram.h
+SH_V_BF_D0.addr_reg_sel_1,bitfield,D0::addr_reg_sel_1,bit 24:1,RSXVertexProgram.h
+SH_V_BF_D0.cond_reg_sel_1,bitfield,D0::cond_reg_sel_1,bit 25:1,RSXVertexProgram.h
+SH_V_BF_D0.staturate,bitfield,D0::staturate,bit 26:1,RSXVertexProgram.h
+SH_V_BF_D0.index_input,bitfield,D0::index_input,bit 27:1,RSXVertexProgram.h
+SH_V_BF_D0.cond_update_enable_1,bitfield,D0::cond_update_enable_1,bit 29:1,RSXVertexProgram.h
+SH_V_BF_D0.vec_result,bitfield,D0::vec_result,bit 30:1,RSXVertexProgram.h
+SH_V_BF_D0.iaddrh2,bitfield,D0::iaddrh2,bit 23:1,RSXVertexProgram.h
+SH_V_BF_D1.src0h,bitfield,D1::src0h,bit 0:8,RSXVertexProgram.h
+SH_V_BF_D1.input_src,bitfield,D1::input_src,bit 8:4,RSXVertexProgram.h
+SH_V_BF_D1.const_src,bitfield,D1::const_src,bit 12:10,RSXVertexProgram.h
+SH_V_BF_D1.vec_opcode,bitfield,D1::vec_opcode,bit 22:5,RSXVertexProgram.h
+SH_V_BF_D1.sca_opcode,bitfield,D1::sca_opcode,bit 27:5,RSXVertexProgram.h
+SH_V_BF_D2.src2h,bitfield,D2::src2h,bit 0:6,RSXVertexProgram.h
+SH_V_BF_D2.src1,bitfield,D2::src1,bit 6:17,RSXVertexProgram.h
+SH_V_BF_D2.src0l,bitfield,D2::src0l,bit 23:9,RSXVertexProgram.h
+SH_V_BF_D2.iaddrh,bitfield,D2::iaddrh,bit 0:6,RSXVertexProgram.h
+SH_V_BF_D2.tex_num,bitfield,D2::tex_num,bit 8:2,RSXVertexProgram.h
+SH_V_BF_D3.end,bitfield,D3::end,bit 0:1,RSXVertexProgram.h
+SH_V_BF_D3.index_const,bitfield,D3::index_const,bit 1:1,RSXVertexProgram.h
+SH_V_BF_D3.dst,bitfield,D3::dst,bit 2:5,RSXVertexProgram.h
+SH_V_BF_D3.sca_dst_tmp,bitfield,D3::sca_dst_tmp,bit 7:6,RSXVertexProgram.h
+SH_V_BF_D3.vec_writemask_w,bitfield,D3::vec_writemask_w,bit 13:1,RSXVertexProgram.h
+SH_V_BF_D3.vec_writemask_z,bitfield,D3::vec_writemask_z,bit 14:1,RSXVertexProgram.h
+SH_V_BF_D3.vec_writemask_y,bitfield,D3::vec_writemask_y,bit 15:1,RSXVertexProgram.h
+SH_V_BF_D3.vec_writemask_x,bitfield,D3::vec_writemask_x,bit 16:1,RSXVertexProgram.h
+SH_V_BF_D3.sca_writemask_w,bitfield,D3::sca_writemask_w,bit 17:1,RSXVertexProgram.h
+SH_V_BF_D3.sca_writemask_z,bitfield,D3::sca_writemask_z,bit 18:1,RSXVertexProgram.h
+SH_V_BF_D3.sca_writemask_y,bitfield,D3::sca_writemask_y,bit 19:1,RSXVertexProgram.h
+SH_V_BF_D3.sca_writemask_x,bitfield,D3::sca_writemask_x,bit 20:1,RSXVertexProgram.h
+SH_V_BF_D3.src2l,bitfield,D3::src2l,bit 21:11,RSXVertexProgram.h
+SH_V_BF_D3.branch_index,bitfield,D3::branch_index,bit 23:5,RSXVertexProgram.h
+SH_V_BF_D3.brb_cond_true,bitfield,D3::brb_cond_true,bit 28:1,RSXVertexProgram.h
+SH_V_BF_D3.iaddrl,bitfield,D3::iaddrl,bit 29:3,RSXVertexProgram.h
+SH_V_BF_SRC.src0l,bitfield,SRC::src0l,bit 0:9,RSXVertexProgram.h
+SH_V_BF_SRC.src0h,bitfield,SRC::src0h,bit 9:8,RSXVertexProgram.h
+SH_V_BF_SRC.src1,bitfield,SRC::src1,bit 0:17,RSXVertexProgram.h
+SH_V_BF_SRC.src2l,bitfield,SRC::src2l,bit 0:11,RSXVertexProgram.h
+SH_V_BF_SRC.src2h,bitfield,SRC::src2h,bit 11:6,RSXVertexProgram.h
+SH_V_BF_SRC.reg_type,bitfield,SRC::reg_type,bit 0:2,RSXVertexProgram.h
+SH_V_BF_SRC.tmp_src,bitfield,SRC::tmp_src,bit 2:6,RSXVertexProgram.h
+SH_V_BF_SRC.swz_w,bitfield,SRC::swz_w,bit 8:2,RSXVertexProgram.h
+SH_V_BF_SRC.swz_z,bitfield,SRC::swz_z,bit 10:2,RSXVertexProgram.h
+SH_V_BF_SRC.swz_y,bitfield,SRC::swz_y,bit 12:2,RSXVertexProgram.h
+SH_V_BF_SRC.swz_x,bitfield,SRC::swz_x,bit 14:2,RSXVertexProgram.h
+SH_V_BF_SRC.neg,bitfield,SRC::neg,bit 16:1,RSXVertexProgram.h
+SH_F_BF_OPDEST.end,bitfield,OPDEST::end,bit 0:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.dest_reg,bitfield,OPDEST::dest_reg,bit 1:6,RSXFragmentProgram.h
+SH_F_BF_OPDEST.fp16,bitfield,OPDEST::fp16,bit 7:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.set_cond,bitfield,OPDEST::set_cond,bit 8:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.mask_x,bitfield,OPDEST::mask_x,bit 9:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.mask_y,bitfield,OPDEST::mask_y,bit 10:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.mask_z,bitfield,OPDEST::mask_z,bit 11:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.mask_w,bitfield,OPDEST::mask_w,bit 12:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.src_attr_reg_num,bitfield,OPDEST::src_attr_reg_num,bit 13:4,RSXFragmentProgram.h
+SH_F_BF_OPDEST.tex_num,bitfield,OPDEST::tex_num,bit 17:4,RSXFragmentProgram.h
+SH_F_BF_OPDEST.exp_tex,bitfield,OPDEST::exp_tex,bit 21:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.prec,bitfield,OPDEST::prec,bit 22:2,RSXFragmentProgram.h
+SH_F_BF_OPDEST.opcode,bitfield,OPDEST::opcode,bit 24:6,RSXFragmentProgram.h
+SH_F_BF_OPDEST.no_dest,bitfield,OPDEST::no_dest,bit 30:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.saturate,bitfield,OPDEST::saturate,bit 31:1,RSXFragmentProgram.h
+SH_F_BF_OPDEST.write_mask,bitfield,OPDEST::write_mask,bit 9:4,RSXFragmentProgram.h
+SH_F_BF_SRC0.reg_type,bitfield,SRC0::reg_type,bit 0:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.tmp_reg_index,bitfield,SRC0::tmp_reg_index,bit 2:6,RSXFragmentProgram.h
+SH_F_BF_SRC0.fp16,bitfield,SRC0::fp16,bit 8:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.swizzle_x,bitfield,SRC0::swizzle_x,bit 9:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.swizzle_y,bitfield,SRC0::swizzle_y,bit 11:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.swizzle_z,bitfield,SRC0::swizzle_z,bit 13:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.swizzle_w,bitfield,SRC0::swizzle_w,bit 15:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.neg,bitfield,SRC0::neg,bit 17:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.exec_if_lt,bitfield,SRC0::exec_if_lt,bit 18:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.exec_if_eq,bitfield,SRC0::exec_if_eq,bit 19:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.exec_if_gr,bitfield,SRC0::exec_if_gr,bit 20:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_swizzle_x,bitfield,SRC0::cond_swizzle_x,bit 21:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_swizzle_y,bitfield,SRC0::cond_swizzle_y,bit 23:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_swizzle_z,bitfield,SRC0::cond_swizzle_z,bit 25:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_swizzle_w,bitfield,SRC0::cond_swizzle_w,bit 27:2,RSXFragmentProgram.h
+SH_F_BF_SRC0.abs,bitfield,SRC0::abs,bit 29:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_mod_reg_index,bitfield,SRC0::cond_mod_reg_index,bit 30:1,RSXFragmentProgram.h
+SH_F_BF_SRC0.cond_reg_index,bitfield,SRC0::cond_reg_index,bit 31:1,RSXFragmentProgram.h
+SH_F_BF_SRC1.reg_type,bitfield,SRC1::reg_type,bit 0:2,RSXFragmentProgram.h
+SH_F_BF_SRC1.tmp_reg_index,bitfield,SRC1::tmp_reg_index,bit 2:6,RSXFragmentProgram.h
+SH_F_BF_SRC1.fp16,bitfield,SRC1::fp16,bit 8:1,RSXFragmentProgram.h
+SH_F_BF_SRC1.swizzle_x,bitfield,SRC1::swizzle_x,bit 9:2,RSXFragmentProgram.h
+SH_F_BF_SRC1.swizzle_y,bitfield,SRC1::swizzle_y,bit 11:2,RSXFragmentProgram.h
+SH_F_BF_SRC1.swizzle_z,bitfield,SRC1::swizzle_z,bit 13:2,RSXFragmentProgram.h
+SH_F_BF_SRC1.swizzle_w,bitfield,SRC1::swizzle_w,bit 15:2,RSXFragmentProgram.h
+SH_F_BF_SRC1.neg,bitfield,SRC1::neg,bit 17:1,RSXFragmentProgram.h
+SH_F_BF_SRC1.abs,bitfield,SRC1::abs,bit 18:1,RSXFragmentProgram.h
+SH_F_BF_SRC1.src0_prec_mod,bitfield,SRC1::src0_prec_mod,bit 19:3,RSXFragmentProgram.h
+SH_F_BF_SRC1.src1_prec_mod,bitfield,SRC1::src1_prec_mod,bit 22:3,RSXFragmentProgram.h
+SH_F_BF_SRC1.src2_prec_mod,bitfield,SRC1::src2_prec_mod,bit 25:3,RSXFragmentProgram.h
+SH_F_BF_SRC1.scale,bitfield,SRC1::scale,bit 28:3,RSXFragmentProgram.h
+SH_F_BF_SRC1.opcode_hi,bitfield,SRC1::opcode_hi,bit 31:1,RSXFragmentProgram.h
+SH_F_BF_SRC1.else_offset,bitfield,SRC1::else_offset,bit 0:31,RSXFragmentProgram.h
+SH_F_BF_SRC1.rep_count,bitfield,SRC1::rep_count,bit 2:8,RSXFragmentProgram.h
+SH_F_BF_SRC1.init_counter,bitfield,SRC1::init_counter,bit 10:8,RSXFragmentProgram.h
+SH_F_BF_SRC1.increment,bitfield,SRC1::increment,bit 19:8,RSXFragmentProgram.h
+SH_F_BF_SRC2.reg_type,bitfield,SRC2::reg_type,bit 0:2,RSXFragmentProgram.h
+SH_F_BF_SRC2.tmp_reg_index,bitfield,SRC2::tmp_reg_index,bit 2:6,RSXFragmentProgram.h
+SH_F_BF_SRC2.fp16,bitfield,SRC2::fp16,bit 8:1,RSXFragmentProgram.h
+SH_F_BF_SRC2.swizzle_x,bitfield,SRC2::swizzle_x,bit 9:2,RSXFragmentProgram.h
+SH_F_BF_SRC2.swizzle_y,bitfield,SRC2::swizzle_y,bit 11:2,RSXFragmentProgram.h
+SH_F_BF_SRC2.swizzle_z,bitfield,SRC2::swizzle_z,bit 13:2,RSXFragmentProgram.h
+SH_F_BF_SRC2.swizzle_w,bitfield,SRC2::swizzle_w,bit 15:2,RSXFragmentProgram.h
+SH_F_BF_SRC2.neg,bitfield,SRC2::neg,bit 17:1,RSXFragmentProgram.h
+SH_F_BF_SRC2.abs,bitfield,SRC2::abs,bit 18:1,RSXFragmentProgram.h
+SH_F_BF_SRC2.addr_reg,bitfield,SRC2::addr_reg,bit 19:11,RSXFragmentProgram.h
+SH_F_BF_SRC2.use_index_reg,bitfield,SRC2::use_index_reg,bit 30:1,RSXFragmentProgram.h
+SH_F_BF_SRC2.perspective_corr,bitfield,SRC2::perspective_corr,bit 31:1,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.reg_type,bitfield,SRC_Common::reg_type,bit 0:2,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.tmp_reg_index,bitfield,SRC_Common::tmp_reg_index,bit 2:6,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.fp16,bitfield,SRC_Common::fp16,bit 8:1,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.swizzle_x,bitfield,SRC_Common::swizzle_x,bit 9:2,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.swizzle_y,bitfield,SRC_Common::swizzle_y,bit 11:2,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.swizzle_z,bitfield,SRC_Common::swizzle_z,bit 13:2,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.swizzle_w,bitfield,SRC_Common::swizzle_w,bit 15:2,RSXFragmentProgram.h
+SH_F_BF_SRC_Common.neg,bitfield,SRC_Common::neg,bit 17:1,RSXFragmentProgram.h
+SH_V_FIELD_data,field,RSXVertexProgram::data,std::vector<u32>,RSXVertexProgram.h
+SH_V_FIELD_texture_state,field,RSXVertexProgram::texture_state,rsx::vertex_program_texture_state,RSXVertexProgram.h
+SH_V_FIELD_ctrl,field,RSXVertexProgram::ctrl,u32,RSXVertexProgram.h
+SH_V_FIELD_output_mask,field,RSXVertexProgram::output_mask,u32,RSXVertexProgram.h
+SH_V_FIELD_base_address,field,RSXVertexProgram::base_address,u32,RSXVertexProgram.h
+SH_V_FIELD_entry,field,RSXVertexProgram::entry,u32,RSXVertexProgram.h
+SH_V_FIELD_instruction_mask,field,RSXVertexProgram::instruction_mask,bit_set<rsx::max_vertex_program_instructions>,RSXVertexProgram.h
+SH_V_FIELD_jump_table,field,RSXVertexProgram::jump_table,std::set<u32>,RSXVertexProgram.h
+SH_F_FIELD_offset,field,RSXFragmentProgram::offset,u32,RSXFragmentProgram.h
+SH_F_FIELD_ucode_length,field,RSXFragmentProgram::ucode_length,u32,RSXFragmentProgram.h
+SH_F_FIELD_total_length,field,RSXFragmentProgram::total_length,u32,RSXFragmentProgram.h
+SH_F_FIELD_ctrl,field,RSXFragmentProgram::ctrl,u32,RSXFragmentProgram.h
+SH_F_FIELD_texcoord_control_mask,field,RSXFragmentProgram::texcoord_control_mask,u32,RSXFragmentProgram.h
+SH_F_FIELD_mrt_buffers_count,field,RSXFragmentProgram::mrt_buffers_count,u32,RSXFragmentProgram.h
+SH_F_FIELD_two_sided_lighting,field,RSXFragmentProgram::two_sided_lighting,bool,RSXFragmentProgram.h
+SH_F_FIELD_texture_state,field,RSXFragmentProgram::texture_state,rsx::fragment_program_texture_state,RSXFragmentProgram.h
+SH_F_FIELD_texture_params,field,RSXFragmentProgram::texture_params,rsx::fragment_program_texture_config,RSXFragmentProgram.h
+SH_F_FIELD_valid,field,RSXFragmentProgram::valid,bool,RSXFragmentProgram.h
