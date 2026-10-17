@@ -3,6 +3,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/RSXThread.h"
+#include "Emu/Memory/vm.h"
 #include "util/logs.hpp"
 
 #include <cstdlib>
@@ -91,8 +92,23 @@ namespace mtl
 		m_features.metal4_family = true;
 		m_features.compiler_ok = true;
 
+		import_guest_window();
+
 		rsx_log.success("Metal 4 device initialized: %s", m_device->name() ? m_device->name()->utf8String() : "unknown");
 		return true;
+	}
+
+	void device::import_guest_window()
+	{
+		// HLD-02 §2.1.  The guest block is anonymous mmap memory owned by the
+		// emulator, so the deallocator must not free it.
+		m_window.buffer = m_device->newBuffer(vm::g_base_addr, guest_address_space, MTL::ResourceStorageModeShared, nullptr);
+		if (!m_window.buffer)
+		{
+			die(fmt::format("guest memory import failed (%llu bytes)", guest_address_space));
+		}
+
+		m_window.gpu_address = m_window.buffer->gpuAddress();
 	}
 
 	void device::fill_backend_config(rsx::backend_configuration& cfg) const
