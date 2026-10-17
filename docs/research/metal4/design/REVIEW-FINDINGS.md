@@ -82,7 +82,7 @@ accepted deviation is marked **Limitation**.
 | F5 | High | flip preamble | Partial |
 | F6 | High | split barrier loss | Fixed |
 | F7 | High | cross-encoder barriers | Fixed |
-| F8 | High | access-violation result | Partial |
+| F8 | High | access-violation result | Fixed |
 | F9 | Medium | drawable layer setup | Partial |
 | F10 | Medium | present output pipeline | Open |
 | F11 | Medium | DMA/image clusters | Open |
@@ -102,7 +102,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 59 findings, 40 fixed, 4 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 59 findings, 41 fixed, 3 partial, 0 blocked, 6 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -586,15 +586,36 @@ chokepoint now also exposes `emit_queue_barrier`, which calls
 `barrierAfterQueueStages`. `MTLPassScheduler` uses it through
 `emit_split_barriers`. The wiring that produces the edges is F2.
 
-### F8 — `on_access_violation` drops the flush and sampler result. Partial.
+### F8 — `on_access_violation` drops the flush and sampler result. Fixed.
 `MTLGSRender.cpp:1053-1061` inspected only `violation_handled`; `num_flushable`
 and `invalidate_samplers` were ignored. VK and GL flush the dirty sections back
 to guest memory and mark the samplers dirty (`VKGSRender.cpp:1028,1041-1102`,
-`GLGSRender.cpp:1289-1307`). Without this the guest reads stale bytes and draws
-sample stale textures. `invalidate_samplers` is now handled, so every unit
-re-resolves on its next draw. `num_flushable` still waits on the CPU readback
-completion wait (B4), because a flush written before that wait would return
-undefined bytes.
+`GLGSRender.cpp:1289-1307`).
+
+The dropped flush was worse than stale bytes. The fault runs on the guest thread
+that touched the page (`Utilities/Thread.cpp:1596`), and the invalidation leaves the
+page protected until the flush releases it: `unprotect_set` runs only on the path
+that `flush_all` takes, and a deferred cause returns before it. The handler
+returned true, so the faulting instruction was retried on a page that was still
+read-only, faulted again, and took the same path — a livelock for any guest write
+into a page holding a clean, flushable section.
+
+The tree now mirrors the GL mechanism. A fault records the invalidation and posts
+the result to a queue; the waiting thread raises `backend_interrupt`,
+`vm::temporary_unlock()` and spins on the request's `processed` flag
+(`GLGSRender.cpp:1298-1307,1385-1396`). The RSX thread drains the queue in
+`do_local_task`, which is also the release point the base calls on exit, opens the
+frame when the fault arrived between frames, and calls
+`texture_cache::flush_all`. `flush_for_readback` (B4) makes the read-back observe
+its own copy, and `unprotect_set` then releases the page.
+
+A request is posted even when nothing is flushable, because the sampler flags are
+the RSX thread's to write: `m_textures_dirty` is a plain `std::array<bool, 16>`
+(`RSXThread.h:249`) that the draw path reads, so the faulting thread must not
+write it. That also removes a data race the previous handler had. The deadlock
+guard is the same one GL uses: a semaphore wait drains the queue first, because the
+RSX thread can otherwise sleep on a label while the faulting thread waits for a
+flush only the RSX thread can run.
 
 ### F9 — the drawable layer is configured incompletely and sized from the source. Partial.
 `MTLMetalLayer.mm:31-36` and `:44-54` never set `maximumDrawableCount`,
@@ -791,7 +812,7 @@ harness owns. They are parked, not closed.
 | B15 | Whether the Metal 4 compute-encoder copy of a combined depth-stencil image is a platform defect or a probe artefact, and whether a Metal 3 blit encoder needs an ordering rule against a Metal 4 command buffer. |
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
-| F5 / F8 / F9 | The partial halves wait transitively on F10. |
+| F5 / F9 | The partial halves wait transitively on F10. |
 | F10 | The present output pipeline: overlay composite, video-out calibration and gamma, colour range, aspect and letterbox, capture and vsync. Design first, because the layer has no such pass. |
 | F11 | Wire the dead DMA, image and sync clusters into the backend or delete them. The choice is a design decision, because the clusters are also the dialect-contract coverage. |
 

@@ -437,11 +437,18 @@ Metal 4 behaviour check, or a decision the acceptance harness owns. The PSO
 attachment-count key (E3) is closed without a change: the proposed
 colour-attachment map bridges a gap the RSX renumbering does not leave.
 
-The partial set is the flip preamble (F5), the access-violation result (F8), the
-drawable layer setup (F9) and the sampler LOD clamp (E8, which implements the
-clamp and records the bias as a limitation because Metal has no sampler bias):
-the fixes closed the present-critical half and the remainder waits on the present
-pipeline or the fragment program's texture contract.
+The partial set is the flip preamble (F5), the drawable layer setup (F9) and the
+sampler LOD clamp (E8, which implements the clamp and records the bias as a
+limitation because Metal has no sampler bias): the fixes closed the present-critical
+half and the remainder waits on the present pipeline or the fragment program's
+texture contract.
+
+The access-violation result (F8) closed with the transfer pass's readback wait.
+The dropped flush was a livelock rather than stale bytes: the page keeps its
+protection until the flush releases it, so a fault that was answered without a
+flush retried on the same page forever. The handler now queues the flush for the
+RSX thread and waits, which is the GL mechanism, and the queue is also where the
+sampler flags are raised.
 
 The limitation set is the Metal state the RSX has and Metal does not: point
 polygon mode (C4), the per-primitive polygon-offset enables (C7), the line width,
