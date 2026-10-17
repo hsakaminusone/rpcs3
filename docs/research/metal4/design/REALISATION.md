@@ -282,6 +282,11 @@ conversion pass; neither is a copy.
 `flip`, so a dropped present still advances the ring and the recorder stays the
 only owner of the frame lifecycle.
 
+The output mode is the display-sync setting. The backend floor has one sync state
+and no swap interval, so `full` sets the display sync, `off` clears it, and
+`adaptive` clears it and paces the present with a minimum present duration read
+from the screen's refresh rate.
+
 The mechanism is complete and wired. It cannot yet produce a content pixel,
 because no draw is executed and the surface store is therefore empty: that needs
 the execution spine (C1).
@@ -429,8 +434,8 @@ and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
 The open set is the texture initialisation path (B8, whose mechanism a probe has
 now measured, and B15, the combined-format copy the Metal 4 compute encoder does
-not perform), the logic op (C1/E6), the latch dataflow and its dead fields (E13),
-the present output pipeline (F10) and the DMA, image and sync clusters (F11). Each
+not perform), the logic op (C1/E6), the latch dataflow and its dead fields (E13)
+and the DMA, image and sync clusters (F11). Each
 carries its open question in `REVIEW-FINDINGS.md`, "Parked for review", because
 none can be settled from the tree alone: they wait on a hardware measurement, a
 Metal 4 behaviour check, or a decision the acceptance harness owns. The PSO

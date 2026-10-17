@@ -39,6 +39,11 @@ namespace mtl
 		void drop() { m_drawable = nullptr; }
 
 	private:
+		// Apply the vsync setting to the layer and to the present.  Metal has no swap
+		// interval and the setting changes at run time, so it is re-read on every
+		// acquire (VKPresent.cpp:438).
+		void update_vsync();
+
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
 		void* m_view = nullptr;
@@ -47,6 +52,12 @@ namespace mtl
 		u32 m_width = 0;
 		u32 m_height = 0;
 		MTL::PixelFormat m_format = MTL::PixelFormatBGRA8Unorm;
+
+		// The display-sync state the layer carries, and the interval the present
+		// paces to.  The interval is non-zero only for a mode that paces.
+		bool m_sync_enabled = true;
+		bool m_sync_applied = false;
+		f64 m_present_interval = 0.0;
 	};
 }
 
