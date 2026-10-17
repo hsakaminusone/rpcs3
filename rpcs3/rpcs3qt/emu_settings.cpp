@@ -307,7 +307,7 @@ void emu_settings::SaveSettings() const
 	Emulator::SaveSettings(out.c_str(), m_title_id);
 }
 
-void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, bool is_ranged, bool use_max, int max, bool sorted, bool strict)
+void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, bool is_ranged, bool use_max, int max, bool sorted, bool strict, const QStringList& disabled_options)
 {
 	if (!combobox)
 	{
@@ -338,7 +338,12 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, 
 
 		for (int i = 0; i < settings.count(); i++)
 		{
-			const QString localized_setting = GetLocalizedSetting(settings[i], type, combobox->count(), strict);
+			if (disabled_options.contains(settings[i]))
+			{
+				continue;
+			}
+
+			const QString localized_setting = GetLocalizedSetting(settings[i], type, i, strict);
 			combobox->addItem(localized_setting, QVariant({settings[i], i}));
 		}
 
@@ -1480,6 +1485,14 @@ QString emu_settings::GetLocalizedSetting(const QString& original, emu_settings_
 		case vk_exclusive_fs_mode::unspecified: return tr("Automatic (Default)", "Exclusive Fullscreen Mode");
 		case vk_exclusive_fs_mode::disable: return tr("Prefer borderless fullscreen", "Exclusive Fullscreen Mode");
 		case vk_exclusive_fs_mode::enable: return tr("Prefer exclusive fullscreen", "Exclusive Fullscreen Mode");
+		}
+		break;
+	case emu_settings_type::VulkanAppleDriver:
+		switch (static_cast<vulkan_apple_driver>(index))
+		{
+		case vulkan_apple_driver::auto_: return tr("Auto (Default)", "Vulkan Driver");
+		case vulkan_apple_driver::moltenvk: return tr("MoltenVK", "Vulkan Driver");
+		case vulkan_apple_driver::kosmickrisp: return tr("KosmicKrisp", "Vulkan Driver");
 		}
 		break;
 	case emu_settings_type::StereoRenderMode:

@@ -37,7 +37,7 @@ public:
 	emu_settings(std::shared_ptr<render_creator> r_creator);
 
 	/** Connects a combo box with the target settings type*/
-	void EnhanceComboBox(QComboBox* combobox, emu_settings_type type, bool is_ranged = false, bool use_max = false, int max = 0, bool sorted = false, bool strict = true);
+	void EnhanceComboBox(QComboBox* combobox, emu_settings_type type, bool is_ranged = false, bool use_max = false, int max = 0, bool sorted = false, bool strict = true, const QStringList& disabled_options = {});
 
 	/** Connects a check box with the target settings type*/
 	void EnhanceCheckBox(QCheckBox* checkbox, emu_settings_type type);
