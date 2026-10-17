@@ -435,16 +435,41 @@ hazard was recorded and `emit_barrier` had no caller. The scheduler is now drive
 depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
 and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
-The open set is the depth read-back encode (B16, the inverse of the B8 decode and
-its z16 half-to-float step), the logic op (C1/E6), the latch dataflow and its dead
-fields (E13) and the DMA, image and sync clusters. Each carries its open question
-in `REVIEW-FINDINGS.md`, "Parked for review", because none can be settled from the
-tree alone: they wait on a hardware measurement, a Metal 4 behaviour check, or a
-decision the acceptance harness owns. The PSO attachment-count key (E3) is closed
-without a change: the proposed colour-attachment map bridges a gap the RSX
-renumbering does not leave. The DMA, image and sync units (F11) closed by deletion:
-they were decode-only duplicates of the shared NV47 handlers, and the device reports
-no passthrough DMA and no host GPU labels.
+The unfinished set is the depth read-back encode (B16, the inverse of the B8 decode
+and its z16 half-to-float step) and the latch dataflow and its dead fields (E13). One
+finding is open outright: the flat-shading path (G1), because Metal has no
+provoking-vertex state, so the RSX last-vertex convention has no native expression.
+The items the `REVIEW-FINDINGS.md` "Parked for review" table lists also wait, because
+none can be settled from the tree alone: they wait on a hardware measurement, a
+Metal 4 behaviour check, or a decision the acceptance harness owns. The logic op
+(C1/E6) and the binding-cap set (A9) have both closed and are described below. The PSO
+attachment-count key (E3) is closed without a change: the proposed colour-attachment
+map bridges a gap the RSX renumbering does not leave. The DMA, image and sync units
+(F11) closed by deletion: they were decode-only duplicates of the shared NV47
+handlers, and the device reports no passthrough DMA and no host GPU labels.
+
+B16 has its decision, and the wiring still has to wait. The inverse of the depth
+decode belongs on the CPU, as `decode_depth_plane` does on the upload, because the
+two must stay exact inverses and the encode has no second consumer; a GPU pass
+would put the codec in GLSL for one path and would still need the CPU for the
+stencil half. The read-back therefore has to reach host memory: the plane copy goes
+to a shared staging buffer, the frame commits and waits with the existing readback
+wait (B4), and the encode writes the guest pack into the target buffer. Nothing
+reaches this path today, so the item is a decision recorded rather than a defect
+reachable in the tree.
+
+The logic op (C1/E6) closed by emulation. Metal has no logic-op state, so the
+fragment shader reads the destination colour through the framebuffer fetch the
+programmable-blend path already owns (`[[color(n)]]`, the `subpassInput` the shared
+ROP prologue declares) and applies the op in the epilogue. The capability
+`supports_native_logic_op` defaults to true, so Vulkan and OpenGL keep their native
+op, and only Metal folds the new `RSX_SHADER_CONTROL_LOGIC_OP` bit and declares
+`_ENABLE_LOGIC_OP`. The destination load is unconditional under the op, because the
+ROP blend-target bits are written only under programmable blending and the op
+replaces blending. The op itself travels in the fragment push-constant block, so a
+change of op does not recompile the shader, and the emulation quantizes both colours
+to the guest's 8-bit unorm encoding, which is the only encoding in which the op is
+defined.
 
 The texture initialisation path (B8) and the combined-format copy (B15) closed. B8
 now decodes the guest depth pack into the host plane with
@@ -455,16 +480,57 @@ driver defect: an un-named copy of a combined format is invalid API, and the nam
 plane form writes and reads back bit-exact on private and on shared storage, so no
 Metal 3 blit and no render pass is needed.
 
-A9 is the one item that blocks first light. The Metal 4 shader compiler caps an MSL
-`[[buffer(n)]]` index at 30, a `[[sampler(n)]]` index at 15 and a `[[texture(n)]]`
-index at 127, and no language version from 3.1 to 4.0 moves the caps. The map in
-`MTLArgumentBinds.h` names buffer 51 for the fill values and sampler indices above
-15 for the fragment textures, so the fill library cannot be created and no fragment
-shader that samples a texture can be compiled. A device-level ladder outside the
-tree reproduced the caps and confirmed the rest of the encode path: a clear, one
-triangle, one sampled texture, a depth test and a depth write each produce the
-expected pixels, and a draw captures the argument table when the encoder binds it,
-which is the semantics the map's re-bind depends on.
+A9 blocked first light and is now closed. The Metal 4 shader compiler
+caps an MSL `[[buffer(n)]]` index at 30, a `[[sampler(n)]]` index at 15 and a
+`[[texture(n)]]` index at 127, and no language version from 3.1 to 4.0 moves the
+caps; the argument table descriptor caps its sampler space at 16, the same value.
+Four sites sat above a cap. The fill values sat at buffer 51, so the fill library
+could not be created and every clear and every output pass was dropped; the slot is
+now 30, the last index the buffer cap allows, and the header asserts it. The
+texture units took their texture index as their sampler index, so no fragment
+shader that sampled a unit and no vertex shader that used a VTF unit could be
+compiled; the sampler index is now the unit's position inside its stage's texture
+range, and the table writer takes both indices per unit. The table's sampler count
+followed the texture count, so the descriptor asked for 51 against the cap of 16
+and the validation layer aborted the process on it. The depth mirror and the depth
+input also exceeded the cap: Metal has no combined image sampler, so their entries
+could not share the 16 unit entries, and the fix is a separate texture fetched
+without a sampler. Both are now samplerless — the mirror an integer `utexture2D`
+read with `texelFetch`, the depth input a `texture2D` the shared epilogue already
+fetched — so the sampler space holds the 16 units and nothing else. The in-tree
+GLSL-to-MSL hop has no test, so first light is where the emitted declarations are
+first verified.
+
+The device-level ladder outside the tree is green end to end. It reproduces the
+caps, and then covers, in order: a clear; a full-screen fill through the argument
+table, which is what the new fill slot unblocked; one sampled texture; a depth test
+and a depth write; two draws in one pass with a scissored table re-bind, which shows
+the encoder captures the argument table when it is bound; a pass split whose surface
+is read back through a sampler and carries a pattern no other rung produces, so a
+broken read cannot look like a working one; the presenter's copy into a shared
+buffer; and a matrix of read-back edges, every row of which is correct. The
+ladder's one hard lesson is about residency, not barriers: a resource the queue has
+not been told about is not resident, a compute-encoder copy from it writes nothing
+while the commit still reports success, and the queue then wedges with a timeout.
+Every read-back failure the ladder first showed was that, and the false blame fell
+on the barrier form until the residency set went in. The backend's residency
+manager is what makes the same shapes work in the tree.
+
+The ladder's cap measurement fixed the target form for the two over-cap
+declarations, and a second device probe then ran the whole shape of a playable 2D
+frame in one command buffer (`/tmp/rsxframe`): a sprite upload verified with
+`getBytes` before rendering, an alpha-blended pass whose arithmetic is exact at three
+sample points (`Cs * 0.625`), a depth surface copied to a mirror, a second pass that
+reads the samplerless stencil and depth mirrors and re-samples the RTT at a
+half-scale offset so its output is distinguishable from the first, a read-back of
+both surfaces, and a present. Every check held. Two device constraints came out of
+it: a depth-only view of a combined Depth32Float_Stencil8 texture is rejected
+(`texture view pixelFormat ... not castable`), so the depth input binds the combined
+texture directly and only the stencil view is castable; and `[[position]]` cannot be
+declared both in the stage-in struct and as a fragment parameter. The probe also
+measured that the explicit producer-to-consumer barrier changed no pixel on this
+device for this encoder structure, which is recorded as a measurement and not as a
+rule that the barrier can be dropped.
 
 The partial set is the flip preamble (F5), the drawable layer setup (F9) and the
 sampler LOD clamp (E8, which implements the clamp and records the bias as a
@@ -512,6 +578,28 @@ operand order compensated, because Metal compares the reference against the texe
 and the RSX compares the texel against the reference. The sampler path now swaps
 the directed functions, which is what Vulkan already does. The measurement is in
 the register, and the native path is therefore kept.
+
+## Performance testing owed
+
+The review accepted three diagnostics and none is in the tree, on purpose: a
+counter on the draw path costs the path it measures, and the first numbers have to
+come from a frame with real content rather than from a synthetic probe. They are
+recorded here so the decision is not lost.
+
+- **The pass-split count.** How often a hazard cannot be emitted inside the open
+  encoder, which is the TBDR feedback case the scheduler carries to the next
+  encoder. It is the direct measure of how much the design's barrier placement
+  costs, and the scheduler already latches the fact.
+- **The heap high-water mark.** The committed shared and private heap bytes, one
+  line per heap block. The pools are 32 MiB (shared) and 128 MiB (private), heaps
+  are never released until shutdown, and the target machine has 8 GB, so the
+  number says whether a long session is close to its budget.
+- **A trim policy for the pools.** Once the high-water mark is known: release a
+  pool that stayed idle for a whole frame ring, or mark its blocks purgeable. Only
+  worth a policy once the mark says the memory is a problem.
+
+The measurements come first. `HANDOFF.md` carries them as an open question for the
+first session that runs real content.
 
 ## The depth/stencil-as-texture cluster
 
@@ -600,17 +688,23 @@ draw-written resolve cases, and no barrier is worse.
 unresolve, and `framebuffer::open_pass` keeps `StoreActionStore` on the depth and
 stencil attachments because a clause pass is not the last writer of that image.
 
-The two depth-as-texture binds are combined image samplers in the MSL layout, because the
-generated GLSL declares `usampler2D` and `sampler2D` (`MTLFragmentProgram.cpp:108,119`) and
-SPIRV-Cross gives both a texture and a sampler at the same index (`MTLShader.cpp:52-53`).
-Each therefore binds a texture and a sampler.  The stencil half uses its own
-nearest/clamp-to-border opaque-black sampler (`stencil_mirror_sampler`), because the
-unit's sampler may be a comparison sampler (`VKDraw.cpp:707-717`).
+The two depth-as-texture binds are separate, samplerless textures in the MSL layout.
+The generated GLSL declares an integer `utexture2D` for the stencil mirror and a
+`texture2D` for the depth input, and the Metal resource map gives each a texture with
+no sampler, so neither spends a sampler index.  The shared snippets express the
+mirror read as `texture()` on a combined sampler, so the Metal side re-defines the
+two macros that read it and uses `texelFetch`.  The mirror's own state is
+`stencil_mirror_sampler`: nearest, clamp-to-border, opaque black
+(`MTLSamplerState.cpp:187-196`), and the out-of-range result of the fetch is zero,
+which is what the border gives.
 
 ## The macOS 27 floor and the KosmicKrisp workarounds
 
-The backend floor is macOS 27 (`mtl::metal4_api_floor` 26, `offer_floor` 27), and
-KosmicKrisp's workaround ledger
+The backend floor is macOS 27 (`mtl::metal4_api_floor` 26, `offer_floor` 27).  The UI
+offers the renderer as "Metal (experimental)" (`rpcs3qt/emu_settings.cpp`, the
+`video_renderer::metal` display name), and the renderer list gate hides it on a host
+below the floor (`rpcs3qt/settings_dialog.cpp`, `metal4_available`), so an
+unsupported host never sees the option.  KosmicKrisp's workaround ledger
 (`docs.mesa3d.org/drivers/kosmickrisp/workarounds.html`) is the best available
 prior art for what breaks in Metal 4. Every entry that resolved at or before the
 floor needs no reproduction here, so the ledger is a filter rather than a

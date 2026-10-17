@@ -4,6 +4,8 @@
 
 #include "Emu/RSX/rsx_methods.h"
 
+#include <cstring>
+
 namespace mtl
 {
 	raster_state capture_raster_state()
@@ -28,7 +30,7 @@ namespace mtl
 		state.user_clip_control = rsx::method_registers.clip_planes_mask();
 
 		state.stipple_enabled = rsx::method_registers.polygon_stipple_enabled();
-		state.stipple_pattern = rsx::method_registers.polygon_stipple_pattern();
+		std::memcpy(state.stipple_pattern.data(), rsx::method_registers.polygon_stipple_pattern(), sizeof(state.stipple_pattern));
 
 		state.point_sprite_enabled = rsx::method_registers.point_sprite_enabled();
 		state.point_sprite_mask = rsx::method_registers.point_sprite_control_mask();

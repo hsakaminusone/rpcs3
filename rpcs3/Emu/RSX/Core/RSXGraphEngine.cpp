@@ -1181,6 +1181,14 @@ namespace rsx
 			m_ctx->program.fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TEST;
 		}
 
+		if (REGS(m_ctx)->logic_op_enabled() && !RSX(m_ctx)->get_backend_config().supports_native_logic_op)
+		{
+			// The host has no logic-op state, so the ROP reads the destination colour
+			// and applies the op in the shader (REVIEW-FINDINGS.md C1).  The op
+			// replaces blending, which the blend state disables when it is enabled.
+			m_ctx->program.fragment_program.ctrl |= RSX_SHADER_CONTROL_LOGIC_OP;
+		}
+
 		if (REGS(m_ctx)->msaa_alpha_to_coverage_enabled())
 		{
 			const bool is_multiple_samples = REGS(m_ctx)->surface_antialias() != rsx::surface_antialiasing::center_1_sample;

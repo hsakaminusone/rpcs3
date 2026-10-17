@@ -57,16 +57,67 @@ namespace mtl
 		fragment_depth_input_slot = fragment_subpass_slot_base + 4,                       // 50
 
 		// The built-in full-screen fill is not an RSX draw, so its values have no RSX
-		// slot.  It continues above the map, in the buffer space only.
-		fill_values_slot = fragment_depth_input_slot + 1, // 51
+		// slot.  It takes the last buffer index the MSL cap allows.  Index 30 is also
+		// the first stencil-mirror texture, which is no collision: a buffer and a
+		// texture are separate spaces (REVIEW-FINDINGS.md A9).
+		fill_values_slot = 30,
 	};
+
+	// The MSL index of the sampler half of a texture unit.  MSL caps [[sampler(n)]]
+	// at 15 (REVIEW-FINDINGS.md A9) and the RSX ABI puts every texture unit at 12 or
+	// above, so a unit cannot reuse its texture index as its sampler index.  A unit
+	// takes its position inside the stage's texture range instead.  The shader-side
+	// remap (MTLShader.cpp) and the table writer below must agree, so both call
+	// this.  Only a slot that slot_has_sampler accepts may be passed.
+	constexpr u32 texture_sampler_index(u32 slot)
+	{
+		return slot - texture_slot_base;
+	}
+
+	// True when a slot's MSL declaration carries a sampler.  Only a texture unit
+	// does: a unit is a combined image sampler written as two Metal entries, so its
+	// image and its state both need an index.  The depth-as-texture inputs are
+	// plain textures read with read() and carry no sampler in the A9 form, so one
+	// index each.  The table writer uses this to decide whether a slot has a
+	// sampler to write, which keeps a sampler bind inside the table's sampler space:
+	// the validation layer aborts on a bind past the declared count (measured,
+	// /tmp/flprobe/tbl.mm, exit 134).
+	constexpr bool slot_has_sampler(u32 slot)
+	{
+		return slot >= texture_slot_base && slot < texture_slot_base + fragment_texture_count;
+	}
 
 	// The argument-table shape follows the map, so a new slot cannot overflow the
 	// table in silence (HLD-05 §4 invariant 3).  The counts are the highest index
 	// in each space, plus one.
-	constexpr u32 argument_buffer_count = fill_values_slot + 1;           // 52
+	constexpr u32 argument_buffer_count = fill_values_slot + 1;           // 31
 	constexpr u32 argument_texture_count = fragment_depth_input_slot + 1; // 51
-	constexpr u32 argument_sampler_count = argument_texture_count;
+
+	// The argument table has a sampler cap of its own, separate from the MSL
+	// declaration cap and the same value (REVIEW-FINDINGS.md A9): the argument table
+	// descriptor must not ask for more than 16 sampler entries, and the API
+	// validation layer asserts it.  A stage needs one sampler per texture unit and no
+	// more, because the depth mirror and the depth input become samplerless textures
+	// in the A9 form, so the unit count is the whole requirement.
+	constexpr u32 argument_sampler_count = 16;
+
+	// MSL caps the shader-side index of each space (REVIEW-FINDINGS.md A9): a
+	// declaration above its cap makes the library fail to build.  A slot the map
+	// hands to a shader must stay inside the cap, so the map is asserted against
+	// them here.  The stencil mirror and the depth input are separate textures in
+	// the A9 form, so they leave the sampler space entirely and the 16 units are its
+	// whole requirement.  The shader side declares them as such and reads them with
+	// an unfiltered texel fetch (MTLFragmentProgram.cpp), and the SPIRV-Cross side
+	// gives them no sampler index (MTLShader.cpp).
+	static_assert(fill_values_slot <= 30, "the ABI map overflows the MSL buffer index cap");
+	static_assert(fragment_depth_input_slot <= 127, "the ABI map overflows the MSL texture index cap");
+	static_assert(argument_sampler_count <= 16, "the argument table overflows the MSL sampler index cap");
+	static_assert(fragment_texture_count <= argument_sampler_count, "the texture units need more samplers than the table holds");
+	static_assert(vertex_texture_count <= argument_sampler_count, "the texture units need more samplers than the table holds");
+	static_assert(texture_sampler_index(texture_slot_base + fragment_texture_count - 1) < argument_sampler_count,
+		"the last texture unit's sampler index leaves the argument table's sampler space");
+	static_assert(!slot_has_sampler(fragment_stencil_slot_base), "a depth mirror must not carry a sampler");
+	static_assert(!slot_has_sampler(fragment_depth_input_slot), "the depth input must not carry a sampler");
 
 	// One RSX texture unit occupies one index in two tables because MSL has no
 	// combined image sampler: the image is a texture entry and its state a sampler
@@ -109,11 +160,13 @@ namespace mtl
 
 		// The depth-as-texture inputs.  A redirected depth unit also reads the
 		// stencil half of its surface at [30..45]; the emulated depth compare reads a
-		// depth mirror at [50].  Both are combined image samplers in the MSL layout,
-		// so each carries a sampler at its own index as well as a texture.  Metal
-		// forbids reading a texture that is an attachment in the open pass, so each
-		// mirror is a distinct image, copied at the clause boundary
-		// (REALISATION.md, "The depth/stencil-as-texture cluster").
+		// depth mirror at [50].  Each takes one index and no sampler: the A9 form
+		// declares it as a plain texture read with read(), so the writer binds the
+		// image only (slot_has_sampler).  The sampler half of the entry stays in the
+		// type because the entry is shared with a texture unit.  Metal forbids reading
+		// a texture that is an attachment in the open pass, so each mirror is a
+		// distinct image, copied at the clause boundary (REALISATION.md, "The
+		// depth/stencil-as-texture cluster").
 		std::array<texture_bind, fragment_texture_count> fragment_stencil{}; // [30..45]
 		texture_bind fragment_depth_input{};                                 // [50]
 	};

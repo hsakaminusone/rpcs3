@@ -58,16 +58,23 @@ namespace mtl
 			}
 		};
 
-		const auto unit = [&](const texture_bind& value, const texture_bind& old, NS::UInteger index)
+		// A unit's image and its state are two entries, and they take different
+		// indices: MSL caps the sampler index at 15 while the RSX ABI puts every unit
+		// at 12 or above, so the state takes the unit's position inside the stage's
+		// texture range (MTLArgumentBinds.h, texture_sampler_index).  A depth-as-
+		// texture entry takes one index and no sampler at all (slot_has_sampler),
+		// because its MSL form reads the image directly.  The rule lives in the
+		// header so the writer and the table shape cannot disagree.
+		const auto unit = [&](const texture_bind& value, const texture_bind& old, NS::UInteger texture_slot)
 		{
 			if (value.texture._impl != 0 && (first_bind || value.texture._impl != old.texture._impl))
 			{
-				table->setTexture(value.texture, index);
+				table->setTexture(value.texture, texture_slot);
 				changed = true;
 			}
-			if (value.sampler._impl != 0 && (first_bind || value.sampler._impl != old.sampler._impl))
+			if (slot_has_sampler(texture_slot) && value.sampler._impl != 0 && (first_bind || value.sampler._impl != old.sampler._impl))
 			{
-				table->setSamplerState(value.sampler, index);
+				table->setSamplerState(value.sampler, texture_sampler_index(texture_slot));
 				changed = true;
 			}
 		};
@@ -102,8 +109,10 @@ namespace mtl
 				unit(binds.fragment_textures[index], previous.fragment_textures[index], texture_slot_base + index);
 			}
 
-			// The depth-as-texture inputs are combined image samplers at their own
-			// index, so they bind a texture and a sampler like a texture unit.
+			// The depth-as-texture inputs take one index each and carry no sampler:
+			// their MSL form is a separate texture read with read() (REVIEW-FINDINGS.md
+			// A9; MTLFragmentProgram.cpp declares them and reads them that way), so the
+			// writer binds the image only.
 			for (u32 index = 0; index < fragment_texture_count; ++index)
 			{
 				unit(binds.fragment_stencil[index], previous.fragment_stencil[index], fragment_stencil_slot_base + index);

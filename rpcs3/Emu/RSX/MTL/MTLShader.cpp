@@ -31,11 +31,23 @@ namespace mtl
 {
 	namespace
 	{
-		// One SPIRV-Cross resource -> MSL binding.  The Vulkan binding the Metal
-		// GLSL wrapper declares is already the fixed RSX slot (HLD-05 §3.1), so
-		// the MSL index is that binding.  A combined image sampler becomes a
-		// texture and a sampler at the same index (HLD-05 §3.2).
-		void remap_resource_binding(spirv_cross::CompilerMSL& compiler, spirv_cross::ExecutionModel stage, const spirv_cross::Resource& resource)
+		// Which MSL space a SPIRV-Cross resource couples to.  The Vulkan binding the
+		// Metal GLSL wrapper declares is already the fixed RSX slot (HLD-05 §3.1), so
+		// the texture and buffer indices are that binding.  Only a combined image
+		// sampler takes a different sampler index: MSL caps the sampler index at 15
+		// and the texture units start at 12, so a unit takes its position inside the
+		// stage's texture range instead (REVIEW-FINDINGS.md A9).  The depth mirror and
+		// the depth input are separate images, so they take the binding in the texture
+		// space and no sampler index at all.
+		enum class sampler_coupling
+		{
+			none,
+			unit,
+			separate_sampler,
+		};
+
+		void remap_resource_binding(spirv_cross::CompilerMSL& compiler, spirv_cross::ExecutionModel stage,
+			const spirv_cross::Resource& resource, sampler_coupling coupling)
 		{
 			const u32 set = compiler.has_decoration(resource.id, spv::DecorationDescriptorSet)
 				? compiler.get_decoration(resource.id, spv::DecorationDescriptorSet)
@@ -50,12 +62,34 @@ namespace mtl
 			msl_binding.binding = binding;
 			msl_binding.msl_buffer = binding;
 			msl_binding.msl_texture = binding;
-			msl_binding.msl_sampler = binding;
+
+			switch (coupling)
+			{
+			case sampler_coupling::unit:
+				// The rule lives in the header so the shader side and the table writer
+				// cannot disagree.
+				if (slot_has_sampler(binding))
+				{
+					msl_binding.msl_sampler = texture_sampler_index(binding);
+				}
+				break;
+			case sampler_coupling::separate_sampler:
+				msl_binding.msl_sampler = binding;
+				break;
+			case sampler_coupling::none:
+				break;
+			}
+
 			compiler.add_msl_resource_binding(msl_binding);
 		}
 	}
 
-	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask, u32 push_slot)
+	// The cross-compiler body.  It is separate from spv_to_msl so the one file can
+	// be compiled with exceptions (Emu/CMakeLists.txt): SPIRV-Cross reports an
+	// unsupported or malformed module by throwing, and without a catch its own
+	// exception-to-assertion form aborts the process instead of failing one
+	// pipeline (REALISATION.md, "The remaining risk").
+	static bool build_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask, u32 push_slot)
 	{
 		if (spv.empty())
 		{
@@ -83,23 +117,30 @@ namespace mtl
 			: spirv_cross::ExecutionModelFragment;
 
 		const spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-		const spirv_cross::SmallVector<spirv_cross::Resource>* lists[] =
+		// A combined image sampler is the only resource kind that reaches a sampler
+		// index the units do not already hold; a bare sampler keeps its binding, and
+		// every other kind takes the binding in the buffer and texture spaces only.
+		const struct
 		{
-			&resources.uniform_buffers,
-			&resources.storage_buffers,
-			&resources.storage_images,
-			&resources.sampled_images,
-			&resources.separate_images,
-			&resources.separate_samplers,
-			&resources.atomic_counters,
-			&resources.subpass_inputs,
+			const spirv_cross::SmallVector<spirv_cross::Resource>* list;
+			sampler_coupling coupling;
+		} lists[] =
+		{
+			{ &resources.uniform_buffers, sampler_coupling::none },
+			{ &resources.storage_buffers, sampler_coupling::none },
+			{ &resources.storage_images, sampler_coupling::none },
+			{ &resources.sampled_images, sampler_coupling::unit },
+			{ &resources.separate_images, sampler_coupling::none },
+			{ &resources.separate_samplers, sampler_coupling::separate_sampler },
+			{ &resources.atomic_counters, sampler_coupling::none },
+			{ &resources.subpass_inputs, sampler_coupling::none },
 		};
 
-		for (const auto* list : lists)
+		for (const auto& entry : lists)
 		{
-			for (const spirv_cross::Resource& resource : *list)
+			for (const spirv_cross::Resource& resource : *entry.list)
 			{
-				remap_resource_binding(compiler, stage, resource);
+				remap_resource_binding(compiler, stage, resource, entry.coupling);
 			}
 		}
 
@@ -143,6 +184,19 @@ namespace mtl
 		}
 
 		return true;
+	}
+
+	bool spv_to_msl(const std::vector<u32>& spv, bool is_vertex, std::string& msl, u32* color_output_mask, u32 push_slot)
+	{
+		try
+		{
+			return build_msl(spv, is_vertex, msl, color_output_mask, push_slot);
+		}
+		catch (...)
+		{
+			rsx_log.error("Metal: the cross-compiler rejected the module");
+			return false;
+		}
 	}
 
 	MTL::Library* compile_msl(MTL4::Compiler* compiler, const std::string& msl, NS::Error** error)

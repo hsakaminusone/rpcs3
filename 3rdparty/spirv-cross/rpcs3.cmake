@@ -31,13 +31,13 @@ if(USE_METAL4)
 		# unannotated switch fall-throughs, so the inherited set is neutralised
 		# for this target only.  target_compile_options is appended after the
 		# directory options, so the later flags win.
-		target_compile_options(3rdparty_spirv_cross_impl PRIVATE -w -Wno-error)
-
-		# RPCS3 builds with -fno-exceptions (ConfigureCompiler.cmake:33).
-		# SPIRV-Cross throws CompilerError unless this is set
-		# (spirv_cross_error_handling.hpp:30-77).  PUBLIC so the headers and the
-		# consumers agree on the non-throwing form.
-		target_compile_definitions(3rdparty_spirv_cross_impl PUBLIC SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS)
+		#
+		# RPCS3 builds with -fno-exceptions (ConfigureCompiler.cmake:33), which
+		# turns the inherited SPIRV_CROSS_THROW into a compile error.  The library
+		# is therefore built with exceptions so a bad module reaches the caller as
+		# a throw: MTLShader.cpp is the single consumer and the single catch
+		# (Emu/CMakeLists.txt).
+		target_compile_options(3rdparty_spirv_cross_impl PRIVATE -w -Wno-error -fexceptions)
 
 		# SYSTEM: SPIRV-Cross is third-party, as with metal-cpp.
 		target_include_directories(3rdparty_spirv_cross_impl SYSTEM PUBLIC

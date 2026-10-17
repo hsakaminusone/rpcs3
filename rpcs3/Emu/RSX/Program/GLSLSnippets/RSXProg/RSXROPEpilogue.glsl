@@ -57,6 +57,16 @@ R"(
 	MRT3_BLEND_DO(col3 = _mrt_color_t(do_blend(col3, mrt_color3));)
 #endif
 
+#ifdef _ENABLE_LOGIC_OP
+	// The op replaces blending, so it takes the raw shader output and the destination
+	// the prologue loaded, both in the framebuffer's own 8-bit unorm encoding
+	// (REVIEW-FINDINGS.md C1).
+	MRT0_DO(col0 = _mrt_color_t(_logic_op_apply(vec4(col0), vec4(mrt_color0), logic_op));)
+	MRT1_DO(col1 = _mrt_color_t(_logic_op_apply(vec4(col1), vec4(mrt_color1), logic_op));)
+	MRT2_DO(col2 = _mrt_color_t(_logic_op_apply(vec4(col2), vec4(mrt_color2), logic_op));)
+	MRT3_DO(col3 = _mrt_color_t(_logic_op_apply(vec4(col3), vec4(mrt_color3), logic_op));)
+#endif
+
 #ifdef _ENABLE_ROP_CHANNEL_REMAPPING
 	MRT0_DO(col0 = _mrt_color_t(remap_ROP_output(col0, ROP_remap));)
 	MRT1_DO(col1 = _mrt_color_t(remap_ROP_output(col1, ROP_remap));)

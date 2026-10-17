@@ -1102,7 +1102,7 @@ namespace mtl
 		binds.fragment_stencil = frame.fragment_stencil;
 		binds.fragment_depth_input = frame.depth_input;
 
-		if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
+		if (current_fragment_program.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
 		{
 			blend_values* blend = frame.constants.alloc_blend_values();
 			if (!blend)
@@ -1110,6 +1110,9 @@ namespace mtl
 				return;
 			}
 
+			// The block carries the blend configuration and the logic op, so it is
+			// filled when either feature is on; the program reads only the part it
+			// emulates (REVIEW-FINDINGS.md C1).
 			blend->reserved = 0;
 			blend->blend_eqn = pack_blend_pair(
 				static_cast<u32>(rsx::method_registers.blend_equation_rgb()),
@@ -1123,6 +1126,8 @@ namespace mtl
 
 			const std::array<f32, 4> colors = rsx::get_constant_blend_colors();
 			std::copy(colors.begin(), colors.end(), blend->blend_constants);
+
+			blend->logic_op = static_cast<u32>(rsx::method_registers.logic_operation());
 
 			binds.fragment_blend = frame.constants.blend_values_block_address();
 		}
