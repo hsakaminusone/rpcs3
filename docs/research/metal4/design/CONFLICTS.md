@@ -5,6 +5,10 @@ The rule: record the dial, both references, and move on.  Never rewrite either
 side silently.  The RSX tree wins on what the RSX does.  A design doc wins on how
 we re-express the RSX in Metal 4.
 
+A citation conflict is a place where a design doc points at the wrong line of the
+tree or of the inventory.  The register records it the same way, under the `X`
+prefix.  A citation conflict changes no design decision.
+
 ---
 
 ## C1 — the clear region
@@ -161,5 +165,130 @@ The LLD text is left unchanged for its author to correct.
 **Open.** Unverified against a title.  A quad strip is not a triangle strip in
 vertex order, so a title that draws one may show wrong triangles.  The tree's
 reading is consistent across both shipping backends, so this port follows it.
+
+---
+
+## X1 — the `nv308a.cpp` inventory citation
+
+**Design doc says.** `LLD-nv308a-image.md:32` and `:301` cite
+`inventory/out/SUMMARY.md:518` for the `nv308a.cpp` "0 functions" row.
+
+**The tree says.** The row is at `inventory/out/SUMMARY.md:520`.  Line 518 is
+`nv0039.cpp`.
+
+**Resolution.** The claim is correct: the generator does not count
+`nv308a::color::impl`, a nested static member, so `nv308a.cpp` reports 0.  Only
+the citation is off by two lines.  The LLD text is left unchanged for its author
+to correct.
+
+## C6 — the native pitch of an exploded surface
+
+**Dials.** `surface` cluster: `M_NV4097_SET_SURFACE_FORMAT` (0x0208, the
+antialias field) and `M_NV4097_SET_SURFACE_PITCH_A` (0x020c).
+
+**Design doc says.** `HLD-02-resource-model.md:155-160` and `:485`: "`native_pitch`
+— the Metal texture row stride … The invariant (§4) is `native_pitch ≥ rsx_pitch`
+and `native_pitch ≥ bpp × width`."
+
+**The tree says.** `surface_utils.h:256` defines
+`get_bpp()` as `native_pitch / get_surface_width<rsx::surface_metrics::samples>()`,
+and `surface_utils.h:205-208` defines that width as `surface_width * samples_x`.
+So `get_bpp()` returns the format block size only when
+`native_pitch == width × bpp × samples_x`.  The doc states a lower bound with no
+upper bound, so a value that only satisfies the bound breaks `get_bpp()`, which
+the generic store reads (`surface_utils.h:570`, `surface_utils.h:577`).
+
+**Resolution.** `native_pitch = width × bpp × samples_x`, the exact value
+`get_bpp()` requires.  It satisfies the doc's bound when `samples_x == 1` and
+exceeds it otherwise.  The `≥ rsx_pitch` clause has no consumer: the host texture
+row is not a guest row, and the guest row is `rsx_pitch`, which drives
+`memory_range`.  The doc text is left unchanged for its author to correct.
+
+---
+
+## X2 — the `mtl_surface` field types
+
+**Design doc says.** `HLD-02-resource-model.md:411-412` writes the `mtl_surface`
+sketch with `MTL::Texture* texture;` and `MTL::Texture* resolve;`.
+
+**The tree says.** `surface_utils.h:160` declares `resolve_surface` as
+`std::unique_ptr<remove_pointer_t<image_storage_type>>`, so the storage type must
+be an owning handle with a destructor.  A `metal-cpp` object is not destructible:
+`NS::Object` declares `~Object() = delete` (`Foundation/NSObject.hpp:95`).
+Further, `surface_utils.h:504` cross-casts an image to `rsx::ref_counted`, so the
+storage type must be polymorphic, and `surface_store.h:391` casts an image back to
+the surface type, so the surface type must derive from the image type.
+
+**Resolution.** `image_storage_type = mtl::texture*` — the type
+`HLD-01-architecture.md:240` names — `mtl::texture` is an owning, polymorphic
+handle, and `mtl::surface` derives from it.  HLD-02 §3.2's sketch field types are
+not implementable as written; the sketch is left unchanged for its author to
+correct.
+
+---
+
+## C7 — cull face, front face, polygon mode and the depth/stencil formats
+
+**Dials.** `raster` cluster: `M_NV4097_SET_CULL_FACE` (0x1830),
+`M_NV4097_SET_CULL_FACE_ENABLE` (0x183c), `M_NV4097_SET_FRONT_FACE` (0x1834),
+`M_NV4097_SET_FRONT_POLYGON_MODE` (0x1828), `M_NV4097_SET_BACK_POLYGON_MODE`
+(0x182c) and `M_NV4097_SET_POLY_OFFSET_FILL_ENABLE` (0x0a68); plus the depth and
+stencil fields of `M_NV4097_SET_SURFACE_FORMAT` (0x0208).
+
+**Design doc says.** `HLD-05-shader-binding-contract.md:331` places the raster
+cluster's cull face and front face in the **pipeline**: `setRasterizationEnabled`,
+`setCullMode`, `setFrontFacingWinding`.  `:333` places the depth and stencil pixel
+formats in the pipeline too.  `:166` repeats the assignment.
+
+**The SDK says.** `3rdparty/metal-cpp/Metal/MTL4RenderPipeline.hpp` declares
+`MTL4::RenderPipelineDescriptor` with `setRasterSampleCount` (`:189`),
+`setRasterizationEnabled` (`:191`), `setInputPrimitiveTopology` (`:185`),
+`setAlphaToCoverageState` (`:175`) and `setAlphaToOneState` (`:177`), and per
+colour attachment `setPixelFormat` (`:82`), `setWriteMask` (`:90`) and the blend
+setters (`:76`).  It declares no `setCullMode`, no `setFrontFacingWinding`, no
+`setTriangleFillMode` and no depth/stencil attachment pixel format setter; its
+base `MTL4::PipelineDescriptor` adds only `setLabel` and `setOptions`.  The older
+Metal 3 `MTL::RenderPipelineDescriptor` does carry the format setters, so a
+Metal 3 translation reads correctly here and a Metal 4 one does not.  The missing
+state is on `MTL4::RenderCommandEncoder` instead: `setCullMode` (`:92`),
+`setDepthBias` (`:94`), `setDepthClipMode` (`:96`), `setFrontFacingWinding`
+(`:104`), `setScissorRect` (`:110`), `setStencilReferenceValues` (`:114`),
+`setTriangleFillMode` (`:120`), `setViewport` (`:124`) and `setBlendColor`
+(`:86`).  The depth and stencil attachment formats belong to the render pass.
+
+**Resolution.** The cull face, the front face, the polygon mode, the depth bias
+and the clip mode are encoder state and key nothing (`MTLEncoderState.h`).  The
+depth and stencil formats are render-pass state.  `MTLPipeline.h` therefore keeps
+only `raster_enabled` — a cull-both draw has no Metal cull mode, so it drops
+rasterisation — plus the colour format, the attachment count, the sample count,
+alpha-to-coverage, alpha-to-one, the blend latch and the write masks.  The effect
+is a *smaller* PSO key and a higher cache hit rate than the doc implies.  The
+`raster` dispositions (`raster.csv:21-26`) are already right: they name the
+`MTL4RenderCommandEncoder` setters.  Only the HLD-05 stage assignment is wrong,
+and it is left unchanged for its author to correct.
+
+---
+
+## X3 — SPIRV-Cross is assumed but not vendored
+
+**Design doc says.** `HLD-05-shader-binding-contract.md:78` describes SPIRV-Cross as
+"battle-tested (MoltenVK, Godot) and is a pinned vendored revision", and `:58`
+instructs the reader to "insert **SPIRV-Cross `CompilerMSL`** before
+`MTL4Compiler`".
+
+**The tree says.** There is no SPIRV-Cross in the tree. A search for any path or
+file matching `*spirv*cross*` or `spirv_cross*` under `3rdparty/` and under the
+whole repository returns nothing, and `.gitmodules` lists every third-party
+submodule (ffmpeg, asmjit, llvm, glslang, zlib, hidapi, pugixml and the rest) with
+no SPIRV-Cross among them. glslang **is** vendored (`3rdparty/glslang`), so
+`GLSL → SPIR-V` is available; the `SPIR-V → MSL` hop is not.
+
+**Resolution.** No design decision changes. The chain stays
+`RSX → GLSL → glslang → SPIR-V → CompilerMSL → MSL` (HLD-05 §2.3) and the three MSL
+post-passes (`:91-100`) stand. This is a prerequisite rather than a contradiction,
+and it is recorded because it gates the whole shader layer and because the doc's
+wording invites the reader to assume the tool is already present. Vendoring
+SPIRV-Cross as plain files, on the model `06` uses for metal-cpp, is the open
+action.
 
 <!-- doc-end -->

@@ -696,7 +696,14 @@ endif()
 if(TARGET 3rdparty_metal)
     target_sources(rpcs3_emu PRIVATE
         RSX/MTL/MTLDevice.cpp
+        RSX/MTL/MTLResourceManager.cpp
+        RSX/MTL/MTLCommandRecorder.cpp
+        RSX/MTL/MTLBarrier.cpp
         RSX/MTL/MTLFormats.cpp
+        RSX/MTL/MTLPassScheduler.cpp
+        RSX/MTL/MTLPipeline.cpp
+        RSX/MTL/MTLSurface.cpp
+        RSX/MTL/MTLSurfaceCache.cpp
         RSX/MTL/MTLSurfaceState.cpp
         RSX/MTL/MTLDepthStencil.cpp
         RSX/MTL/MTLRasterState.cpp
@@ -704,7 +711,14 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLSamplerState.cpp
         RSX/MTL/MTLBlendState.cpp
         RSX/MTL/MTLDrawState.cpp
+        RSX/MTL/MTLEncoderState.cpp
+        RSX/MTL/MTLArgumentBinds.cpp
         RSX/MTL/MTLGSRender.cpp
+        RSX/MTL/MTLSyncFlip.cpp
+        RSX/MTL/MTLNv0039Dma.cpp
+        RSX/MTL/MTLNv2dSurface.cpp
+        RSX/MTL/MTLNv3089Image.cpp
+        RSX/MTL/MTLNv308aImage.cpp
     )
 endif()
 
