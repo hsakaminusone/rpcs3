@@ -432,11 +432,25 @@ namespace mtl
 		m_shader = Decompile();
 	}
 
-	std::string decompile_vertex_glsl(const RSXVertexProgram& prog)
+	std::string decompile_vertex_glsl(const RSXVertexProgram& prog, std::vector<u16>* constant_ids, bool* has_indexed_constants)
 	{
 		std::string shader;
 		MTLVertexDecompilerThread decompiler(prog, shader);
 		decompiler.Task();
+
+		// The decompiler rewrites every constant read to a compact index, so the
+		// upload must supply the relocated file (GLVertexProgram.cpp:344-345,
+		// GLGSRender.cpp:1159-1171).
+		if (constant_ids)
+		{
+			*constant_ids = std::vector<u16>(decompiler.m_constant_ids.begin(), decompiler.m_constant_ids.end());
+		}
+
+		if (has_indexed_constants)
+		{
+			*has_indexed_constants = decompiler.properties.has_indexed_constants;
+		}
+
 		return shader;
 	}
 }

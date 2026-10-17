@@ -483,12 +483,18 @@ namespace mtl
 		m_shader = Decompile();
 	}
 
-	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog)
+	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets)
 	{
 		u32 size = 0;
 		std::string shader;
 		MTLFragmentDecompilerThread decompiler(prog, size, shader);
 		decompiler.Task();
+
+		if (constant_offsets)
+		{
+			*constant_offsets = decompiler.properties.constant_offsets;
+		}
+
 		return shader;
 	}
 }

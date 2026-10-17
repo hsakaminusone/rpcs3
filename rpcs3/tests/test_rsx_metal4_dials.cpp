@@ -458,8 +458,11 @@ MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_FUNC_REF)
 {
 	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
 	set_register(NV4097_SET_STENCIL_FUNC_REF, 0x5a);
+	set_register(NV4097_SET_BACK_STENCIL_FUNC_REF, 0xc3);
 
 	EXPECT_EQ(mtl::capture_stencil_references().front, 0x5a);
+	// With the two-sided test off, the back face takes the front reference.
+	EXPECT_EQ(mtl::capture_stencil_references().back, 0x5a);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_FUNC_MASK)
@@ -540,6 +543,9 @@ MTL_DIAL_TEST(depth_rop, NV4097_SET_BACK_STENCIL_MASK)
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_BACK_STENCIL_FUNC_REF)
 {
+	// The back reference is live only under a two-sided stencil test; otherwise
+	// the front reference serves both faces (GLDraw.cpp:148-156).
+	set_register(NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, 1);
 	set_register(NV4097_SET_BACK_STENCIL_FUNC_REF, 0xc3);
 
 	EXPECT_EQ(mtl::capture_stencil_references().back, 0xc3);

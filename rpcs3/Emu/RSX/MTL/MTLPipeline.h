@@ -91,9 +91,6 @@ namespace rpcs3
 		seed ^= hash_struct(properties.blend.equation_rgb);
 		seed ^= hash_struct(properties.blend.equation_a);
 		seed ^= hash_struct(properties.blend.alpha_test_enabled);
-		seed ^= hash_struct(properties.blend.alpha_func);
-		// -0.0f and +0.0f compare equal, so the hash must agree: normalise the sign.
-		seed ^= hash_struct(properties.blend.alpha_ref + 0.0f);
 		seed ^= hash_struct(properties.blend.logic_op_enabled);
 		seed ^= hash_struct(properties.blend.logic_operation);
 		seed ^= hash_struct(properties.blend.shade_mode);

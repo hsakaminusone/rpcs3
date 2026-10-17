@@ -4,6 +4,7 @@
 
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
+#include "util/fnv_hash.hpp"
 #include "util/logs.hpp"
 
 namespace mtl
@@ -89,7 +90,14 @@ namespace mtl
 
 	stencil_references capture_stencil_references()
 	{
-		return { rsx::method_registers.stencil_func_ref(), rsx::method_registers.back_stencil_func_ref() };
+		// A single-sided RSX draw applies the front reference to both faces
+		// (GLDraw.cpp:148-156; VKGSRender.cpp:351-355).
+		const u8 front = rsx::method_registers.stencil_func_ref();
+		const u8 back = rsx::method_registers.two_sided_stencil_test_enabled()
+			? rsx::method_registers.back_stencil_func_ref()
+			: front;
+
+		return { front, back };
 	}
 
 	anti_aliasing_state capture_anti_aliasing_state()
@@ -170,6 +178,92 @@ namespace mtl
 		back->release();
 		front->release();
 		return result;
+	}
+
+	bool operator==(const stencil_face& a, const stencil_face& b)
+	{
+		return a.compare == b.compare
+			&& a.fail == b.fail
+			&& a.zfail == b.zfail
+			&& a.zpass == b.zpass
+			&& a.read_mask == b.read_mask
+			&& a.write_mask == b.write_mask;
+	}
+
+	bool operator==(const depth_stencil_state& a, const depth_stencil_state& b)
+	{
+		return a.depth_compare == b.depth_compare
+			&& a.depth_write == b.depth_write
+			&& a.front == b.front
+			&& a.back == b.back;
+	}
+
+	u64 hash_depth_stencil_state(const depth_stencil_state& state)
+	{
+		// The latch is 19 small fields.  Pack each face into one word (three bits
+		// per operation, eight per mask) and hash the three words, so the hash stays
+		// consistent with operator== without touching padding.
+		struct packed
+		{
+			u32 depth;
+			u32 front;
+			u32 back;
+			u32 reserved = 0;
+		};
+
+		auto pack_face = [](const stencil_face& face) -> u32
+		{
+			return (static_cast<u32>(face.compare) << 0)
+				| (static_cast<u32>(face.fail) << 3)
+				| (static_cast<u32>(face.zfail) << 6)
+				| (static_cast<u32>(face.zpass) << 9)
+				| (static_cast<u32>(face.read_mask) << 12)
+				| (static_cast<u32>(face.write_mask) << 20);
+		};
+
+		const packed key = {
+			(static_cast<u32>(state.depth_compare) << 1) | static_cast<u32>(state.depth_write),
+			pack_face(state.front),
+			pack_face(state.back),
+		};
+
+		return rpcs3::hash_struct<packed>(key);
+	}
+
+	void depth_stencil_cache::shutdown()
+	{
+		for (const auto& [key, object] : m_cache)
+		{
+			object->release();
+		}
+
+		m_cache.clear();
+		m_device = nullptr;
+	}
+
+	MTL::DepthStencilState* depth_stencil_cache::get(const depth_stencil_state& state)
+	{
+		const auto found = m_cache.find(state);
+		if (found != m_cache.end())
+		{
+			return found->second;
+		}
+
+		MTL::DepthStencilState* object = create_depth_stencil_state(m_device, state);
+		if (object)
+		{
+			m_cache.emplace(state, object);
+		}
+
+		return object;
+	}
+
+	void apply_depth_stencil_state(MTL4::RenderCommandEncoder* encoder, depth_stencil_cache& cache, const depth_stencil_state& state)
+	{
+		if (MTL::DepthStencilState* object = cache.get(state))
+		{
+			encoder->setDepthStencilState(object);
+		}
 	}
 }
 

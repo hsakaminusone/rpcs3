@@ -23,8 +23,6 @@ namespace mtl
 				&& a.equation_rgb == b.equation_rgb
 				&& a.equation_a == b.equation_a
 				&& a.alpha_test_enabled == b.alpha_test_enabled
-				&& a.alpha_func == b.alpha_func
-				&& a.alpha_ref == b.alpha_ref
 				&& a.logic_op_enabled == b.logic_op_enabled
 				&& a.logic_operation == b.logic_operation
 				&& a.shade_mode == b.shade_mode;

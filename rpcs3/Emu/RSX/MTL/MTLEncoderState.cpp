@@ -41,15 +41,19 @@ namespace mtl
 		state.clip_width = surface.clip_width;
 		state.clip_height = surface.clip_height;
 
+		state.depth_stencil = capture_depth_stencil_state();
+
 		return state;
 	}
 
-	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor)
+	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor, depth_stencil_cache& depth_cache)
 	{
 		if (encoder == nullptr)
 		{
 			return;
 		}
+
+		apply_depth_stencil_state(encoder, depth_cache, state.depth_stencil);
 
 		encoder->setCullMode(state.cull_mode);
 		encoder->setFrontFacingWinding(state.winding);

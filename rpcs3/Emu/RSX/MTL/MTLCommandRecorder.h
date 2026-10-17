@@ -14,9 +14,6 @@
 
 namespace mtl
 {
-	// The drawable ring bounds the frame slots (HLD-03 §4.9; HLD-04 §3.2).
-	constexpr u32 frame_slot_count = 3;
-
 	// One frame slot: one allocator, one reusable command buffer, and one argument
 	// table per stage (HLD-04 §3.1).
 	struct frame_slot
@@ -52,6 +49,9 @@ namespace mtl
 		MTL4::ArgumentTable* vertex_table() const { return m_slots[m_slot].vertex_table; }
 		MTL4::ArgumentTable* fragment_table() const { return m_slots[m_slot].fragment_table; }
 
+		// The open slot, so the per-frame rings size and reset with it.
+		u32 slot() const { return m_slot; }
+
 		// The drawable this frame presents (C7).  The recorder waits for it before
 		// it encodes and signals it after the commit, so a present stays on the one
 		// submit path (HLD-03 §4.9).  Null drops the present.
@@ -70,6 +70,7 @@ namespace mtl
 		std::array<frame_slot, frame_slot_count> m_slots{};
 		u32 m_slot = 0;
 		MTL4::CommandEncoder* m_encoder = nullptr;
+		MTL4::ComputeCommandEncoder* m_compute_encoder = nullptr;
 		MTL::Drawable* m_drawable = nullptr;
 		std::mutex m_mutex;
 		std::condition_variable m_condition;

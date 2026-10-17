@@ -17,14 +17,14 @@ namespace mtl
 {
 	// The RSX ucode -> GLSL hop.  The decompiler subclasses hold the GLSL dialect;
 	// the SPIR-V, MSL and library hops stay in this unit (HLD-05 §2.1).
-	std::string decompile_vertex_program(const RSXVertexProgram& program)
+	std::string decompile_vertex_program(const RSXVertexProgram& program, std::vector<u16>& constant_ids, bool& has_indexed_constants)
 	{
-		return decompile_vertex_glsl(program);
+		return decompile_vertex_glsl(program, &constant_ids, &has_indexed_constants);
 	}
 
-	std::string decompile_fragment_program(const RSXFragmentProgram& program)
+	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets)
 	{
-		return decompile_fragment_glsl(program);
+		return decompile_fragment_glsl(program, &constant_offsets);
 	}
 
 	shader_program::~shader_program()
@@ -36,10 +36,10 @@ namespace mtl
 	}
 
 	shader_program::shader_program(shader_program&& other) noexcept
-		: id(other.id)
-		, spv(std::move(other.spv))
+		: spv(std::move(other.spv))
 		, msl(std::move(other.msl))
 		, color_output_mask(other.color_output_mask)
+		, constant_offsets(std::move(other.constant_offsets))
 		, m_library(other.m_library)
 	{
 		other.m_library = nullptr;
@@ -57,10 +57,10 @@ namespace mtl
 			m_library->release();
 		}
 
-		id = other.id;
 		spv = std::move(other.spv);
 		msl = std::move(other.msl);
 		color_output_mask = other.color_output_mask;
+		constant_offsets = std::move(other.constant_offsets);
 		m_library = other.m_library;
 		other.m_library = nullptr;
 		return *this;
@@ -104,9 +104,11 @@ namespace mtl
 		data.spv.clear();
 		data.msl.clear();
 		data.color_output_mask = 0;
+		data.constant_ids.clear();
+		data.has_indexed_constants = false;
 
 		// Vulkan-rule GLSL: glslang needs it to reach SPIR-V (HLD-05 §2.3).
-		std::string glsl = decompile_vertex_program(program);
+		std::string glsl = decompile_vertex_program(program, data.constant_ids, data.has_indexed_constants);
 		if (glsl.empty())
 		{
 			rsx_log.error("Metal: the vertex decompile produced no GLSL (vp id %u)", data.id);
@@ -132,8 +134,9 @@ namespace mtl
 		data.spv.clear();
 		data.msl.clear();
 		data.color_output_mask = 0;
+		data.constant_offsets.clear();
 
-		std::string glsl = decompile_fragment_program(program);
+		std::string glsl = decompile_fragment_program(program, data.constant_offsets);
 		if (glsl.empty())
 		{
 			rsx_log.error("Metal: the fragment decompile produced no GLSL (fp id %u)", data.id);

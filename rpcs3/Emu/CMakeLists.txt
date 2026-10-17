@@ -697,12 +697,14 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLSurfaceState.cpp
         RSX/MTL/MTLDepthStencil.cpp
         RSX/MTL/MTLRasterState.cpp
-        RSX/MTL/MTLVertexState.cpp
         RSX/MTL/MTLSamplerState.cpp
         RSX/MTL/MTLBlendState.cpp
         RSX/MTL/MTLDrawState.cpp
         RSX/MTL/MTLEncoderState.cpp
         RSX/MTL/MTLArgumentBinds.cpp
+        RSX/MTL/MTLConstants.cpp
+        RSX/MTL/MTLHandles.cpp
+        RSX/MTL/MTLTextureCache.cpp
         RSX/MTL/MTLGSRender.cpp
         RSX/MTL/MTLSyncFlip.cpp
         RSX/MTL/MTLNv0039Dma.cpp

@@ -46,7 +46,9 @@ namespace mtl
 		descriptor->setWidth(scaled_w);
 		descriptor->setHeight(scaled_h);
 		descriptor->setSampleCount(host_samples);
-		descriptor->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+		// PixelFormatView is required because a texture unit that samples this
+		// surface reads it through a swizzled view (MTLHandles.cpp:19).
+		descriptor->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView);
 		assign(m_resources->new_texture(descriptor, MTL::StorageModePrivate));
 
 		// The resolved image persists and stays samplable (HLD-02 §2.2).

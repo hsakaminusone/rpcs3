@@ -22,8 +22,8 @@ namespace mtl
 		texture* get_surface(rsx::surface_access access_type) override;
 		bool is_depth_surface() const override { return m_depth; }
 
-		u32 samples() const { return sample_count(); }
-		rsx::format_class format_class() const { return rsx::classify_format(get_gcm_format()); }
+		u8 samples() const { return static_cast<u8>(sample_count()); }
+		rsx::format_class format_class() const override { return rsx::classify_format(get_gcm_format()); }
 
 		// The scaled extent test the store uses to match an existing surface
 		// (surface_store.h:498).

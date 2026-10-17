@@ -4,6 +4,10 @@
 
 #include "Emu/RSX/rsx_methods.h"
 
+#include "util/fnv_hash.hpp"
+
+#include <bit>
+
 namespace mtl
 {
 	MTL::SamplerAddressMode get_address_mode(rsx::texture_wrap_mode mode)
@@ -117,22 +121,56 @@ namespace mtl
 		return MTL::SamplerBorderColorTransparentBlack;
 	}
 
+	namespace
+	{
+		// The fields shared by the two texture classes.  The comparison sampler is
+		// selected by the sampled format: the RSX compares a fetched depth against
+		// the reference instead of filtering it (VKDraw.cpp:404-410).
+		template <typename Texture>
+		sampler_state capture_sampler(const Texture& texture)
+		{
+			sampler_state state;
+
+			state.wrap_s = texture.wrap_s();
+			state.wrap_t = texture.wrap_t();
+			state.wrap_r = texture.wrap_r();
+			state.min_filter = texture.min_filter();
+			state.mag_filter = texture.mag_filter();
+			state.min_lod = texture.min_lod();
+			state.max_lod = texture.max_lod();
+
+			const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+			state.depth_compare = (format >= CELL_GCM_TEXTURE_DEPTH24_D8 && format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT);
+
+			return state;
+		}
+	}
+
 	sampler_state capture_fragment_sampler(u8 unit)
 	{
-		const rsx::fragment_texture& texture = rsx::method_registers.fragment_textures[unit];
+		const auto& texture = rsx::method_registers.fragment_textures[unit];
+		sampler_state state = capture_sampler(texture);
 
-		sampler_state state;
+		// The SNORM expansion is part of the RSX border colour
+		// (RSXTexture.cpp:376-378; VKDraw.cpp:412-413).
+		state.border_color = get_closest_border_color(texture.remapped_border_color(texture.argb_signed() != 0));
 
-		state.wrap_s = texture.wrap_s();
-		state.wrap_t = texture.wrap_t();
-		state.wrap_r = texture.wrap_r();
-		state.min_filter = texture.min_filter();
-		state.mag_filter = texture.mag_filter();
-		state.min_lod = texture.min_lod();
-		state.max_lod = texture.max_lod();
-		state.max_aniso = get_max_anisotropy(texture.max_aniso());
-		state.border_color = get_closest_border_color(texture.remapped_border_color());
+		// The comparison reference is SET_TEXTURE_ADDRESS.zfunc.
 		state.compare = texture.zfunc();
+		state.max_aniso = get_max_anisotropy(texture.max_aniso());
+
+		return state;
+	}
+
+	sampler_state capture_vertex_sampler(u8 unit)
+	{
+		// A vertex texture has no zfunc or signed-channel register, so it is never
+		// a comparison sampler and its border colour carries no expansion.
+		const auto& texture = rsx::method_registers.vertex_textures[unit];
+		sampler_state state = capture_sampler(texture);
+
+		state.border_color = get_closest_border_color(texture.remapped_border_color());
+		state.depth_compare = false;
 
 		return state;
 	}
@@ -161,6 +199,78 @@ namespace mtl
 
 		descriptor->release();
 		return result;
+	}
+
+	bool operator==(const sampler_state& a, const sampler_state& b)
+	{
+		return a.wrap_s == b.wrap_s
+			&& a.wrap_t == b.wrap_t
+			&& a.wrap_r == b.wrap_r
+			&& a.min_filter == b.min_filter
+			&& a.mag_filter == b.mag_filter
+			&& a.min_lod == b.min_lod
+			&& a.max_lod == b.max_lod
+			&& a.max_aniso == b.max_aniso
+			&& a.border_color == b.border_color
+			&& a.depth_compare == b.depth_compare
+			&& a.compare == b.compare;
+	}
+
+	u64 hash_sampler_state(const sampler_state& state)
+	{
+		// Pack the enums into one word and the floats by bit pattern, so the hash
+		// stays consistent with operator== without touching padding.
+		struct packed
+		{
+			u32 enums;
+			u32 max_aniso;
+			u32 min_lod;
+			u32 max_lod;
+		};
+
+		const packed key = {
+			static_cast<u32>(state.wrap_s)
+				| (static_cast<u32>(state.wrap_t) << 4)
+				| (static_cast<u32>(state.wrap_r) << 8)
+				| (static_cast<u32>(state.min_filter) << 12)
+				| (static_cast<u32>(state.mag_filter) << 16)
+				| (static_cast<u32>(state.border_color) << 20)
+				| (static_cast<u32>(state.compare) << 24)
+				| (static_cast<u32>(state.depth_compare) << 28),
+			state.max_aniso,
+			std::bit_cast<u32>(state.min_lod),
+			std::bit_cast<u32>(state.max_lod),
+		};
+
+		return rpcs3::hash_struct<packed>(key);
+	}
+
+	void sampler_cache::shutdown()
+	{
+		for (const auto& [key, object] : m_cache)
+		{
+			object->release();
+		}
+
+		m_cache.clear();
+		m_device = nullptr;
+	}
+
+	MTL::SamplerState* sampler_cache::get(const sampler_state& state)
+	{
+		const auto found = m_cache.find(state);
+		if (found != m_cache.end())
+		{
+			return found->second;
+		}
+
+		MTL::SamplerState* object = create_sampler_state(m_device, state);
+		if (object)
+		{
+			m_cache.emplace(state, object);
+		}
+
+		return object;
 	}
 }
 

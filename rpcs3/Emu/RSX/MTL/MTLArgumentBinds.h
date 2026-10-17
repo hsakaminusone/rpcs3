@@ -123,8 +123,10 @@ namespace mtl
 
 		// Bind the set into the stage's table.  Only slots whose value differs from
 		// the last bind are written.  vertex_stage selects which half of the set
-		// applies.
-		void bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds);
+		// applies.  Returns true when a slot was written: Metal 4 snapshots the
+		// table when the encoder binds it, so a write is invisible to a draw until
+		// the caller re-binds the table (REALISATION.md, "Argument tables").
+		bool bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds);
 
 	private:
 		argument_binds m_bound[2];
