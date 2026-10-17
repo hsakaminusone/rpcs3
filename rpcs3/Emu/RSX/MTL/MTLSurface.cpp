@@ -353,11 +353,35 @@ namespace mtl
 
 		texture* target = get_surface(rsx::surface_access::transfer_read);
 
-		// The guest address is the offset into the guest window (HLD-02 §3.5).
-		encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr,
-			rsx_pitch, rsx_pitch * get_surface_height<rsx::surface_metrics::samples>(),
-			MTL::Size::Make(width(), height(), 1),
-			target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+		const rsx::surface_depth_format2 depth_format = get_surface_depth_format();
+
+		if (m_depth && depth_format_needs_decode(depth_format))
+		{
+			const u32 plane_pitch = width() * 4;
+			MTL::Buffer* staging = m_resources->new_buffer(plane_pitch * height(), MTL::StorageModeShared);
+			decode_depth_plane(staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
+				width(), height(), rsx_pitch, get_bpp(), depth_format);
+
+			encoder->copyFromBuffer(staging, 0, plane_pitch, plane_pitch * height(),
+				MTL::Size::Make(width(), height(), 1),
+				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0),
+				get_depth_plane_option(target->value()->pixelFormat(), false));
+
+			cmd.resources().defer_release(staging);
+
+			if (rsx::is_depth_stencil_format(depth_format))
+			{
+				stencil_init_flags |= (1 << 9);
+			}
+		}
+		else
+		{
+			// The guest address is the offset into the guest window (HLD-02 §3.5).
+			encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr,
+				rsx_pitch, rsx_pitch * get_surface_height<rsx::surface_metrics::samples>(),
+				MTL::Size::Make(width(), height(), 1),
+				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+		}
 
 		if (sample_count() > 1)
 		{
@@ -440,10 +464,24 @@ namespace mtl
 		const u32 column = (src_offset % rsx_pitch) / get_bpp();
 		const u32 rows = write_length / rsx_pitch;
 
-		encoder->copyFromTexture(get_surface(rsx::surface_access::transfer_read)->value(), 0, 0,
-			MTL::Origin::Make(column, row, 0),
-			MTL::Size::Make(width() - column, rows, 1),
-			target, dst_offset, rsx_pitch, rsx_pitch * rows);
+		MTL::Texture* source = get_surface(rsx::surface_access::transfer_read)->value();
+		const MTL::PixelFormat format = source->pixelFormat();
+
+		if (format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
+		{
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(column, row, 0),
+				MTL::Size::Make(width() - column, rows, 1),
+				target, dst_offset, rsx_pitch, rsx_pitch * rows,
+				get_depth_plane_option(format, false));
+		}
+		else
+		{
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(column, row, 0),
+				MTL::Size::Make(width() - column, rows, 1),
+				target, dst_offset, rsx_pitch, rsx_pitch * rows);
+		}
 	}
 }
 

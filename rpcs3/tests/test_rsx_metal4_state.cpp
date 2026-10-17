@@ -1731,4 +1731,44 @@ TEST(MTLAvconfAspect, LetterboxingPreservesTheSourceAspect)
 	EXPECT_EQ(region, areau(160, 0, 1120, 720));
 }
 
+// =============================================================================
+// 17. The guest depth pack decode
+//      (MTLFormats.cpp decode_depth_plane; REVIEW-FINDINGS B8)
+// =============================================================================
+
+TEST(MTLFormatsDepthPlane, DecodesTheGuestDepthPack)
+{
+	struct row
+	{
+		rsx::surface_depth_format2 format;
+		u32 raw;
+		f32 expected;
+	};
+
+	const row table[] = {
+		// The stencil byte of a z24s8 word is not depth.
+		{ rsx::surface_depth_format2::z24s8_uint, 0xFFFFFF00, 1.0f },
+		{ rsx::surface_depth_format2::z24s8_uint, 0x000000AB, 0.0f },
+		{ rsx::surface_depth_format2::z16_uint, 0xFFFF, 1.0f },
+		{ rsx::surface_depth_format2::z16_float, 0xF000, rsx::get_depth_clear_value(rsx::surface_depth_format2::z16_float, 0xF000) },
+		{ rsx::surface_depth_format2::z24s8_float, (std::bit_cast<u32>(0.5f) >> 7) << 8, 0.5f },
+	};
+
+	for (const row& entry : table)
+	{
+		const u32 bpp = rsx::get_format_block_size_in_bytes(entry.format);
+		u8 src[8]{};
+		std::memcpy(src, &entry.raw, bpp);
+
+		u8 dst[4]{};
+		mtl::decode_depth_plane(dst, src, 1, 1, bpp, bpp, entry.format);
+
+		f32 value = 0.0f;
+		std::memcpy(&value, dst, sizeof(value));
+
+		SCOPED_TRACE(static_cast<u32>(entry.format));
+		EXPECT_FLOAT_EQ(value, entry.expected);
+	}
+}
+
 #endif // RSX_ENABLE_METAL4

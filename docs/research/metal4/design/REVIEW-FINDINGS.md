@@ -50,6 +50,7 @@ accepted deviation is marked **Limitation**.
 | A6 | Medium | `block_ring` growth | Fixed |
 | A7 | Medium | `emulate_shadow_compare` | Fixed |
 | A8 | Low | `conditional_render_predicate` | Limitation |
+| A9 | Critical | MSL binding index limits | Open |
 | B1 | High | depth/stencil mirror | Fixed |
 | B2 | High | depth-compare input | Fixed |
 | B3 | High | transfer-read barrier | Fixed |
@@ -57,14 +58,15 @@ accepted deviation is marked **Limitation**.
 | B5 | High | `copy_texture` AA region | Fixed |
 | B6 | High | depth resolve path | Fixed |
 | B7 | Medium | `flush_old_contents` region | Fixed |
-| B8 | Medium | `load_background` texel size | Open |
+| B8 | Medium | `load_background` texel size | Fixed |
 | B9 | Medium | `erase_bkgnd` init | Fixed |
 | B10 | Medium | `insert_texture_barrier` | Fixed |
 | B11 | Medium | `DEPTH16_FLOAT` map | Fixed |
 | B12 | Medium | border colour SNORM | Fixed |
 | B13 | Medium | deferred-release slot | Fixed |
 | B14 | Low | MSAA swizzle view | Fixed |
-| B15 | High | combined-format copy no-op | Open |
+| B15 | High | combined-format copy no-op | Fixed |
+| B16 | High | depth read-back encode | Open |
 | C1 | High | logic op | Open |
 | C2 | High | two-sided stencil ref | Fixed |
 | C3 | High | extended depth range | Fixed |
@@ -102,7 +104,7 @@ accepted deviation is marked **Limitation**.
 | E13 | Low | latch dataflow and dead fields | Open |
 | E14 | Medium | state-latch hash truncation | Fixed |
 
-Totals: 59 findings, 43 fixed, 3 partial, 0 blocked, 4 open, 6 limitations, 2 duplicates, 1 won't fix.
+Totals: 61 findings, 45 fixed, 3 partial, 0 blocked, 4 open, 6 limitations, 2 duplicates, 1 won't fix.
 
 ## A — the shader and ABI contract
 
@@ -196,6 +198,38 @@ the shared front end take the CPU skip (`RSXThread.cpp:939`), so the RSX
 conditional render is reproduced without the hardware path. Enabling the flag
 needs both ends: a producer for the predicate word and a shader that tests it.
 
+### A9 — the MSL binding indices exceed the compiler limits. Open.
+The Metal 4 shader compiler rejects the index map in `MTLArgumentBinds.h`. An MSL
+`[[buffer(n)]]` index must be at most 30, a `[[sampler(n)]]` index at most 15 and a
+`[[texture(n)]]` index at most 127. The measurement is on Apple A18 Pro, macOS
+27.0.1, through `MTL4::Compiler::newLibrary` with the same `CompilerDescriptor`
+the backend builds (`MTLDevice.cpp:86`): index 30 compiles and index 31 fails with
+"must be between 0 and 30"; index 15 compiles and index 16 fails with "must be
+between 0 and 15"; index 127 compiles and index 128 fails. The language version
+does not move the three limits: 3.1, 3.2 and 4.0 give the same result. The
+argument table is not the limit: `setMaxBufferBindCount` accepts 100000.
+
+Two sites break. First, `fill_values_slot` is 51 (`MTLArgumentBinds.h:61`), so the
+fill library cannot be created: `MTLFill.cpp:39` declares the values at
+`[[buffer(51)]]`, so `fill_pass::init` logs "fill library creation failed", leaves
+`m_library` null, and every clear and every output pass is then dropped. The
+failure reproduces with the backend's own source string and the backend's own
+compiler construction. Second, the fragment sampler range cannot fit: `spv_to_msl`
+sets `msl_sampler = binding` (`MTLShader.cpp:53`), and the fragment decompiler
+declares each texture at `texture_slot_base + index`, that is 12 to 27
+(`MTLFragmentProgram.cpp:104`), each stencil mirror at
+`fragment_stencil_slot_base + index`, that is 30 to 45 (`:108`), and the depth
+input at 50 (`:119`). The indices 16 to 27, 30 to 45 and 50 exceed the sampler
+limit, so a fragment shader that samples any texture unit cannot be compiled. The
+four vertex textures at 12 to 15 stay inside the limit.
+
+No compiler setting moves the limits. The map must use the two namespaces apart:
+`MSLResourceBinding` carries `msl_texture` and `msl_sampler` separately, so a
+texture can keep a high index while its sampler takes a per-stage index at or
+below 15. Every buffer index must also stay at or below 30, which moves
+`fill_values_slot` and each fragment slot above 30. No fix is applied yet: the
+change moves the fixed ABI map, so the design decision comes first.
+
 ## B — the surface and texture cache
 
 ### B1 — the depth-texture stencil mirror. Fixed. Duplicate of A3.
@@ -284,7 +318,7 @@ re-initialises the surface instead of keeping stale contents
 (`VKRenderTargets.cpp:1118-1125`), and the write is recorded with
 `on_write_copy(newest_tag, optimize_copy)`.
 
-### B8 — `load_background` uses the guest texel size. Open: the mechanism is measured.
+### B8 — `load_background` uses the guest texel size. Fixed.
 The guest z24s8 surface is 4 bytes per texel and its host image is
 `Depth32Float_Stencil8`, 8 bytes per texel, so a raw `copyFromBuffer` cannot be
 correct: the destination row exceeds the source row stride, and Metal validates
@@ -319,15 +353,38 @@ The device answered all three questions, so the fix has a determined mechanism.
    (`stencil_init_flags |= (1 << 9)`, the marker `on_write_copy` already sets)
    rather than left cleared.
 
-The fix is therefore a depth-plane decode into a staging buffer (24-bit unorm or
-IEEE half to float32) followed by a blit that names the plane, gated to the
-formats whose byte sizes differ.  It cannot reuse the format-aware colour upload
-VK uses, because VK's host depth format keeps the guest texel size
-(`VKRenderTargets.cpp:695-800`).  The write path must also avoid the Metal 4
-compute-encoder copy, which does not perform a combined-format write at all (B15).
+The fix is a depth-plane decode into a staging buffer followed by a blit that
+names the plane (B15), gated to the formats whose byte sizes differ.  It cannot
+reuse the format-aware colour upload VK uses, because VK's host depth format keeps
+the guest texel size (`VKRenderTargets.cpp:695-800`).  `decode_depth_plane`
+(`MTLFormats.cpp`) reproduces the VK transform exactly: `rsx::get_depth_clear_value`
+on the bits the RSX pack puts the depth in, that is bits 31:8 of a z24s8 word and
+bits 15:0 of a z16 word.  No second codec exists.  `load_background` decodes when
+the depth format needs it (`z16_float`, `z24s8_uint`, `z24s8_float`) and copies as
+before otherwise, and `upload_texture_data` applies the same decode to a sampled
+depth texture.  `z16_uint` maps to `Depth16Unorm`, whose texel size already matches
+the guest, so it takes no decode.
+
+The combined-format stencil stays marked unknown (`stencil_init_flags |= (1 << 9)`,
+the marker `on_write_copy` already sets), because the upload direction has no plane
+option for a colour source.  The corrected B15 measurement shows the plane is
+addressable, so the marker is an open item and not a permanent limit.
 
 Reachability: the path runs only when `needs_cpu_upload()` holds, that is with
 `read_depth_buffer` enabled or `force_data_load` set, so it is off by default.
+
+### B16 — the depth read-back writes the host plane, not the guest pack. Open.
+`write_to_memory` and `copy_texture` now name the depth plane of a combined source
+(B15), so the copy no longer fails, but the bytes written are the host depth plane:
+a little-endian binary32 at 4 bytes per texel.  The guest expects the RSX pack
+instead — a z24s8 destination wants the 24-bit depth in bits 31:8 and the stencil
+byte in bits 7:0 of each 4-byte word, and a z16 destination wants the depth in bits
+15:0 of a 2-byte word.  The read-back therefore needs the inverse of
+`decode_depth_plane`, and the z16 case needs a float-to-half conversion, which is
+the VK `cs_fconvert_task<f32,f16>` path (`ShuffleBytes.glsl`).  The stencil plane is
+not written at all, so a stencil read-back of a combined surface is lost.  Nothing
+reaches this path today, so the item is open rather than wrong in a reachable
+state.
 
 ### B9 — `erase_bkgnd` was never initialised. Fixed.
 VK clears the surface and marks it ready when the read-buffers configuration is
@@ -387,20 +444,32 @@ and that a view cannot change the texture type. `get_view` now builds the swizzl
 view for a multisample texture as well, with the source's own
 `TextureType2DMultisample`, so the remap stays at the view.
 
-### B15 — the Metal 4 compute encoder does not write a combined depth-stencil image. Open.
-A `copyFromBuffer` into a `Depth32Float_Stencil8` texture on
-`MTL4::ComputeCommandEncoder` is accepted by the validation layer and reports no
-command-buffer error, and it writes nothing: the destination keeps its cleared
-value with an explicit `MTL4` barrier, in private and in shared storage, read back
-by both a Metal 4 and a Metal 3 path. The same copy on `MTL::BlitCommandEncoder`
-performs the write and is bit-exact. Copies into `Depth32Float` and `Depth16Unorm`
-are performed by the compute encoder, so the defect is confined to the combined
-format. `surface::load_background` (`MTLSurface.cpp:357`), the texture upload
-(`MTLTextureCache.cpp:61`) and the read-back (`MTLTextureCache.cpp:142`) all use
-the compute encoder, so every combined-format transfer the backend encodes is
-unaffected today only because no such transfer is reached yet. The workaround is a
-render pass or a Metal 3 blit encoder for a combined-format copy; the choice waits
-on whether an ordering rule between the two encoder families is needed.
+### B15 — the un-named combined-format copy is invalid API. Fixed.
+A `copyFromBuffer` or `copyFromTexture` into a `Depth32Float_Stencil8` texture on
+`MTL4::ComputeCommandEncoder` with `MTLBlitOptionNone` is **invalid API**: the
+validation layer rejects the option for a combined format. The earlier reading that
+the driver "writes nothing" was a read-back artefact. On Apple A18 Pro, macOS
+27.0.1, the un-named call did perform the write — with an explicit `MTL4` barrier,
+in private and in shared storage — so the defect is the call and not the driver, and
+there is no Apple bug to work around. Every combined-format copy must name its
+plane with `BlitOptionDepthFromDepthStencil` or `BlitOptionStencilFromDepthStencil`,
+and one call carries one plane. The named form writes and reads back bit-exact
+(`0000003f` at every texel for a clear depth of 0.5) on private and on shared
+storage, so no Metal 3 blit encoder and no render pass is needed, and the
+two-encoder ordering rule this item was waiting on does not apply. A
+`texture→texture` copy of a combined format is the exception: the API exposes no
+option overload for it, and the plain form performs both planes, so those sites
+stay as they are. `texture->texture` copies of `Depth32Float` and `Depth16Unorm`
+are unaffected in both forms.
+
+`get_depth_plane_option` (`MTLFormats.cpp`) is the one place that names a plane. The
+four buffer↔texture sites use it: `surface::load_background`
+(`MTLSurface.cpp:368`), the texture upload (`MTLTextureCache.cpp:75`),
+`surface::write_to_memory` (`MTLSurface.cpp:476`) and
+`cached_texture_section::copy_texture` (`MTLTextureCache.cpp:173`). Each site takes
+the option branch only for `PixelFormatDepth32Float_Stencil8`, so a plane option is
+never passed for a non-combined format, and a combined format is never copied
+without one.
 
 ## C — the state latches and the clear path
 
@@ -822,10 +891,10 @@ harness owns. They are parked, not closed.
 
 | ID | The question to answer first |
 |---|---|
-| B8 | The mechanism is measured (see the entry). What remains is the implementation: a depth-plane decode into a staging buffer, a blit that names the plane, and the stencil-unknown marker. |
-| B15 | Whether the Metal 4 compute-encoder copy of a combined depth-stencil image is a platform defect or a probe artefact, and whether a Metal 3 blit encoder needs an ordering rule against a Metal 4 command buffer. |
+| A9 | How to express the fixed RSX slot map inside the MSL index caps: which slots move below 30, and whether the sampler index is decoupled from the texture index. The change moves the ABI map, so the decision comes before the patch. |
+| B16 | Which side owns the inverse depth transform on the read-back: the CPU, as `decode_depth_plane` does on the upload, or a GPU pass as VK does. The z16 case needs a float-to-half step either way. |
 | C1 | The mechanism is answered (see the entry): the destination read is the existing `subpassInput`/`[[color(n)]]` framebuffer-fetch path. What remains is the implementation, which waits on first light because no test reaches the GLSL-to-MSL hop. |
 | E13 | Which of the harness-only latch fields the harness will release, and whether the per-clause state re-issue is worth a cheap-out. |
-| F5 / F9 | The partial halves wait transitively on the present output mode. |
+| F5 / F9 | The present output mode landed with F10, so neither partial half waits on it any more: F5 still does not consume the display-buffer pitch and format or the stereo second eye, and F9 still sizes the drawable from the source rather than the view. Both need a re-check against the landed output tier. |
 
 <!-- doc-end -->

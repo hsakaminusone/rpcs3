@@ -58,11 +58,33 @@ namespace mtl
 			const NS::UInteger slice = (type == MTL::TextureTypeCube || type == MTL::TextureType2DArray) ? layout.layer : 0;
 			const NS::UInteger z = (type == MTL::TextureType3D) ? layout.layer : 0;
 
-			encoder->copyFromBuffer(staging, 0, row_pitch, row_pitch * rows,
-				MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
-				dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z));
+			rsx::surface_depth_format2 depth_format{};
+			if (get_depth_texture_decode_format(gcm_format, depth_format) && depth_format_needs_decode(depth_format))
+			{
+				const u32 plane_pitch = layout.width_in_texel * 4;
+				const u32 plane_rows = layout.height_in_texel * layout.depth;
+				MTL::Buffer* plane = cmd.resources().new_buffer(plane_pitch * plane_rows, MTL::StorageModeShared);
 
-			cmd.resources().defer_release(staging);
+				decode_depth_plane(plane->contents(), staging->contents(),
+					layout.width_in_texel, plane_rows, row_pitch,
+					rsx::get_format_block_size_in_bytes(gcm_format), depth_format);
+
+				encoder->copyFromBuffer(plane, 0, plane_pitch, plane_pitch * plane_rows,
+					MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
+					dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z),
+					get_depth_plane_option(dst->value()->pixelFormat(), false));
+
+				cmd.resources().defer_release(plane);
+				cmd.resources().defer_release(staging);
+			}
+			else
+			{
+				encoder->copyFromBuffer(staging, 0, row_pitch, row_pitch * rows,
+					MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
+					dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z));
+
+				cmd.resources().defer_release(staging);
+			}
 		}
 	}
 
@@ -139,10 +161,24 @@ namespace mtl
 		// straight memcpy (texture_cache_utils.h:1612).
 		const u32 dst_offset = transfer_y * rsx_pitch + transfer_x * rsx::get_format_block_size_in_bytes(gcm_format);
 
-		encoder->copyFromTexture(target->value(), 0, 0,
-			MTL::Origin::Make(transfer_x, transfer_y, 0),
-			MTL::Size::Make(transfer_width, transfer_height, 1),
-			m_staging->value(), dst_offset, rsx_pitch, rsx_pitch * transfer_height);
+		MTL::Texture* source = target->value();
+		const MTL::PixelFormat format = source->pixelFormat();
+
+		if (format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
+		{
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(transfer_x, transfer_y, 0),
+				MTL::Size::Make(transfer_width, transfer_height, 1),
+				m_staging->value(), dst_offset, rsx_pitch, rsx_pitch * transfer_height,
+				get_depth_plane_option(format, false));
+		}
+		else
+		{
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(transfer_x, transfer_y, 0),
+				MTL::Size::Make(transfer_width, transfer_height, 1),
+				m_staging->value(), dst_offset, rsx_pitch, rsx_pitch * transfer_height);
+		}
 
 		m_readback_cmd = &cmd;
 

@@ -22,6 +22,24 @@ namespace mtl
 	// Depth24Unorm_Stencil8 (HLD-02 §2.7; 04 §2.3).
 	MTL::PixelFormat get_surface_depth_format(rsx::surface_depth_format2 format);
 
+	// The blit option that names one plane of a combined depth-stencil texture
+	// (REVIEW-FINDINGS.md, B15).  A texture that is not combined takes no option.
+	MTL::BlitOption get_depth_plane_option(MTL::PixelFormat format, bool stencil_plane);
+
+	// True when the guest depth pack differs from the Metal depth plane, so the
+	// guest words cannot be copied as-is (REVIEW-FINDINGS.md, B8).
+	bool depth_format_needs_decode(rsx::surface_depth_format2 format);
+
+	// Map a sampled depth texture format to the surface depth format whose guest
+	// pack the upload plane decode understands.  False for a colour or compressed
+	// format (REVIEW-FINDINGS.md, B8).
+	bool get_depth_texture_decode_format(u32 gcm_format, rsx::surface_depth_format2& format);
+
+	// Decode guest depth words into the Metal depth plane.  dst rows are width * 4
+	// bytes; src rows are src_pitch bytes apart with src_bpp bytes per texel.
+	void decode_depth_plane(void* dst, const void* src, u32 width, u32 height,
+		u32 src_pitch, u32 src_bpp, rsx::surface_depth_format2 format);
+
 	// The guest texture format (HLD-02 §2.7; LLD-texture §4).  A sampled texture is
 	// read through the unit's remap, so the packed colour formats expand to their
 	// natural channel count instead of a surface layout.
