@@ -4038,20 +4038,17 @@ namespace mtl
 			words = " <unmapped>";
 		}
 
+		// The commands the host dispatched before the error.  The one that precedes
+		// the corruption is the command whose argument block was mis-counted, and
+		// a bulk write is the only command that carries a variable-length data
+		// block.  The list is not filtered by the jump target: the target can be a
+		// wild address, and the interesting range is the restore point onwards.
 		std::string history;
 		u32 printed = 0;
 
 		for (u32 index = 0; index < info.history_count; ++index)
 		{
 			const dispatch_entry& entry = info.history[index];
-
-			// Only the commands from the jump target onwards matter: the error is
-			// a fixed distance after the target, and the commands in between are
-			// what the host has to show.
-			if (entry.position < info.code_start)
-			{
-				continue;
-			}
 
 			history += fmt::format(" [reg 0x%x value 0x%x at 0x%x]", entry.reg, entry.value, entry.position);
 			printed++;
@@ -4062,7 +4059,7 @@ namespace mtl
 			info.last_label_address, info.last_label_value, info.label_in_ring ? 1u : 0u, info.label_offset,
 			info.last_command, reg, info.last_command_method_known ? 1u : 0u, words.c_str());
 
-		MTL_NOTE(2, "Metal 4: FIFO desync capture: %u commands from the jump target:%s",
+		MTL_NOTE(2, "Metal 4: FIFO desync capture: %u dispatched commands:%s",
 			printed, history.c_str());
 	}
 
