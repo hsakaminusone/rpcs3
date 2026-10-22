@@ -87,11 +87,27 @@ R9 FIFO error counts: `last cmd = 0x2062000` ×7, `last cmd = 0x0` ×6, `last cm
    occur nowhere in `gcm_enums.h`. In the same window `0x10030303` and `0x80078000` are register
    values, and the second capture is eight IEEE-754 floats alternating `0xbf800000` (−1.0) and
    `0x3f800000` (+1.0). **The host is executing a data block as commands.**
-2. **The label write is not the corrupting event.** The FIFO's guest window is
-   `0x50100000..0x53200000` (`sys_rsx_context_iomap(io=0x0, ea=0x50100000, size=0x3100000)`,
-   R9 `RPCS3.log`). The capture's GET maps to `0x511ae8ac` (inside the window). The last label
-   write was to `0x60300800` (outside the window).
-3. **The freeze is a recovery loop that makes no progress.** Every capture has
+2. **The label write is not the corrupting event.** The guest made one mapping,
+   `sys_rsx_context_iomap(io=0x0, ea=0x50100000, size=0x3100000)`, so the ring's guest window is
+   `0x50100000..0x53200000`; the arithmetic agrees, `0x50100000 + 0xcb5814 = 0x50db5814` is the
+   capture's `get_guest` and `0x50100000 + 0x1490000 = 0x51590000` is the other capture's. The
+   label address `0x60300800` is **outside** that window. The capture's `label_in_ring` and
+   `label_offset` fields measure this directly.
+3. **The dispatch history shows what the host executed last.** Before the error the host
+   dispatched: `NV4097_SET_ZCULL_STATS_ENABLE` 0x0, `NV4097_SET_ZPASS_PIXEL_COUNT_ENABLE` 0x0,
+   `NV406E_SEMAPHORE_OFFSET` 0x10, `NV406E_SEMAPHORE_ACQUIRE` 0x0, `NV4097_SET_SEMAPHORE_OFFSET`
+   0x800, `NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE` 0x10000, `NV406E_SEMAPHORE_OFFSET` 0x800,
+   `NV406E_SEMAPHORE_ACQUIRE` 0x0 — method indices 0x601, 0x5f3, 0x19, 0x1a, 0x75b, 0x75c, 0x19,
+   0x1a (`gcm_enums.h`). The last command is the label release; the guest stopped there.
+4. **The corruption is a fixed distance after the jump target.** In three of the four captures the
+   error is exactly **0x39c bytes (231 words)** after `code_start`, the last jump target:
+   `code_start=0x10ae510` / `get=0x10ae8ac`, `code_start=0xcbf13c` / `get=0xcbf4d8`,
+   `code_start=0xcb5478` / `get=0xcb5814`. The fourth (`code_start=0x10af3b0`, `get=0x1490000`) is
+   0x3e050 bytes after its target, and its window is the eight floats. **The same jumped-to block
+   is mis-parsed at the same word every time**, so the fault is in how the host reads that block.
+   The capture's dispatch history is widened to 256 entries and filtered to the commands from the
+   jump target onwards, so the command at the fault can be named.
+5. **The freeze is a recovery loop that makes no progress.** Every capture has
    `restore_point == get`, so `recover_fifo()`'s `set_get(restore_point)`
    (`RSXThread.cpp:3090`) returns the host to the same word. After the retries the GET reaches
    `0x3100000` — the exact end of the iomap window — where `get_guest = 0xffffffff` and the
@@ -105,7 +121,7 @@ R9 FIFO error counts: `last cmd = 0x2062000` ×7, `last cmd = 0x0` ×6, `last cm
 | H3 — torn or partial guest write | the words either side of the error are complete command-shaped values with complete arguments |
 | H1 — the guest stopped producing | the guest was writing commands normally up to the error; the host left the command stream into data |
 | H2 — a GPU label was never released | the label is released and written (`last_label=0x60300800/0x1`); the label address is outside the FIFO window |
-| the host's label write corrupted the ring | the label address is outside the FIFO's guest window (§1.3.2) |
+| the host's label write corrupted the ring | **superseded** — the label address lies inside a page the FIFO maps, because the iomap maps per 1 MB page and the ring is not contiguous (§1.3.2) |
 | a one-word drift in the FIFO's position accounting | `read_unsafe`'s fall-through (`m_fifo_pos += 4; return false;`, `RSXFIFO.cpp:383-384`) supplies the final word of a command; `read()` (`RSXFIFO.cpp:520-521`) consumes the header and the first argument; `skip_methods` (`RSXFIFO.cpp:389-403`) lands on the last argument. The count field is the argument count, so a command occupies `count + 1` words, which the capture's 8-byte spacing confirms |
 | `FIFO_PACKET_BEGIN` block accounting | `FIFO_PACKET_BEGIN` (`RSXFIFO.h:23`) has no reader; the "fast read" comment at `RSXFIFO.cpp:337` is stale |
 | the non-accurate FIFO path | `RSX FIFO Fetch Accuracy` is absent from both `config.yml` and `config_BLUS30001.yml`; the default is `rsx_fifo_mode::atomic` (`system_config.h:58`), which selects the accurate path |

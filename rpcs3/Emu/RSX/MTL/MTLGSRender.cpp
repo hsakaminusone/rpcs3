@@ -4039,18 +4039,31 @@ namespace mtl
 		}
 
 		std::string history;
+		u32 printed = 0;
+
 		for (u32 index = 0; index < info.history_count; ++index)
 		{
 			const dispatch_entry& entry = info.history[index];
+
+			// Only the commands from the jump target onwards matter: the error is
+			// a fixed distance after the target, and the commands in between are
+			// what the host has to show.
+			if (entry.position < info.code_start)
+			{
+				continue;
+			}
+
 			history += fmt::format(" [reg 0x%x value 0x%x at 0x%x]", entry.reg, entry.value, entry.position);
+			printed++;
 		}
 
-		MTL_NOTE(2, "Metal 4: FIFO desync capture: get=0x%x put=0x%x get_guest=0x%x restore_point=0x%x code_start=0x%x ret_addr=0x%x last_label=0x%x/0x%x cmd=0x%x method_index=0x%x method_known=%u words:%s",
+		MTL_NOTE(2, "Metal 4: FIFO desync capture: get=0x%x put=0x%x get_guest=0x%x restore_point=0x%x code_start=0x%x ret_addr=0x%x last_label=0x%x/0x%x label_in_ring=%u label_offset=0x%x cmd=0x%x method_index=0x%x method_known=%u words:%s",
 			info.get, info.put, info.get_guest, info.restore_point, info.code_start, info.ret_addr,
-			info.last_label_address, info.last_label_value, info.last_command, reg,
-			info.last_command_method_known ? 1u : 0u, words.c_str());
+			info.last_label_address, info.last_label_value, info.label_in_ring ? 1u : 0u, info.label_offset,
+			info.last_command, reg, info.last_command_method_known ? 1u : 0u, words.c_str());
 
-		MTL_NOTE(2, "Metal 4: FIFO desync capture: last commands:%s", history.c_str());
+		MTL_NOTE(2, "Metal 4: FIFO desync capture: %u commands from the jump target:%s",
+			printed, history.c_str());
 	}
 
 	bool MTLGSRender::release_GCM_label(u32 /*type*/, u32 /*address*/, u32 /*data*/)
