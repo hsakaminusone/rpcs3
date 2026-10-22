@@ -1918,16 +1918,48 @@ namespace mtl
 
 		if (should_skip_draw())
 		{
-			// TODO(excise): level 2; the first 64 refused draws.
-			// The predicate has four independent causes; a bare latch cannot say
-			// which one fires, and the log cannot be replayed.
+			// TODO(excise): level 2; one latch per cause, so the coverage table
+			// counts them.  The predicate has four independent causes and a bare
+			// latch cannot say which one fires.
+			if (skip_current_frame)
+			{
+				MTL_PROBE_LATCH(2, "skip/frame");
+			}
+
+			if (!m_graphics_state.test(rsx::rtt_config_valid))
+			{
+				MTL_PROBE_LATCH(2, "skip/config invalid");
+			}
+
+			if (cond_render_ctrl.disable_rendering())
+			{
+				MTL_PROBE_LATCH(2, "skip/conditional render");
+			}
+
+			if (m_graphics_state.test(rsx::rtt_config_no_attachments))
+			{
+				MTL_PROBE_LATCH(2, "skip/no attachments");
+			}
+
+			// TODO(excise): level 2; the first 64 refused draws, with the geometry
+			// that decided the refusal.  The shared scissor setter clears
+			// rtt_config_valid for an empty rectangle or one outside the window
+			// clip (RSXThread.cpp:2142-2149), so the numbers below are what
+			// makes the refusal.
 			if (mtl::probe::at_least(2) && diagnostic_skip_count < 64)
 			{
-				MTL_NOTE(2, "Metal 4: should_skip_draw refuses the draw: skip frame %u, config valid %u, conditional render disabled %u, no attachments %u",
+				const auto& regs = rsx::method_registers;
+
+				MTL_NOTE(2, "Metal 4: should_skip_draw refuses the draw: skip frame %u, config valid %u, conditional render disabled %u, no attachments %u, scissor %ux%u+%u+%u, window clip %ux%u, viewport %ux%u+%u+%u, scissor invalid %u, scissor clipped %u",
 					skip_current_frame ? 1u : 0u,
 					m_graphics_state.test(rsx::rtt_config_valid) ? 1u : 0u,
 					cond_render_ctrl.disable_rendering() ? 1u : 0u,
-					m_graphics_state.test(rsx::rtt_config_no_attachments) ? 1u : 0u);
+					m_graphics_state.test(rsx::rtt_config_no_attachments) ? 1u : 0u,
+					regs.scissor_origin_x(), regs.scissor_origin_y(), regs.scissor_width(), regs.scissor_height(),
+					regs.window_clip_horizontal(), regs.window_clip_vertical(),
+					regs.viewport_origin_x(), regs.viewport_origin_y(), regs.viewport_width(), regs.viewport_height(),
+					m_graphics_state.test(rsx::pipeline_state::scissor_setup_invalid) ? 1u : 0u,
+					m_graphics_state.test(rsx::pipeline_state::scissor_setup_clipped) ? 1u : 0u);
 
 				diagnostic_skip_count++;
 			}
