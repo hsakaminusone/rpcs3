@@ -75,6 +75,14 @@ into it (`10` §4.1 `[V]`).
   `newBufferWithBytesNoCopy:length:options:deallocator:`** (`StorageModeShared`), page-aligned,
   whole-allocation, per `01` §4 item 2 (`[V]`: this is the *only* host-pointer import path; there
   is no texture analog). The `deallocator` must not free the guest region (`01` §5 rank 8 `[V]`).
+  The import source is the **unprotected mirror** `vm::g_sudo_addr`, not the guest view
+  `vm::g_base_addr`: `newBufferWithBytesNoCopy:` returns `nil` unless *every page* of the range is
+  writable, and the guest view carries `protection::no` pages for unmapped guest memory
+  (`vm.cpp:1060`; measured, §6 Q1). The mirror is written only RW (`vm.cpp:846`), is never
+  protected or unmapped on Apple platforms (`vm.cpp:1067` is `_WIN32`-only), and aliases the same
+  guest RAM — it is the view the other renderers already read guest memory through
+  (`vm::get_super_ptr`; `VKDMA.cpp:77`, `GLDMA.cpp:22`). Guest addresses stay buffer offsets
+  because `g_sudo_addr == g_base_addr + 4 GiB`.
 - Sub-ranges that are only ever read as *buffers* (vertex/index/constant rings) are bound by
   offset into this buffer — no per-resource allocation (`10` §4.1 `[I]`).
 - **Textures and surfaces are *not* views into this buffer.** They are separate `MTL::Texture`
@@ -390,7 +398,7 @@ match (`surface_utils.h:129-181`) so the existing generic caches need only a tra
 
 ```
 struct mtl_guest_window {          // one per RSX host memory window
-    MTL::Buffer* buffer;           // newBufferWithBytesNoCopy, StorageModeShared, page-aligned
+    MTL::Buffer* buffer;           // newBufferWithBytesNoCopy of vm::g_sudo_addr, Shared, page-aligned
     u32          base;             // guest base
     u32          size;             // ~512 MB (main + local)
     u32          host;             // MTLGPUAddress for buffer-offset bindings
@@ -552,11 +560,16 @@ F9. **Tiled-region over-read.** De-tiling reads whole `64 × tile->pitch` units
 
 ## 6. Open questions
 
-Q1. **Guest-window import feasibility `[U]`.** Can the whole ~512 MB guest VM region be wrapped by
-    a single `newBufferWithBytesNoCopy:` (page-aligned, whole-allocation, correct `deallocator`)?
-    RPCS3's VM allocator alignment is not confirmed here.
-    *Experiment:* allocate the region, wrap it, write through the guest path, read back through a
-    compute encoder; verify byte equality and that the `deallocator` does not double-free.
+Q1. **Guest-window import feasibility.** Resolved: **only through the unprotected mirror.**
+    The whole 4 GiB guest address space *can* be wrapped by one `newBufferWithBytesNoCopy:`
+    (page-aligned, `StorageModeShared`, no-op `deallocator`) — but **not** from the guest view
+    `vm::g_base_addr`: one non-writable page anywhere in the range makes the call return `nil`,
+    and RPCS3 leaves `protection::no` pages in the guest view for unmapped memory
+    (`vm.cpp:1060`). The import therefore reads `vm::g_sudo_addr`, which aliases the same guest
+    RAM and is uniformly writable. Measured on A18 Pro / macOS 27 (page size 16384,
+    `maxBufferLength` exactly 4 GiB): plain RW 4 GiB → OK; any `PROT_NONE` hole → `nil`;
+    `PROT_NONE` + partly committed → `nil`; whole range RW → OK; `MAP_SHARED` sub-range → OK;
+    length need not be a page multiple. Implementation: `MTLDevice.cpp:import_guest_window`.
     Resolves I2's foundation and F1.
 
 Q2. **Residency-set partitioning `[U]`** (`01` §7 Q1). Single device-level set (KK) vs Tier-1

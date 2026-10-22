@@ -115,6 +115,13 @@ namespace mtl
 		MTL4::ArgumentTable* m_fragment_table = nullptr;
 		std::unordered_map<u64, pipeline_entry> m_pipelines;
 
+		// True when the pass's vertex stage emits Vulkan clip space, which is what the
+		// backend's Vulkan-rule compile produces for the geometry snippets that carry
+		// no orientation of their own (the passthrough quad).  Such a pass asks the
+		// viewport to carry the Y flip.  The UI overlay geometry carries its own flip
+		// in the snippet, so it leaves this false.
+		bool m_vulkan_clip_space = false;
+
 	private:
 		MTL::RenderPipelineState* build_pipeline(MTL::PixelFormat format, u8 samples, MTL::PrimitiveType topology,
 			bool vertex_input, bool blend);

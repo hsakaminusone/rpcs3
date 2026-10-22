@@ -1,4 +1,5 @@
 #include "MTLDevice.h"
+#include "MTLInstrumentation.h"
 
 #include "MTLPresent.h"
 
@@ -6,6 +7,8 @@
 
 #include "../GSFrameBase.h"
 #include "../Overlays/overlay_manager.h"
+
+#include "Emu/system_config.h"
 
 #include "MTLBarrier.h"
 #include "MTLCommandRecorder.h"
@@ -62,10 +65,17 @@ namespace mtl
 		const present_source& source, const areau& aspect, const areau& display_area,
 		f32 gamma, bool limited_range, bool stereo, rsx::overlays::display_manager* overlays)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "present/compose");
 		if (!encoder || !target || !source.image || !aspect.width() || !aspect.height())
 		{
+			// TODO(excise): level 2; the compose that could not run (area A, area B).
+			MTL_PROBE_LATCH(2, "present/compose refused");
 			return;
 		}
+
+		// TODO(excise): level 2; the compose ran (area A).
+		MTL_PROBE_LATCH(2, "present/compose ran");
 
 		// The calibration pass is the only one that applies gamma, the range
 		// conversion and the stereo merge, so the plain scale serves the rest
@@ -84,7 +94,14 @@ namespace mtl
 		}
 		else
 		{
-			m_scale.run(encoder, constants, aspect, target, source.image);
+			// The output scaling mode is the filter of the final sample.  Nearest
+			// and bilinear differ in the filter only, and the calibration path
+			// above samples with the calibration pass in both backends, so the
+			// selection lives here (VKPresent.cpp:810-821, :885).
+			present_scale_pass& scaler =
+				(g_cfg.video.output_scaling == output_scaling_mode::nearest) ? m_nearest : m_scale;
+
+			scaler.run(encoder, constants, aspect, target, source.image);
 		}
 
 		if (!overlays || !overlays->has_visible())
@@ -103,10 +120,38 @@ namespace mtl
 		}
 	}
 
+	// An overlay leaves the active list when the UI replaces or removes it, and the
+	// manager then keeps it in its dirty list until the renderer has dropped the
+	// images it owned (overlay_manager.h:110).  The temporary images belong to this
+	// pass, so the frame that ended retires them here (VKPresent.cpp:256).
+	void frame_output::retire_overlays(rsx::overlays::display_manager* overlays)
+	{
+		if (!overlays || !overlays->has_dirty())
+		{
+			return;
+		}
+
+		overlays->lock_shared();
+
+		std::vector<u32> uids;
+		uids.reserve(overlays->get_dirty().size());
+
+		for (const auto& view : overlays->get_dirty())
+		{
+			m_ui.remove_temp_resources(view->uid);
+			uids.push_back(view->uid);
+		}
+
+		overlays->unlock_shared();
+		overlays->dispose(uids);
+	}
+
 	void frame_output::request_capture(command_recorder& recorder, constants_heap& constants,
 		const present_source& source, bool screenshot, bool with_overlays,
 		rsx::overlays::display_manager* overlays)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "present/capture");
 		const u32 slot = recorder.slot();
 
 		// The slot's own capture is consumed before this frame records one, so a
@@ -244,10 +289,17 @@ namespace mtl
 
 	bool frame_output::deliver(u32 slot, GSFrameBase& frame)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "present/deliver");
 		if (slot >= frame_slot_count)
 		{
+			// TODO(excise): level 2; a slot outside the ring (area B).
+			MTL_PROBE_LATCH(2, "present/deliver refused");
 			return false;
 		}
+
+		// TODO(excise): level 2; the capture reached the ring slot (area B).
+		MTL_PROBE_LATCH(2, "present/deliver accepted");
 
 		capture& pending = m_captures[slot];
 

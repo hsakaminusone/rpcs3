@@ -94,8 +94,12 @@ gs_frame::gs_frame(QScreen* screen, const QRect& geometry, const QIcon& appIcon,
 	}
 
 #ifdef __APPLE__
-	// Needed for MoltenVK to work properly on MacOS
-	if (g_cfg.video.renderer == video_renderer::vulkan)
+	// Qt puts a CAMetalLayer on the window only for a Metal surface type, and Qt owns
+	// that layer (Qt, qnsview_drawing.mm, shouldUseMetalLayer).  Qt keeps the plain
+	// CAMetalLayer flavour for a Vulkan surface, which is the flavour a backend that
+	// presents from its own thread needs, and both backends do that.  The layer is
+	// what the display composites, so a backend without it presents to nothing.
+	if (g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal)
 		setSurfaceType(QSurface::VulkanSurface);
 #endif
 

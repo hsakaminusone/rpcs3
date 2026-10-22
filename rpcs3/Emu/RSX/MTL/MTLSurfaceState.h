@@ -47,8 +47,16 @@ namespace mtl
 		u16 clear_height = 0;
 
 		MTL::ClearColor clear_color{};
+		// The colour channels the clear actually writes for this format, and whether
+		// one MTLLoadActionClear can express them (MTLFormats.h resolve_surface_clear).
+		u32 clear_colormask = 0;
+		bool clear_color_fast = false;
 		f32 clear_depth = 1.0f;
 		u8 clear_stencil = 0;
+		// A stencil write mask below 0xff makes the stencil clear a partial write, so
+		// the pass cannot express it as MTLLoadActionClear and the fill runs instead
+		// (S5; VKGSRender.cpp:1624-1638).
+		bool clear_stencil_fast = true;
 
 		// Extent.  The surface clip is authoritative; the SET_SURFACE_FORMAT log2
 		// fields are not (LLD-surface §2.4, invariant 1).

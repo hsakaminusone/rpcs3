@@ -710,6 +710,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLProgramPipeline.cpp
         RSX/MTL/MTLVertexProgram.cpp
         RSX/MTL/MTLFragmentProgram.cpp
+        RSX/MTL/MTLShaderInterpreter.cpp
         RSX/MTL/MTLFramebuffer.cpp
         RSX/MTL/MTLFill.cpp
         RSX/MTL/MTLPresenter.cpp

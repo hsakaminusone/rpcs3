@@ -13,6 +13,22 @@ using midi_ptr = std::unique_ptr<RtMidiWrapper, decltype(midi_deleter)>;
 
 std::mutex midi_creator::m_midi_init_mutex = {};
 std::unique_ptr<std::thread> midi_creator::m_midi_init_thread = {};
+midi_creator::init_thread_guard midi_creator::m_midi_init_thread_guard = {};
+
+midi_creator::init_thread_guard::~init_thread_guard()
+{
+	join_init_thread();
+}
+
+void midi_creator::join_init_thread()
+{
+	std::lock_guard lock(m_midi_init_mutex);
+
+	if (m_midi_init_thread && m_midi_init_thread->joinable())
+	{
+		m_midi_init_thread->join();
+	}
+}
 
 midi_creator::midi_creator()
 {
@@ -31,11 +47,7 @@ midi_creator::midi_creator()
 
 midi_creator::~midi_creator()
 {
-	std::lock_guard lock(m_midi_init_mutex);
-	if (m_midi_init_thread && m_midi_init_thread->joinable())
-	{
-		m_midi_init_thread->join();
-	}
+	join_init_thread();
 }
 
 // We need to recreate the localized string because the midi creator is currently only created once.
@@ -47,13 +59,7 @@ QString midi_creator::get_none() const
 void midi_creator::refresh_list()
 {
 	// Wait for initial initialization
-	{
-		std::lock_guard lock(m_midi_init_mutex);
-		if (m_midi_init_thread && m_midi_init_thread->joinable())
-		{
-			m_midi_init_thread->join();
-		}
-	}
+	join_init_thread();
 
 	m_midi_list.clear();
 	m_midi_list.append(get_none());

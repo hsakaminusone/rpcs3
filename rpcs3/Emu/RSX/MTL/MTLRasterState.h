@@ -72,8 +72,12 @@ namespace mtl
 	MTL::CullMode capture_cull_mode(const raster_state& state);
 	bool culls_both_faces(const raster_state& state);
 
-	// SET_FRONT_FACE -> MTL::Winding (LLD-raster §3.3).  The viewport is not
-	// y-flipped, so the winding is direct (invariant 2).
+	// The clip-space Y flip of the RSX draw path.  The RSX and the translated
+	// shaders emit clip space whose NDC Y points down and Metal's points up, so
+	// the viewport, the scissor and the winding all carry that one flip, as the
+	// present passes already do (MTLOverlays.cpp:381, kk_cmd_draw.c:785-793).
+	// SET_FRONT_FACE -> MTL::Winding (LLD-raster §3.3).  The viewport negates its
+	// height, so the winding is reversed (invariant 2).
 	MTL::Winding capture_front_face(const raster_state& state);
 
 	// SET_FRONT_POLYGON_MODE / SET_BACK_POLYGON_MODE -> MTL::TriangleFillMode
@@ -91,14 +95,16 @@ namespace mtl
 	// vertex shader owns those values (invariant 4).
 	bool capture_clip_range(const raster_state& state, f64& znear, f64& zfar);
 
-	// The MTLViewport rectangle: the surface clip, never the RSX viewport rect
-	// (LLD-raster §3.1, invariant 1).
+	// The MTLViewport rectangle: the surface clip, never the RSX viewport rect, and
+	// the one clip-space Y flip the backend carries (LLD-raster §3.1, invariants 1
+	// and 2).
 	MTL::Viewport build_viewport(u16 clip_width, u16 clip_height, f64 znear, f64 zfar);
 
 	// The MTLScissorRect from the resolved region (LLD-raster §3.1).  The region
 	// comes from rsx::thread::get_scissor, which owns the viewport-rect intersection,
-	// the window clamp and the invalid case.
-	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2);
+	// the window clamp and the invalid case.  It is in guest window coordinates, so
+	// the viewport flip moves it to the mirrored target row.
+	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u16 clip_height);
 }
 
 #endif // RSX_ENABLE_METAL4

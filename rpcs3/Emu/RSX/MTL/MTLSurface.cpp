@@ -1,4 +1,5 @@
 #include "MTLSurface.h"
+#include "MTLInstrumentation.h"
 
 #ifdef RSX_ENABLE_METAL4
 
@@ -22,6 +23,8 @@ namespace mtl
 
 	void surface::create(u32 address, u16 width, u16 height, u16 pitch, rsx::surface_antialiasing antialias, const rsx::surface_scaling_config_t& scaling, MTL::PixelFormat format, u8 bpp, bool depth)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/create");
 		m_depth = depth;
 		surface_width = width;
 		surface_height = height;
@@ -77,6 +80,17 @@ namespace mtl
 	{
 		set_format(format);
 		create(address, width, height, pitch, antialias, scaling, mtl::get_surface_color_format(format), rsx::get_format_block_size_in_bytes(format), false);
+
+		// The guest channel meaning of the format, so a sampled surface returns the
+		// channels the guest wrote (DEVIATIONS-SURFACE.md, S7).  The resolve image
+		// carries the same format and therefore the same map.
+		const std::array<MTL::TextureSwizzle, 4> layout = mtl::get_surface_component_layout(format);
+		set_native_component_layout(layout);
+
+		if (resolve_surface)
+		{
+			resolve_surface->set_native_component_layout(layout);
+		}
 	}
 
 	void surface::create_depth(u32 address, rsx::surface_depth_format2 format, u16 width, u16 height, u16 pitch, rsx::surface_antialiasing antialias, const rsx::surface_scaling_config_t& scaling)
@@ -185,6 +199,10 @@ namespace mtl
 
 	void surface::flush_old_contents(command_recorder& cmd, rsx::surface_access access)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/flush old");
+		// TODO(excise): level 2; the surface write-back stream (area G).
+		MTL_PROBE_LATCH(2, "surface/flush old");
 		texture* target = get_surface(rsx::surface_access::transfer_read);
 		const u32 first = prepare_rw_barrier_for_transfer(this);
 
@@ -285,6 +303,8 @@ namespace mtl
 
 	void surface::initialize_memory(command_recorder& cmd, rsx::surface_access access)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/init memory");
 		if (needs_cpu_upload())
 		{
 			load_background(cmd);
@@ -345,6 +365,8 @@ namespace mtl
 
 	void surface::load_background(command_recorder& cmd)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/load background");
 		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
 		if (!encoder)
 		{
@@ -391,10 +413,16 @@ namespace mtl
 
 	void surface::resolve(command_recorder& cmd)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/resolve");
 		if (sample_count() == 1 || !resolve_surface || !(msaa_flags & rsx::surface_state_flags::require_resolve))
 		{
 			return;
 		}
+
+		// TODO(excise): level 2; a multisampled surface resolved (area G).
+		MTL_PROBE_LATCH(2, "surface/resolve");
+		MTL_PROBE_HISTOGRAM(2, "surface resolve samples", sample_count(), "sample count");
 
 		// A depth or stencil attachment resolves in its own pass, because the resolve
 		// only reads the multisampled image after the passes that wrote it have
@@ -453,6 +481,10 @@ namespace mtl
 
 	void surface::write_to_memory(command_recorder& cmd, MTL::Buffer* target, u32 dst_offset, u32 src_offset, u32 write_length)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "surface/write to memory");
+		// TODO(excise): level 2; a surface written back to guest memory (area G, H).
+		MTL_PROBE_LATCH(2, "surface/write back");
 		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
 		if (!encoder)
 		{
@@ -462,16 +494,95 @@ namespace mtl
 		// src_offset is a byte offset into the surface row space.
 		const u32 row = src_offset / rsx_pitch;
 		const u32 column = (src_offset % rsx_pitch) / get_bpp();
-		const u32 rows = write_length / rsx_pitch;
+		u32 rows = write_length / rsx_pitch;
+
+		if (!rows || column >= width())
+		{
+			return;
+		}
 
 		MTL::Texture* source = get_surface(rsx::surface_access::transfer_read)->value();
+		if (row >= source->height())
+		{
+			return;
+		}
+
+		// The row pitch is the guest one.  A host surface can be wider than the
+		// guest surface under resolution scaling, so the copy is bounded by both the
+		// host extent and the guest row (REVIEW-FINDINGS.md, S10).  The scaled case
+		// still needs a downscale, but the bit-exact unscaled path must not read past
+		// the host texture or write past the guest row.
+		const u32 copy_width = std::min<u32>(width() - column, rsx_pitch / get_bpp());
+		rows = std::min<u32>(rows, static_cast<u32>(source->height()) - row);
+		if (!copy_width || !rows)
+		{
+			return;
+		}
+
 		const MTL::PixelFormat format = source->pixelFormat();
+		const rsx::surface_depth_format2 depth_format = get_surface_depth_format();
+
+		// The guest depth pack is not the Metal depth plane.  z16_uint happens to use
+		// the same word, but z16_float and both z24s8 forms need the upload decode
+		// inverted (B16).  The blit copies the host plane to a shared staging buffer;
+		// the frame is committed and waited for, because the CPU encode that follows
+		// is the read-back itself.  This is the same bounded wait the texture
+		// read-back uses (B4, MTLCommandRecorder::flush_for_readback).
+		if (m_depth && depth_format_needs_decode(depth_format))
+		{
+			const u32 plane_pitch = copy_width * 4;
+			MTL::Buffer* plane = m_resources->new_buffer(static_cast<u64>(plane_pitch) * rows, MTL::StorageModeShared);
+			if (!plane)
+			{
+				rsx_log.error("Metal 4: the depth read-back staging buffer could not be created");
+				return;
+			}
+
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(column, row, 0),
+				MTL::Size::Make(copy_width, rows, 1),
+				plane, 0, plane_pitch, plane_pitch * rows,
+				get_depth_plane_option(format, false));
+
+			MTL::Buffer* stencil = nullptr;
+			const u32 stencil_pitch = (copy_width + 3u) & ~3u;
+			const bool combined = rsx::is_depth_stencil_format(depth_format);
+			if (combined)
+			{
+				stencil = m_resources->new_buffer(static_cast<u64>(stencil_pitch) * rows, MTL::StorageModeShared);
+				if (!stencil)
+				{
+					rsx_log.error("Metal 4: the stencil read-back staging buffer could not be created");
+					m_resources->defer_release(plane);
+					return;
+				}
+
+				encoder->copyFromTexture(source, 0, 0,
+					MTL::Origin::Make(column, row, 0),
+					MTL::Size::Make(copy_width, rows, 1),
+					stencil, 0, stencil_pitch, stencil_pitch * rows,
+					get_depth_plane_option(format, true));
+			}
+
+			cmd.flush_for_readback();
+
+			u8* const dst = static_cast<u8*>(target->contents()) + dst_offset;
+			encode_depth_plane(dst, plane->contents(), copy_width, rows, rsx_pitch, get_bpp(), depth_format,
+				stencil ? stencil->contents() : nullptr, stencil ? stencil_pitch : 0);
+
+			m_resources->defer_release(plane);
+			if (stencil)
+			{
+				m_resources->defer_release(stencil);
+			}
+			return;
+		}
 
 		if (format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
 		{
 			encoder->copyFromTexture(source, 0, 0,
 				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(width() - column, rows, 1),
+				MTL::Size::Make(copy_width, rows, 1),
 				target, dst_offset, rsx_pitch, rsx_pitch * rows,
 				get_depth_plane_option(format, false));
 		}
@@ -479,7 +590,7 @@ namespace mtl
 		{
 			encoder->copyFromTexture(source, 0, 0,
 				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(width() - column, rows, 1),
+				MTL::Size::Make(copy_width, rows, 1),
 				target, dst_offset, rsx_pitch, rsx_pitch * rows);
 		}
 	}

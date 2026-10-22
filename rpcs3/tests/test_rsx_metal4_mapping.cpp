@@ -239,7 +239,7 @@ TEST(MTLMapMipFilter, MinifyFilterNamesTheMipFilter)
 		{ rsx::texture_minify_filter::linear_nearest,  MTL::SamplerMipFilterNearest },      // closest level (gcm_enums.h:1529)
 		{ rsx::texture_minify_filter::nearest_linear,  MTL::SamplerMipFilterLinear },       // linear mix (gcm_enums.h:1530)
 		{ rsx::texture_minify_filter::linear_linear,   MTL::SamplerMipFilterLinear },       // linear mix (gcm_enums.h:1531)
-		{ rsx::texture_minify_filter::convolution_min, MTL::SamplerMipFilterLinear },       // gcm_enums.h:1532, looks close to linear_linear
+		{ rsx::texture_minify_filter::convolution_min, MTL::SamplerMipFilterNotMipmapped }, // VKFormats.cpp:44, sample_mipmaps = false
 	};
 
 	EXPECT_EQ(sizeof(table) / sizeof(table[0]), 7u);
@@ -253,10 +253,11 @@ TEST(MTLMapMipFilter, MinifyFilterNamesTheMipFilter)
 
 TEST(MTLMapMipFilter, OnlyTheBaseLevelFiltersAreNotMipmapped)
 {
-	// The RSX minify name alone says whether the mip chain is sampled.  nearest
-	// and linear name the base level (gcm_enums.h:1526-1527).  Every other name
-	// encodes a mip mode, and convolution_min follows linear_linear
-	// (gcm_enums.h:1532).  This ties the mip filter to the min filter.
+	// The RSX minify name says whether the mip chain is sampled.  nearest and
+	// linear name the base level (gcm_enums.h:1526-1527).  convolution_min is a
+	// linear min filter with sample_mipmaps = false (VKFormats.cpp:44).  The
+	// remaining names encode a mip mode.  This ties the mip filter to the min
+	// filter.
 	constexpr rsx::texture_minify_filter all[] = {
 		rsx::texture_minify_filter::nearest,
 		rsx::texture_minify_filter::linear,
@@ -270,7 +271,9 @@ TEST(MTLMapMipFilter, OnlyTheBaseLevelFiltersAreNotMipmapped)
 	for (const rsx::texture_minify_filter filter : all)
 	{
 		SCOPED_TRACE(static_cast<u32>(filter));
-		const bool base_level = filter == rsx::texture_minify_filter::nearest || filter == rsx::texture_minify_filter::linear;
+		const bool base_level = filter == rsx::texture_minify_filter::nearest
+			|| filter == rsx::texture_minify_filter::linear
+			|| filter == rsx::texture_minify_filter::convolution_min;
 		EXPECT_EQ(mtl::get_mip_filter(filter) == MTL::SamplerMipFilterNotMipmapped, base_level);
 	}
 }
@@ -515,22 +518,35 @@ TEST(MTLMapSurfaceFormat, DepthFormatFollowsTheGcmSurfaceDepthFormat)
 
 TEST(MTLMapTextureFormat, TextureFormatFollowsTheGcmTextureFormat)
 {
-	// Each row is checked against the Apple Vulkan format (VKFormats.cpp:195-241,
-	// the `__APPLE__` branch at :207-215) and the RSX component map
-	// (VKFormats.cpp:124-193; GLTexture.cpp:214-269).  The packed rows expand to
-	// B8G8R8A8 because the Apple uploader expands them (TextureUtils.cpp:965-1014).
+	// Each row is checked against the Vulkan format for the same target
+	// (VKFormats.cpp:195-241; the packed rows are platform-dependent, as below) and the
+	// RSX component map (VKFormats.cpp:124-193; GLTexture.cpp:214-269).  The uploader and
+	// the Vulkan format choice use the same predicate (TextureUtils.cpp:950,
+	// VKFormats.cpp:200).
 	using row = mapping_row<u32, MTL::PixelFormat>;
 
 	const row table[] = {
 		{ CELL_GCM_TEXTURE_B8,                        MTL::PixelFormat::PixelFormatR8Unorm },            // 0x81 (gcm_enums.h:134); VKFormats.cpp:216
 		{ CELL_GCM_TEXTURE_A8R8G8B8,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x85 (gcm_enums.h:138); VKFormats.cpp:217
 		{ CELL_GCM_TEXTURE_D8R8G8B8,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x9E (gcm_enums.h:159); VKFormats.cpp:232
-		{ CELL_GCM_TEXTURE_R5G6B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x84 (gcm_enums.h:137); VKFormats.cpp:210
-		{ CELL_GCM_TEXTURE_A1R5G5B5,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x82 (gcm_enums.h:135); VKFormats.cpp:213
-		{ CELL_GCM_TEXTURE_A4R4G4B4,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x83 (gcm_enums.h:136); VKFormats.cpp:214
-		{ CELL_GCM_TEXTURE_R5G5B5A1,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x97 (gcm_enums.h:152); VKFormats.cpp:211
-		{ CELL_GCM_TEXTURE_D1R5G5B5,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x9D (gcm_enums.h:158); VKFormats.cpp:212
-		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x8F (gcm_enums.h:145); VKFormats.cpp:209
+#if !defined(__APPLE__) || !defined(ARCH_X64)
+		// The uploader keeps a packed format packed here (TextureUtils.cpp:950), so the
+		// host format is the packed one that matches the guest bits.
+		{ CELL_GCM_TEXTURE_R5G6B5,                    MTL::PixelFormat::PixelFormatB5G6R5Unorm },         // 0x84 (gcm_enums.h:137); VKFormats.cpp:201
+		{ CELL_GCM_TEXTURE_A1R5G5B5,                  MTL::PixelFormat::PixelFormatA1BGR5Unorm },         // 0x82 (gcm_enums.h:135); VKFormats.cpp:205
+		{ CELL_GCM_TEXTURE_A4R4G4B4,                  MTL::PixelFormat::PixelFormatABGR4Unorm },          // 0x83 (gcm_enums.h:136); VKFormats.cpp:206
+		{ CELL_GCM_TEXTURE_R5G5B5A1,                  MTL::PixelFormat::PixelFormatBGR5A1Unorm },         // 0x97 (gcm_enums.h:152); VKFormats.cpp:203
+		{ CELL_GCM_TEXTURE_D1R5G5B5,                  MTL::PixelFormat::PixelFormatA1BGR5Unorm },         // 0x9D (gcm_enums.h:158); VKFormats.cpp:204
+		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatB5G6R5Unorm },         // 0x8F (gcm_enums.h:145); VKFormats.cpp:202
+#else
+		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015).
+		{ CELL_GCM_TEXTURE_R5G6B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x84 (gcm_enums.h:137)
+		{ CELL_GCM_TEXTURE_A1R5G5B5,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x82 (gcm_enums.h:135)
+		{ CELL_GCM_TEXTURE_A4R4G4B4,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x83 (gcm_enums.h:136)
+		{ CELL_GCM_TEXTURE_R5G5B5A1,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x97 (gcm_enums.h:152)
+		{ CELL_GCM_TEXTURE_D1R5G5B5,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x9D (gcm_enums.h:158)
+		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x8F (gcm_enums.h:145)
+#endif
 		{ CELL_GCM_TEXTURE_G8B8,                      MTL::PixelFormat::PixelFormatRG8Unorm },           // 0x8B (gcm_enums.h:142); VKFormats.cpp:221
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO8,          MTL::PixelFormat::PixelFormatRG8Unorm },           // 0x98 (gcm_enums.h:153); VKFormats.cpp:233
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO_S8,        MTL::PixelFormat::PixelFormatRG8Snorm },           // 0x99 (gcm_enums.h:154); VKFormats.cpp:234
@@ -560,49 +576,98 @@ TEST(MTLMapTextureFormat, TextureFormatFollowsTheGcmTextureFormat)
 	}
 }
 
-TEST(MTLMapTextureFormat, PackedFormatsExpandToBgraWithAnArgbRead)
+TEST(MTLMapTextureFormat, CompressedFormatsFallBackWhenTheDeviceHasNoBc)
 {
-	// The GCM packed names put R first and B last, with R in the high bits
-	// (TextureUtils.cpp:45-56, :84-111).  The Apple uploader expands each to BGRA8
-	// (TextureUtils.cpp:965-1014), and the unit reads it A-R-G-B, matching the GL
-	// swizzle (GLTexture.cpp:219-230) and the Vulkan map (VKFormats.cpp:131-138).
+	// A device that reports no BC compression cannot allocate a BC descriptor:
+	// heapTextureSizeAndAlign() aborts inside the Metal validation layer before the
+	// allocation returns.  The uploader expands the four-byte block to one BGRA8
+	// texel when the same capability is false (TextureUtils.cpp:1067-1115), so the
+	// format table must name the expanded format too (VKFormats.cpp:218-220).
+	const u32 compressed[] = {
+		CELL_GCM_TEXTURE_COMPRESSED_DXT1,
+		CELL_GCM_TEXTURE_COMPRESSED_DXT23,
+		CELL_GCM_TEXTURE_COMPRESSED_DXT45,
+	};
+
+	for (const u32 guest : compressed)
+	{
+		SCOPED_TRACE(guest);
+		EXPECT_EQ(mtl::get_texture_format(guest, false), MTL::PixelFormat::PixelFormatBGRA8Unorm);
+	}
+}
+
+TEST(MTLMapTextureFormat, PackedFormatsUseTheGuestBitOrderWithAPermutedRead)
+{
+	// The uploader keeps a packed format packed on this target (TextureUtils.cpp:950),
+	// so the host texture holds the guest bits unchanged.  Vulkan names the guest bit
+	// order on the same target (VKFormats.cpp:200-205).  Metal names its packed format
+	// from the most significant field, so the host channel order differs and the
+	// component layout must permute the read back to the guest channels.
 	EXPECT_EQ(CELL_GCM_TEXTURE_R5G6B5, 0x84u);   // gcm_enums.h:137
 	EXPECT_EQ(CELL_GCM_TEXTURE_R6G5B5, 0x8Fu);   // gcm_enums.h:145
 	EXPECT_EQ(CELL_GCM_TEXTURE_R5G5B5A1, 0x97u); // gcm_enums.h:152
 
-	constexpr u32 packed[] = {
-		CELL_GCM_TEXTURE_R5G6B5,
-		CELL_GCM_TEXTURE_R6G5B5,
-		CELL_GCM_TEXTURE_R5G5B5A1,
-	};
-
-	constexpr std::array<MTL::TextureSwizzle, 4> argb = {
-		MTL::TextureSwizzleAlpha,
-		MTL::TextureSwizzleRed,
-		MTL::TextureSwizzleGreen,
-		MTL::TextureSwizzleBlue,
-	};
-
-	for (const u32 gcm : packed)
+	struct packed_row
 	{
-		SCOPED_TRACE(gcm);
-		EXPECT_EQ(mtl::get_texture_format(gcm), MTL::PixelFormat::PixelFormatBGRA8Unorm);
+		u32 guest;
+		MTL::PixelFormat host;
+		std::array<MTL::TextureSwizzle, 4> layout;
+	};
 
-		const auto layout = mtl::get_texture_component_layout(gcm);
+#if !defined(__APPLE__) || !defined(ARCH_X64)
+	constexpr std::array<MTL::TextureSwizzle, 4> one_bgr = {
+		MTL::TextureSwizzleOne, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
+	constexpr std::array<MTL::TextureSwizzle, 4> alpha_bgr = {
+		MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
+	// Guest R4G4B4A4 against host ABGR4 moves every field one place.
+	constexpr std::array<MTL::TextureSwizzle, 4> rotate = {
+		MTL::TextureSwizzleRed, MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen };
+
+	const packed_row packed[] = {
+		{ CELL_GCM_TEXTURE_R5G6B5,   MTL::PixelFormat::PixelFormatB5G6R5Unorm, one_bgr },   // VKFormats.cpp:201
+		{ CELL_GCM_TEXTURE_R6G5B5,   MTL::PixelFormat::PixelFormatB5G6R5Unorm, one_bgr },   // VKFormats.cpp:202
+		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGR5A1Unorm, alpha_bgr }, // VKFormats.cpp:203
+		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, alpha_bgr }, // VKFormats.cpp:205
+		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, one_bgr },   // VKFormats.cpp:204
+		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm,  rotate },    // VKFormats.cpp:206
+	};
+#else
+	// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015),
+	// so the guest channels already sit in the A-R-G-B order.
+	constexpr std::array<MTL::TextureSwizzle, 4> argb = {
+		MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+
+	const packed_row packed[] = {
+		{ CELL_GCM_TEXTURE_R5G6B5,   MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+		{ CELL_GCM_TEXTURE_R6G5B5,   MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+	};
+#endif
+
+	for (const packed_row& entry : packed)
+	{
+		SCOPED_TRACE(entry.guest);
+		EXPECT_EQ(mtl::get_texture_format(entry.guest), entry.host);
+
+		const auto layout = mtl::get_texture_component_layout(entry.guest);
 		for (usz i = 0; i < layout.size(); ++i)
 		{
-			SCOPED_TRACE(std::to_string(gcm) + "[" + std::to_string(i) + "]");
-			EXPECT_EQ(layout[i], argb[i]);
+			SCOPED_TRACE(std::to_string(entry.guest) + "[" + std::to_string(i) + "]");
+			EXPECT_EQ(layout[i], entry.layout[i]);
 		}
 	}
 }
 
-TEST(MTLMapSurfaceFormat, PackedSurfaceFormatsUseTheSwappedChannelOrder)
+TEST(MTLMapSurfaceFormat, PackedSurfaceFormatsUseTheNativeSizedFormat)
 {
-	// GCM packs R in the high bits (TextureUtils.cpp:47-49, :86-89).  Metal names
-	// its 16-bit format from the blue end, so r5g6b5 becomes B5G6R5Unorm, and the
-	// A1R5G5B5 family becomes BGR5A1Unorm.  GL selects the same rgb565/bgr5a1
-	// internals (GLRenderTargets.cpp:13, :22-28).
+	// Metal has no R5G6B5 or A1R5G5B5, so a packed surface uses the nearest native
+	// format.  The fragment output and the clear write the guest channels in the
+	// host order, and the surface read uses the identity layout, so the image is
+	// consistent inside Metal.  The guest memory boundary needs the permutation
+	// recorded in REVIEW-RSX-NATIVE.md R2.
 	EXPECT_EQ(mtl::get_surface_color_format(rsx::surface_color_format::r5g6b5), MTL::PixelFormat::PixelFormatB5G6R5Unorm);
 	EXPECT_EQ(mtl::get_surface_color_format(rsx::surface_color_format::x1r5g5b5_z1r5g5b5), MTL::PixelFormat::PixelFormatBGR5A1Unorm);
 	EXPECT_EQ(mtl::get_surface_color_format(rsx::surface_color_format::x1r5g5b5_o1r5g5b5), MTL::PixelFormat::PixelFormatBGR5A1Unorm);
@@ -765,18 +830,18 @@ TEST(MTLMapRaster, CullModeFollowsTheGcmCullFace)
 
 TEST(MTLMapRaster, WindingFollowsTheGcmFrontFace)
 {
-	// The Metal viewport is not y-flipped, so the winding is direct
-	// (MTLRasterState.h:54-55).  cw becomes Clockwise and ccw becomes
-	// CounterClockwise (gcm_enums.h:1656-1657).
+	// The draw viewport negates its height, and that reverses the screen-space
+	// orientation, so cw becomes CounterClockwise and ccw becomes Clockwise
+	// (MTLRasterState.h:54-58, invariant 2; gcm_enums.h:1656-1657).
 	mtl::raster_state state{};
 
 	state.front_face = rsx::front_face::cw;
 	SCOPED_TRACE("cw");
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
 
 	state.front_face = rsx::front_face::ccw;
 	SCOPED_TRACE("ccw");
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
 }
 
 TEST(MTLMapRaster, TheLatchedRegistersProduceTheDerivedCullMode)
@@ -825,7 +890,7 @@ TEST(MTLMapRaster, TheLatchedRegistersProduceTheDerivedCullMode)
 
 				EXPECT_EQ(mtl::capture_cull_mode(state), expected);
 				EXPECT_EQ(mtl::capture_front_face(state),
-					winding == rsx::front_face::cw ? MTL::WindingClockwise : MTL::WindingCounterClockwise);
+					winding == rsx::front_face::cw ? MTL::WindingCounterClockwise : MTL::WindingClockwise);
 			}
 		}
 	}

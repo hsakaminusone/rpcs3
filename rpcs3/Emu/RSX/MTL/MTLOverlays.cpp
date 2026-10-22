@@ -3,6 +3,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLConstants.h"
+#include "MTLInstrumentation.h"
 #include "MTLResourceManager.h"
 #include "MTLShader.h"
 
@@ -35,6 +36,12 @@ namespace mtl
 
 			return text;
 		}
+
+		// The snippets select their interface with #ifdef VULKAN.  glslang supplies
+		// that define itself whenever it compiles GLSL for Vulkan (glslang
+		// Versions.cpp: "#define VULKAN <vulkanGlsl>"), so the backend must not:
+		// defining it again with another value is a preprocessor error ("Macro
+		// redefined; different substitutions: VULKAN").
 
 		// OverlayRenderVS.glsl reads `gl_VertexIndex` for its geometry and takes the
 		// per-draw block from the push constant; the Vulkan substitution is what this
@@ -159,7 +166,15 @@ namespace mtl
 			return false;
 		}
 
-		m_vs_library = compile_msl(dev.compiler(), msl, nullptr);
+		NS::Error* error = nullptr;
+		m_vs_library = compile_msl(dev.compiler(), msl, &error);
+
+		if (!m_vs_library)
+		{
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: overlay vertex library creation failed: %s", message);
+			return false;
+		}
 
 		spv.clear();
 		msl.clear();
@@ -171,11 +186,12 @@ namespace mtl
 			return false;
 		}
 
-		m_fs_library = compile_msl(dev.compiler(), msl, nullptr);
+		m_fs_library = compile_msl(dev.compiler(), msl, &error);
 
-		if (!m_vs_library || !m_fs_library)
+		if (!m_fs_library)
 		{
-			rsx_log.error("Metal: overlay library creation failed");
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: overlay fragment library creation failed: %s", message);
 			return false;
 		}
 
@@ -361,6 +377,39 @@ namespace mtl
 		metal_viewport.originY = static_cast<f64>(viewport.y1);
 		metal_viewport.width = static_cast<f64>(viewport.width());
 		metal_viewport.height = static_cast<f64>(viewport.height());
+
+		if (m_vulkan_clip_space)
+		{
+			// The geometry is Vulkan clip space, whose NDC Y points down, and Metal's
+			// points up, so the viewport carries that one flip: the rectangle keeps its
+			// edge and its height is negated (kk_cmd_draw.c:785-793).  The scissor is a
+			// target-space rectangle, so it does not move.
+			metal_viewport.originY += metal_viewport.height;
+			metal_viewport.height = -metal_viewport.height;
+		}
+
+		// TODO(excise): level 2; the overlay orientation.  The clip space and the sign
+		// of the viewport height decide which way the overlay lands (area A).
+		if (m_vulkan_clip_space)
+		{
+			MTL_PROBE_LATCH(2, "overlay/clip space flipped");
+		}
+		else
+		{
+			MTL_PROBE_LATCH(2, "overlay/clip space native");
+		}
+		MTL_PROBE_HISTOGRAM(2, "overlay viewport height sign", metal_viewport.height < 0.0 ? 0 : 1, "height sign");
+
+		// TODO(excise): level 3; the overlay viewport of the first frames.
+		static u32 diagnostic_overlay_viewports = 0;
+
+		if (diagnostic_overlay_viewports++ < 8)
+		{
+			MTL_NOTE(3, "Metal 4: overlay viewport %.1f %.1f %.1f %.1f z %.4f %.4f, flip %u",
+				metal_viewport.originX, metal_viewport.originY, metal_viewport.width, metal_viewport.height,
+				metal_viewport.znear, metal_viewport.zfar, m_vulkan_clip_space ? 1u : 0u);
+		}
+
 		metal_viewport.znear = 0.0;
 		metal_viewport.zfar = 1.0;
 		encoder->setViewport(metal_viewport);
@@ -655,8 +704,14 @@ namespace mtl
 			head[14] = config.clip_rect.x2;
 			head[15] = config.clip_rect.y2;
 
+			// The snippet compiles under the Vulkan rules, so its VULKAN branch
+			// applies and the flip must be requested here.  Metal clip space is
+			// y-up, so the UI, which is y-down, is mirrored without it.
 			rsx::overlays::vertex_options vertex_options;
-			head[16] = std::bit_cast<f32>(static_cast<u32>(vertex_options.disable_vertex_snap(config.disable_vertex_snap).get()));
+			head[16] = std::bit_cast<f32>(static_cast<u32>(vertex_options
+				.disable_vertex_snap(config.disable_vertex_snap)
+				.enable_vertical_flip(true)
+				.get()));
 
 			// 68: fragment_config  72: timestamp  76: blur_intensity
 			// 80: sdf_params       96: sdf_origin  112: sdf_border_color
@@ -718,6 +773,7 @@ namespace mtl
 
 	bool video_out_calibration_pass::init(const device& dev, resource_manager& resources)
 	{
+		m_vulkan_clip_space = true;
 		return overlay_pass::init(dev, resources, passthrough_vertex_source(), calibration_fragment_source());
 	}
 
@@ -758,6 +814,7 @@ namespace mtl
 	bool present_scale_pass::init(const device& dev, resource_manager& resources, bool linear)
 	{
 		m_linear = linear;
+		m_vulkan_clip_space = true;
 		return overlay_pass::init(dev, resources, passthrough_vertex_source(), calibration_fragment_source(), linear);
 	}
 

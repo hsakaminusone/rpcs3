@@ -185,6 +185,49 @@ namespace rsx
 		u32 last_code_jump = 0;
 		u32 last_sema_cmd = 0;
 		u32 last_sema_addr = 0;
+
+		// TODO(excise): level 1; the data of a FIFO desync, and a short history of
+		// the commands the host dispatched.  Both exist for one diagnostic: the
+		// desync capture shows a data word where a command header belongs, and the
+		// question is which command's argument block was mis-counted
+		// (RR7-FREEZE-FORENSICS.md §8.1, L52).  The shared code gathers the data
+		// and hands it to the backend through on_fifo_desync, so the printing and
+		// the cost of the history belong to the backend, not to the FIFO path.
+		// Removing the diagnostic removes the struct, the history, the hook and
+		// every call site.
+		struct dispatch_entry
+		{
+			u32 reg = 0;
+			u32 value = 0;
+			u32 position = 0;
+		};
+
+		static constexpr u32 dispatch_history_size = 8;
+
+		// What the shared code knows about a desync when it recovers.
+		struct fifo_desync_info
+		{
+			u32 get = 0;
+			u32 put = 0;
+			u32 get_guest = 0;
+			u32 restore_point = 0;
+			u32 code_start = 0;
+			u32 ret_addr = 0;
+			u32 last_command = 0;
+			u32 last_label_address = 0;
+			u32 last_label_value = 0;
+			bool last_command_method_known = false;
+			u32 words[8] = {};
+			bool words_valid = false;
+			dispatch_entry history[dispatch_history_size]{};
+			u32 history_count = 0;
+		};
+
+		u32 m_last_label_address = 0;
+		u32 m_last_label_value = 0;
+		dispatch_entry m_dispatch_history[dispatch_history_size]{};
+		u32 m_dispatch_history_count = 0;
+		u32 m_dispatch_history_next = 0;
 		atomic_t<u32> external_interrupt_lock{ 0 };
 		atomic_t<bool> external_interrupt_ack{ false };
 		atomic_t<u32> is_initialized{0};
@@ -199,6 +242,42 @@ namespace rsx
 
 		static void fifo_wake_delay(u64 div = 1);
 		u32 get_fifo_cmd() const;
+
+		// TODO(excise): level 1; the label write is recorded so that a desync
+		// capture can compare it with the address of the FIFO command stream.
+		void note_label_release(u32 address, u32 value)
+		{
+			m_last_label_address = address;
+			m_last_label_value = value;
+		}
+
+		u32 last_label_address() const { return m_last_label_address; }
+		u32 last_label_value() const { return m_last_label_value; }
+
+		const dispatch_entry* dispatch_history() const { return m_dispatch_history; }
+		u32 dispatch_history_count() const { return m_dispatch_history_count; }
+
+		// Record one dispatched command.  The ring keeps the last
+		// dispatch_history_size entries, newest last.
+		void note_dispatch(u32 reg, u32 value, u32 position)
+		{
+			dispatch_entry& entry = m_dispatch_history[m_dispatch_history_next];
+			entry.reg = reg;
+			entry.value = value;
+			entry.position = position;
+
+			m_dispatch_history_next = (m_dispatch_history_next + 1) % dispatch_history_size;
+			if (m_dispatch_history_count < dispatch_history_size)
+			{
+				m_dispatch_history_count++;
+			}
+		}
+
+		// The backend hook for the desync capture.  The shared code fills the
+		// information and calls it; the Metal 4 backend prints it through the
+		// probe facility, and every other backend ignores it.
+		// TODO(excise): level 1; the hook goes with the capture.
+		virtual void on_fifo_desync(const fifo_desync_info& /*info*/) {}
 
 		void dump_regs(std::string&, std::any& custom_data) const override;
 		void cpu_wait(bs_t<cpu_flag> old) override;

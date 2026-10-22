@@ -200,19 +200,29 @@ concrete objects.
 
 ### 3.1 Viewport and scissor
 
-The encoder's `MTLViewport` is set to `{0, 0, clip_width, clip_height}` — the surface clip, not the
-RSX viewport rect — because `scale_offset_mat` already carries the transform
-(`VKGSRender.cpp:1305-1309`). `SET_VIEWPORT_SCALE`/`_OFFSET` are read into
-`fill_scale_offset_data` (`RSXDrawCommands.cpp:563-586`) and consumed by the VP; they never reach a
-Metal viewport setter. The `flip_y` parameter of that function is passed **`false`** by both the VK
-and GL backends (`VKGSRender.cpp:2134`, `GLGSRender.cpp:979`), so the Metal viewport origin is
-**not** y-flipped: the RSX Y convention is expressed through the matrix (`scale_y`/`offset_y`), and a
-naive `viewport_origin_y`-flip would double-apply it. `[V]`
+The encoder's `MTLViewport` is `{0, clip_height, clip_width, -clip_height}` — the surface
+clip, not the RSX viewport rect — and the height is negated. Two independent conventions
+are in play, and the backend applies each exactly once:
+
+- **Guest to Vulkan.** `scale_offset_mat` already carries the RSX window transform
+  (`VKGSRender.cpp:1305-1309`), and `fill_scale_offset_data` (`RSXDrawCommands.cpp:563-586`)
+  writes it. The `flip_y` parameter of that function stays **`false`**, as it is in VK
+  and GL (`VKGSRender.cpp:2134`, `GLGSRender.cpp:979`); `SET_VIEWPORT_SCALE`/`_OFFSET`
+  never reach a Metal viewport setter.
+- **Vulkan to Metal.** The translated shaders emit Vulkan-convention clip space, whose
+  NDC Y points down, and Metal's NDC points up. KosmicKrisp negates the viewport height
+  for every Vulkan viewport for this reason (`kk_cmd_draw.c:778-793`). The Metal 4 draw
+  path does the same, and the present passes already did (`MTLOverlays.cpp:381`).
+  Negating the height reverses the triangle orientation, so `SET_FRONT_FACE` maps to the
+  opposite `MTL::Winding` (§3.3).
 
 `SET_SCISSOR_HORIZONTAL`/`_VERTICAL` become the `MTLScissorRect`; on a draw they are first
-intersected with the RSX viewport rect (`get_scissor(clip_viewport=true)`, `RSXThread.cpp:2115-2129`),
-which is the only remaining role of `SET_VIEWPORT_HORIZONTAL`/`_VERTICAL`. Both are set together via
-`setScissorRects`/`setViewports` on the `MTL4::RenderCommandEncoder`. `[V]`/`[I]`
+intersected with the RSX viewport rect (`get_scissor(clip_viewport=true)`,
+`RSXThread.cpp:2115-2129`), which is the only remaining role of
+`SET_VIEWPORT_HORIZONTAL`/`_VERTICAL`. The rect is in guest window coordinates, so the
+same flip puts it at the mirrored target row: `y = clip_height - y2`. Both are set
+together via `setScissorRects`/`setViewports` on the `MTL4::RenderCommandEncoder`.
+`[V]`/`[I]`
 
 ### 3.2 Depth clip range and the [0,1] shape change
 
@@ -231,8 +241,9 @@ case is realised in the vertex shader by `apply_zclip_xform` (maps RSX window Z 
 `SET_CULL_FACE_ENABLE` selects between `MTL::CullModeNone` and the decoded
 `MTL::CullModeFront`/`Back` (RSX `front_and_back` maps to `MTLCullModeNone` semantics only if the
 backend folds it; VK maps it to `VK_CULL_MODE_FRONT_AND_BACK`, `VKGSRender.cpp:216-218`).
-`SET_FRONT_FACE` selects `MTL::WindingClockwise`/`CounterClockwise`
-(`VKGSRender.cpp:205-206`). Both are set with `setCullMode`/`setFrontFacingWinding` and are part of
+`SET_FRONT_FACE` selects the opposite of the guest value, because the viewport's negative
+height reverses screen-space orientation: guest clockwise becomes `MTL::WindingCounterClockwise`.
+Both are set with `setCullMode`/`setFrontFacingWinding` and are part of
 the raster pipeline key (`HLD-04` §3.4, `HLD-05` §3.5). `[V]`
 
 Polygon mode is the sharpest shape change. Metal exposes **one** triangle fill mode per encoder
@@ -300,8 +311,9 @@ key); `MTL4::ArgumentTable::setAddress` (vertex env, slot 9 stipple); MSL `[[cli
 - **Impossible: line stipple.** `SET_LINE_STIPPLE`/`SET_LINE_STIPPLE_PATTERN` have no decoder and no
   reader in the tree; Metal has no line-stipple state. Chosen fallback: ignore. `[V]`
 - **Not-recommended: a naive RSX-viewport-rect → `MTLViewport` port.** It would double-apply the
-  transform, which `scale_offset_mat` already carries, and would also y-flip (both backends pass
-  `flip_y=false`). The Metal viewport is the surface clip (§3.1). `[V]`
+  transform, which `scale_offset_mat` already carries. The Metal viewport is the surface clip with
+  one negated height (§3.1); that negation is the Vulkan→Metal clip-space convention, not the guest
+  transform. `[V]`
 - **Not-recommended: forcing out-of-[0,1] `clip_min`/`clip_max` into `MTLViewport.znear/zfar`.** The
   viewport depth range is [0,1]-clamped; values outside it must go through the shader zclip/depth
   range transform (§3.2). `[V]`
@@ -320,8 +332,9 @@ key); `MTL4::ArgumentTable::setAddress` (vertex env, slot 9 stipple); MSL `[[cli
 **Invariants.**
 1. The `MTLViewport` rectangle is the surface clip (`surface_clip_width/height`), never the RSX
    viewport rect; the transform lives in `scale_offset_mat` (`VKGSRender.cpp:1305`). `[V]`
-2. `flip_y` stays `false`; the viewport origin is not y-flipped (`VKGSRender.cpp:2134`,
-   `GLGSRender.cpp:979`). `[V]`
+2. `flip_y` stays `false` for `scale_offset_mat`; the guest Y convention is in the matrix. The
+   Vulkan→Metal clip-space convention is applied once by the viewport's negative height, and the
+   scissor and the winding carry the same flip (§3.1). `[V]`
 3. On a draw the scissor is `scissor ∩ viewport_rect` (`RSXThread.cpp:2115-2129`); an empty
    intersection marks the setup invalid and suppresses the draw (`:2138-2146`). `[V]`
 4. Out-of-[0,1] clip values never reach `MTLViewport.znear/zfar`; the shader transform owns the
@@ -337,8 +350,10 @@ key); `MTL4::ArgumentTable::setAddress` (vertex env, slot 9 stipple); MSL `[[cli
 - **F1 double-applied viewport transform.** Porting the RSX viewport rect into `MTLViewport` on top
   of `scale_offset_mat` scales/offsets every draw twice. Detection: H5 image diff on a title with a
   non-default viewport rect. `[I]`
-- **F2 spurious y-flip.** Setting the Metal viewport origin/size from RSX with a Y flip inverts the
-  frame; the transform is already in the matrix. Detection: H5 (vertically mirrored output). `[I]`
+- **F2 spurious second y-flip.** Applying the RSX window Y flip on top of the Vulkan→Metal
+  clip-space flip mirrors the frame a second time. The matrix owns the guest flip
+  (`flip_y=false`); the viewport owns the API flip. Detection: vertically mirrored output; a
+  surface read as a texture shows `v` inverted against the same surface presented. `[I]`
 - **F3 depth-range collapse.** Feeding an extended `clip_max` (>1) into `znear/zfar` clamps and
   flattens float-depth precision. Detection: H5 depth diff on a float-Z target. `[I]`
 - **F4 scissor/viewport intersection dropped.** Skipping the `get_scissor(clip_viewport=true)`

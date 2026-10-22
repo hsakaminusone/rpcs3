@@ -966,6 +966,11 @@ namespace rsx
 
 			m_ctx->register_state->decode(reg, value);
 
+			// TODO(excise): level 1; the dispatch history is a diagnostic: a desync
+			// capture prints it, so the command that precedes the corruption is
+			// visible.  The ring is written on every command, so it must stay cheap.
+			note_dispatch(reg, value, fifo_ctrl->get_pos());
+
 			if (auto method = methods[reg])
 			{
 				method(m_ctx, reg, value);

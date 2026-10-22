@@ -59,6 +59,15 @@ namespace rsx
 				}
 			}
 
+			// TODO(excise): level 1; the label write is recorded so that a desync
+			// capture can compare it with the address of the FIFO command stream
+			// (RR7-FREEZE-FORENSICS.md §8.1).  The capture showed a data word where
+			// a command header belongs, and the value of that word was a label
+			// value, so the question is whether the label address lies inside the
+			// command ring.  The record is two stores on the label path, which
+			// runs once per frame.
+			RSX(ctx)->note_label_release(address, data);
+
 			vm::write<atomic_t<RsxSemaphore>>(address, data);
 		}
 	}

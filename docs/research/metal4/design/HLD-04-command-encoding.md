@@ -157,6 +157,13 @@ One allocator per encoding thread/frame-in-flight; `reset()` never while its GPU
 (`HLD-01` §4.7). Frame count is bounded by the allocator ring and `maximumDrawableCount ≤ 3`
 (`HLD-03` §4.9; **R21**).
 
+`MTL4CommitOptions` configures one commit call and is not thread-safe, so one instance serves one
+commit: the recorder builds it in `command_recorder::commit_slot`, registers the feedback handler of
+that slot on it, commits one command buffer with it, and releases it after `commit` returns
+(`MTL4CommandQueue.hpp:98,127`; KosmicKrisp `kk_queue_commit`, `kk_queue.c:98-103`). A reused
+instance delivers the feedback of its first commit alone; the slot then stays in flight and the ring
+stops (REVIEW-FINDINGS **F17**). `[V]`
+
 ### 3.3 Argument binding
 
 **Creation.** `Device::newArgumentTable(descriptor:error:)` (`MTLDevice.hpp:407`) from an

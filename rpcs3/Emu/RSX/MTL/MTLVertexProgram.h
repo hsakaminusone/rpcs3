@@ -41,6 +41,13 @@ namespace mtl
 
 		void Task();
 
+		// The shader-interpreter source shares the decompiler's declarations but
+		// not its generated main (LLD-shader-interpreter.md §6).  These two seams
+		// emit the same header/constants/inputs and the same legacy helpers the
+		// real program uses, so the interpreter body sees one ABI.
+		void emitInterpreterPrelude(std::stringstream& OS);
+		void emitInterpreterFunctions(std::stringstream& OS);
+
 	protected:
 		std::string getFloatTypeName(usz elementCount) override;
 		std::string getIntTypeName(usz elementCount) override;

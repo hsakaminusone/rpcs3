@@ -29,6 +29,9 @@ namespace program_hash_util
 			u32 referenced_textures_mask;
 			u16 referenced_inputs_mask;
 			u16 reserved;
+			// The ucode hash, validated once per program change.  A consumer that
+			// needs the hash per draw reads it here instead of re-hashing the ucode.
+			usz ucode_hash = 0;
 		};
 
 		static usz get_vertex_program_ucode_hash(const RSXVertexProgram &program);
@@ -61,6 +64,9 @@ namespace program_hash_util
 			bool has_pack_instructions;
 			bool has_branch_instructions;
 			bool is_nop_shader;           // Does this affect Z-pass testing???
+			// The ucode hash, validated once per program change.  A consumer that
+			// needs the hash per draw reads it here instead of re-hashing the ucode.
+			usz ucode_hash = 0;
 		};
 
 		/**
@@ -365,6 +371,13 @@ public:
 		const bool already_existing_vertex_program = std::get<1>(vp_search);
 		const vertex_program_type& vertex_program = std::get<0>(vp_search);
 		const fragment_program_type& fragment_program = std::get<0>(fp_search);
+
+		// Validate before the key is formed.  The descriptor and the key must use the
+		// same write mask; validating after the copy gave the first pipeline of every
+		// key the guest mask and made two draws that differ only in unused colour
+		// bits build two identical pipelines.
+		backend_traits::validate_pipeline_properties(vertex_program, fragment_program, pipeline_properties);
+
 		const pipeline_key key = { vertex_program.id, fragment_program.id, pipeline_properties };
 
 		m_cache_miss_flag = true;
@@ -372,8 +385,6 @@ public:
 		if (already_existing_vertex_program && already_existing_fragment_program)
 		{
 			// There is a high chance the pipeline object was compiled if the two shaders already existed before
-			backend_traits::validate_pipeline_properties(vertex_program, fragment_program, pipeline_properties);
-
 			reader_lock lock(m_pipeline_mutex);
 			if (const auto I = m_storage.find(key); I != m_storage.end())
 			{

@@ -613,11 +613,13 @@ MTL_DIAL_TEST(raster, NV4097_SET_CULL_FACE)
 
 MTL_DIAL_TEST(raster, NV4097_SET_FRONT_FACE)
 {
+	// The draw viewport negates its height, so the guest winding maps to the
+	// opposite Metal winding (invariant 2).
 	set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(rsx::front_face::cw));
-	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingClockwise);
+	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingCounterClockwise);
 
 	set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(rsx::front_face::ccw));
-	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingCounterClockwise);
+	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingClockwise);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_FRONT_POLYGON_MODE)

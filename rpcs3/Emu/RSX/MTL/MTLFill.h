@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MTLCommandRecorder.h"
+#include "MTLDepthStencil.h"
 
 #ifdef RSX_ENABLE_METAL4
 
@@ -19,6 +20,15 @@ namespace mtl
 	// it, and MTL4::RenderPipelineDescriptor has no depth attachment format, so a
 	// fill that writes depth is a different fragment output set, not a different
 	// attachment format.
+	// Metal writes stencil through the depth-stencil object, not a shader output, so
+	// a masked stencil clear is a full-screen draw with a Replace pass operation and
+	// the write mask.  `write_mask == 0` leaves the stencil plane alone.
+	struct fill_stencil
+	{
+		u8 reference = 0;
+		u8 write_mask = 0;
+	};
+
 	class fill_pass
 	{
 	public:
@@ -29,10 +39,11 @@ namespace mtl
 		// (MTLConstants.h fill_values), because Metal 4 has no setBytes.  The caller
 		// packs a fresh block per fill: a command buffer does not snapshot buffer
 		// contents.  `color_format` is the pass's colour attachment format, or
-		// MTL::PixelFormatInvalid for a depth-only pass.  The caller sets the
-		// scissor, opens the pass and passes its sample count.  A false write flag
-		// leaves that attachment alone.
-		void fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, bool write_color, bool write_depth);
+		// MTL::PixelFormatInvalid for a depth-only pass.  `color_mask` is the
+		// per-channel write mask: a partial clear writes only the channels the
+		// format stores, and ColorWriteMaskNone leaves colour alone.  The caller
+		// sets the scissor, opens the pass and passes its sample count.
+		void fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, MTL::ColorWriteMask color_mask, bool write_depth, fill_stencil stencil = {});
 
 	private:
 		// The output set of the fragment shader, which is what a Metal 4 pipeline
@@ -44,7 +55,7 @@ namespace mtl
 			color_depth = 2,
 		};
 
-		MTL::RenderPipelineState* pipeline(MTL::PixelFormat color_format, variant kind, u8 sample_count);
+		MTL::RenderPipelineState* pipeline(MTL::PixelFormat color_format, variant kind, u8 sample_count, MTL::ColorWriteMask color_mask);
 
 		MTL::Device* m_device = nullptr;
 		MTL4::Compiler* m_compiler = nullptr;
@@ -52,6 +63,9 @@ namespace mtl
 		MTL::Library* m_library = nullptr;
 		MTL::DepthStencilState* m_depth_write = nullptr;
 		MTL::DepthStencilState* m_depth_read = nullptr;
+		// The stencil-write states, keyed by the write mask and the depth flag.  A
+		// partial stencil clear is rare, so the cache stays tiny.
+		depth_stencil_cache m_stencil_states;
 		std::unordered_map<u64, MTL::RenderPipelineState*> m_pipelines;
 	};
 }

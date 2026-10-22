@@ -45,14 +45,31 @@ namespace mtl
 		void flip(const rsx::display_flip_info_t& info) override;
 		void clear_surface(u32 mask) override;
 
-		// The sync hooks (HLD-04 §4).  The guest can wait on a label that only the
-		// GPU can release, so a mid-frame wait must submit; the texture cache owns
-		// the invalidation of the guest ranges the CPU writes.
+		// The sync hooks (HLD-04 §4).  A pending flush request or an emu flip runs
+		// the local task; the frame stays open until its flip presents it.  The
+		// texture cache owns the invalidation of the guest ranges the CPU writes.
 		void on_semaphore_acquire_wait() override;
 		void write_barrier(u32 memory_address, u32 memory_range) override;
+
+		// A back-end semaphore release is a guest-visible memory write.  Metal
+		// writes labels on the CPU, so the GPU must finish the commands before the
+		// release point before the label becomes visible (nv47_sync.hpp:13-63).
+		bool release_GCM_label(u32 type, u32 address, u32 data) override;
+
+		// The blit engine's GPU path.  False sends the transfer to the CPU fallback
+		// (nv3089.cpp:592-598).  Metal keeps the fallback and logs the transfer
+		// until the GPU path lands.
+		bool scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate) override;
 		bool on_access_violation(u32 address, bool is_writing) override;
 		void on_invalidate_memory_range(const utils::address_range32& range, rsx::invalidation_cause cause) override;
 		void notify_tile_unbound(u32 tile) override;
+
+		// The FIFO desync capture (RR7-FREEZE-FORENSICS.md §8.1).  The shared
+		// FIFO gathers the data and calls this; the backend prints it, so the
+		// diagnostic belongs to the backend and the other backends pay nothing
+		// but a virtual call they never implement.
+		// TODO(excise): level 2; the hook and the print go with the probe work.
+		void on_fifo_desync(const fifo_desync_info& info) override;
 
 		// Drain the deferred flush queue.  A guest fault cannot flush, because it
 		// runs on the guest thread and the flush needs an encoder, so it posts a
@@ -86,6 +103,15 @@ namespace mtl
 		// unchanged region and for an invalid one, so the flag decides
 		// (RSXThread.cpp:2095).
 		bool update_scissor(bool clip_viewport);
+
+		// The RSX has no texture cache: a sample must read the surface that last wrote
+		// the range, because the guest copy stays stale while write-back is off.  The
+		// surface store and the texture cache both cover the guest ranges, so binding
+		// an attachment set must tell the cache that the store now owns those ranges
+		// (texture_cache.h:2038, :2493).  Metal 4 leaves the GPU-side order of a
+		// render-then-sample pair to the pass scheduler's barriers; this is the
+		// emulator-side half of that pair.
+		void reconcile_render_targets();
 
 		// Resolve the referenced texture units of the open clause and record the
 		// Metal image and sampler of each.  It runs before the programs are built,

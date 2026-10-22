@@ -4,7 +4,12 @@
 
 #include "MTLArgumentBinds.h"
 
+#include "Emu/system_config.h"
+
 #include "util/logs.hpp"
+
+#include <memory>
+#include <utility>
 
 // SPIRV-Cross is third-party.  The include directory is SYSTEM
 // (3rdparty/spirv-cross/rpcs3.cmake), and the pragmas keep the diagnostics out
@@ -66,12 +71,15 @@ namespace mtl
 			switch (coupling)
 			{
 			case sampler_coupling::unit:
-				// The rule lives in the header so the shader side and the table writer
-				// cannot disagree.
-				if (slot_has_sampler(binding))
-				{
-					msl_binding.msl_sampler = texture_sampler_index(binding);
-				}
+				// An RSX texture unit takes its position inside the stage's texture
+				// range: the rule lives in the header so the shader side and the table
+				// writer cannot disagree.  A combined image sampler outside the units is
+				// an overlay pass's own sampler, and the overlay argument table takes
+				// the shader's binding as its index (MTLOverlays.cpp binds the sampler
+				// state at it), so it keeps the binding.  Two such samplers must not
+				// share index zero: the Metal compiler rejects the second declaration
+				// with "cannot reserve 'sampler' resource location at index 0".
+				msl_binding.msl_sampler = slot_has_sampler(binding) ? texture_sampler_index(binding) : binding;
 				break;
 			case sampler_coupling::separate_sampler:
 				msl_binding.msl_sampler = binding;
@@ -206,12 +214,80 @@ namespace mtl
 			return nullptr;
 		}
 
+		// The RSX thread has no autorelease pool.  The descriptor builder creates
+		// autoreleased NS::String objects, so every compile needs a local pool.
+		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
 		MTL4::LibraryDescriptor* descriptor = MTL4::LibraryDescriptor::alloc()->init();
 		descriptor->setSource(NS::String::string(msl.c_str(), NS::UTF8StringEncoding));
 
+		// The GUI setting asks for precise math; the default stays the fast mode that
+		// the backend has always used.
+		MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
+		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeFast);
+		descriptor->setOptions(options);
+
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
+		options->release();
 		descriptor->release();
+		pool->release();
 		return library;
+	}
+
+	MTL4::CompilerTask* compile_msl_async(MTL4::Compiler* compiler, const std::string& msl,
+		MTL::NewLibraryCompletionHandlerFunction handler)
+	{
+		if (!compiler || msl.empty())
+		{
+			return nullptr;
+		}
+
+		// The descriptor is consumed by the compiler task after this call returns.
+		// Keep it and its options alive until the completion handler runs; the
+		// synchronous overload copies them during the call, but the asynchronous
+		// one serializes the task on a Metal compiler thread.
+		struct async_library_owner
+		{
+			MTL4::LibraryDescriptor* descriptor = nullptr;
+			MTL::CompileOptions* options = nullptr;
+			MTL::NewLibraryCompletionHandlerFunction handler;
+
+			~async_library_owner()
+			{
+				if (descriptor)
+				{
+					descriptor->release();
+				}
+
+				if (options)
+				{
+					options->release();
+				}
+			}
+		};
+
+		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+		auto owner = std::make_shared<async_library_owner>();
+		owner->descriptor = MTL4::LibraryDescriptor::alloc()->init();
+		owner->descriptor->setSource(NS::String::string(msl.c_str(), NS::UTF8StringEncoding));
+
+		owner->options = MTL::CompileOptions::alloc()->init();
+		owner->options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeFast);
+		owner->descriptor->setOptions(owner->options);
+		owner->handler = std::move(handler);
+
+		MTL::NewLibraryCompletionHandlerFunction completion =
+			[owner](MTL::Library* library, NS::Error* error)
+		{
+			NS::AutoreleasePool* completion_pool = NS::AutoreleasePool::alloc()->init();
+			owner->handler(library, error);
+			completion_pool->release();
+		};
+
+		MTL4::CompilerTask* task = compiler->newLibrary(owner->descriptor, std::move(completion));
+		pool->release();
+		return task;
 	}
 }
 

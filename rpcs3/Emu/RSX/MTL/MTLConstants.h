@@ -5,6 +5,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "util/asm.hpp"
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -219,6 +221,31 @@ namespace mtl
 		u32 m_last = 0;
 	};
 
+	// The arithmetic of a growable byte ring, kept free of Metal types so a unit
+	// test can exercise it.  A block starts on an alignment boundary and consumes
+	// its aligned size, so every later block stays aligned.  A block larger than
+	// the buffer asks for a replacement buffer that holds it.
+	struct ring_block
+	{
+		u64 offset;
+		u64 end;
+		u64 capacity;
+		bool grow;
+	};
+
+	inline ring_block allocate_ring_block(u64 count, u64 size, u64 capacity, u64 alignment)
+	{
+		ensure(alignment != 0 && (alignment & (alignment - 1)) == 0);
+		const u64 aligned_size = utils::align(size, alignment);
+
+		if (count <= capacity && aligned_size <= capacity - count)
+		{
+			return { count, count + aligned_size, capacity, false };
+		}
+
+		return { 0, aligned_size, std::max(capacity, aligned_size), true };
+	}
+
 	// One vertex stream.  The shader byte-addresses the stream, so it is bound as an
 	// R8Uint texture buffer and read with `texture_buffer<uint>`: one texel is one
 	// byte, and the shared GLSL needs no change (HLD-05 §3.5).  One view spans the
@@ -260,11 +287,13 @@ namespace mtl
 		void begin_frame();
 
 		// Reserve `size` bytes and return the byte offset.  Null when the ring
-		// cannot grow; the caller skips the draw.
-		void* alloc(u64 size, u32& offset);
+		// cannot grow; the caller skips the draw.  The interpreter's instruction
+		// blocks need a stronger alignment than the index data.
+		void* alloc(u64 size, u32& offset, u64 alignment = 4);
 
 		bool valid() const { return m_buffer != nullptr; }
 		MTL::GPUAddress address() const { return m_buffer ? m_buffer->gpuAddress() : 0; }
+		MTL::GPUAddress address_of(u32 offset) const { return address() + offset; }
 
 	private:
 		resource_manager* m_resources = nullptr;
@@ -292,6 +321,7 @@ namespace mtl
 		static constexpr u64 stream_capacity = 8u * 1024u * 1024u;
 		static constexpr u64 volatile_capacity = 2u * 1024u * 1024u;
 		static constexpr u64 index_capacity = 2u * 1024u * 1024u;
+		static constexpr u64 instruction_capacity = 4u * 1024u * 1024u;
 
 		// The overlay passes are not RSX draws: their vertices and their uniform
 		// block are per-frame CPU data with no RSX slot, so they take their own
@@ -359,6 +389,7 @@ namespace mtl
 		stream_ring& persistent_stream() { return m_streams[m_slot].persistent; }
 		stream_ring& volatile_stream() { return m_streams[m_slot].volatile_stream; }
 		byte_ring& index_ring() { return m_streams[m_slot].index; }
+		byte_ring& instruction_ring() { return m_streams[m_slot].instructions; }
 		byte_ring& overlay_vertex_ring() { return m_streams[m_slot].overlay_vertices; }
 		byte_ring& overlay_uniform_ring() { return m_streams[m_slot].overlay_uniforms; }
 
@@ -386,6 +417,7 @@ namespace mtl
 			stream_ring persistent;
 			stream_ring volatile_stream;
 			byte_ring index;
+			byte_ring instructions;
 			byte_ring overlay_vertices;
 			byte_ring overlay_uniforms;
 		};

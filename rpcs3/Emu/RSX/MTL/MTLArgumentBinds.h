@@ -171,6 +171,17 @@ namespace mtl
 		texture_bind fragment_depth_input{};                                 // [50]
 	};
 
+	// The interpreter's extra table entries.  The fragment instruction block is a
+	// buffer at 12 (a separate space from the texture range), and the compact
+	// sampler arrays occupy 12..12+texture_count-1 with sampler indices
+	// 0..texture_count-1 (LLD-shader-interpreter.md §6).
+	struct interpreter_bindings
+	{
+		MTL::GPUAddress instructions = 0;
+		std::array<texture_bind, 16> textures{};
+		u32 texture_count = 0;
+	};
+
 	// The per-stage argument-table writer.  A bind is an encoder-visible write and
 	// the table survives across draws, so re-writing unchanged slots every draw is
 	// pure overhead.  This class owns the slot map, so it is the only thing that can
@@ -186,14 +197,33 @@ namespace mtl
 
 		// Bind the set into the stage's table.  Only slots whose value differs from
 		// the last bind are written.  vertex_stage selects which half of the set
-		// applies.  Returns true when a slot was written: Metal 4 snapshots the
-		// table when the encoder binds it, so a write is invisible to a draw until
-		// the caller re-binds the table (REALISATION.md, "Argument tables").
-		bool bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds);
+		// applies.  Returns true when a slot was written.
+		//
+		// The return value is a write signal, not a bind signal.  Metal 4 snapshots
+		// the table when the encoder binds it, and every draw opens its own pass and
+		// therefore its own encoder (MTLCommandRecorder.cpp:174), so the caller
+		// re-binds the table on every draw.  Skipping the re-bind when no slot was
+		// written leaves that encoder without the table, and every read of it is then
+		// unbound (REVIEW-FINDINGS.md F19).
+		// `bind_textures` selects the texture-unit writes.  The interpreter passes
+		// false because its compact sampler arrays own the table's texture range.
+		bool bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds, bool bind_textures = true);
+
+		// The interpreter variant.  It writes the same named slots as `bind`
+		// (without the regular unit arrays) plus the instruction block and the
+		// compact sampler arrays.  The interpreter has its own tables and its own
+		// binder caches (LLD-shader-interpreter §4.2), so it never touches the
+		// regular table's state.
+		bool bind_interpreter(MTL4::ArgumentTable* table, bool vertex_stage,
+			const argument_binds& binds, const interpreter_bindings& interpreter);
 
 	private:
 		argument_binds m_bound[2];
 		bool m_has_bound[2] = { false, false };
+
+		std::array<MTL::GPUAddress, 2> m_interpreter_instructions{};
+		std::array<std::array<texture_bind, 16>, 2> m_interpreter_textures{};
+		std::array<bool, 2> m_interpreter_has_textures{};
 	};
 }
 

@@ -274,7 +274,13 @@ namespace rsx
 
 			// Preload everything needed to compile the shaders
 			unpacked_type unpacked;
-			uint nb_workers = g_cfg.video.renderer == video_renderer::vulkan ? utils::get_thread_count() : 1;
+			// Vulkan and Metal compile pipelines off the loading thread, so the
+			// worker count is a queue depth there (HLD-07 §4.3).  The other
+			// backends stay on one thread.  A non-zero setting bounds the workers;
+			// zero keeps the all-core default.
+			const bool threaded = g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal;
+			const u32 configured_workers = g_cfg.video.shader_compiler_threads_count.get();
+			uint nb_workers = threaded ? (configured_workers ? configured_workers : utils::get_thread_count()) : 1;
 
 			load_shaders(nb_workers, unpacked, directory_path, entries, entry_count, dlg);
 
@@ -282,6 +288,14 @@ namespace rsx
 			entry_count = unpacked.size();
 
 			compile_shaders(nb_workers, unpacked, entry_count, dlg, std::forward<Args>(args)...);
+
+			// Metal submits library and link jobs instead of blocking a worker.
+			// The loader drains them here, before the dialog closes.  The other
+			// backends have no such hook and keep their synchronous path.
+			if constexpr (requires { m_storage.preload_wait(dlg); })
+			{
+				m_storage.preload_wait(dlg);
+			}
 
 			dlg->refresh();
 			dlg->close();

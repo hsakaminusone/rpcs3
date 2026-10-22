@@ -21,9 +21,12 @@ namespace mtl
 		m_bound[1] = {};
 		m_has_bound[0] = false;
 		m_has_bound[1] = false;
+		m_interpreter_instructions = {};
+		m_interpreter_textures = {};
+		m_interpreter_has_textures = {};
 	}
 
-	bool argument_binder::bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds)
+	bool argument_binder::bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds, bool bind_textures)
 	{
 		if (table == nullptr)
 		{
@@ -51,7 +54,9 @@ namespace mtl
 
 		const auto stream = [&](MTL::ResourceID value, MTL::ResourceID old, NS::UInteger index)
 		{
-			if (value._impl != 0 && (first_bind || value._impl != old._impl))
+			// A null texture is a binding, not "nothing to write".  Writing it on
+			// the first bind and on a transition clears a stale stream.
+			if (first_bind || value._impl != old._impl)
 			{
 				table->setTexture(value, index);
 				changed = true;
@@ -67,12 +72,16 @@ namespace mtl
 		// header so the writer and the table shape cannot disagree.
 		const auto unit = [&](const texture_bind& value, const texture_bind& old, NS::UInteger texture_slot)
 		{
-			if (value.texture._impl != 0 && (first_bind || value.texture._impl != old.texture._impl))
+			// Zero is a binding here.  It clears the slot when a unit becomes
+			// disabled, or when a new frame slot starts from the null table
+			// (DEVIATIONS-TEXTURE.md, B3).  setTexture(null) and
+			// setSamplerState(null) are legal; the local probe checked both.
+			if (first_bind || value.texture._impl != old.texture._impl)
 			{
 				table->setTexture(value.texture, texture_slot);
 				changed = true;
 			}
-			if (slot_has_sampler(texture_slot) && value.sampler._impl != 0 && (first_bind || value.sampler._impl != old.sampler._impl))
+			if (slot_has_sampler(texture_slot) && (first_bind || value.sampler._impl != old.sampler._impl))
 			{
 				table->setSamplerState(value.sampler, texture_sampler_index(texture_slot));
 				changed = true;
@@ -91,9 +100,12 @@ namespace mtl
 			address(binds.instancing_constants, previous.instancing_constants, instancing_constants_slot);
 			address(binds.vertex_draw_params, previous.vertex_draw_params, vertex_draw_params_slot);
 
-			for (u32 index = 0; index < vertex_texture_count; ++index)
+			if (bind_textures)
 			{
-				unit(binds.vertex_textures[index], previous.vertex_textures[index], vertex_texture_slot(index));
+				for (u32 index = 0; index < vertex_texture_count; ++index)
+				{
+					unit(binds.vertex_textures[index], previous.vertex_textures[index], vertex_texture_slot(index));
+				}
 			}
 		}
 		else
@@ -104,21 +116,24 @@ namespace mtl
 			address(binds.fragment_stipple, previous.fragment_stipple, fragment_stipple_slot);
 			address(binds.fragment_blend, previous.fragment_blend, fragment_blend_slot);
 
-			for (u32 index = 0; index < fragment_texture_count; ++index)
+			if (bind_textures)
 			{
-				unit(binds.fragment_textures[index], previous.fragment_textures[index], texture_slot_base + index);
-			}
+				for (u32 index = 0; index < fragment_texture_count; ++index)
+				{
+					unit(binds.fragment_textures[index], previous.fragment_textures[index], texture_slot_base + index);
+				}
 
-			// The depth-as-texture inputs take one index each and carry no sampler:
-			// their MSL form is a separate texture read with read() (REVIEW-FINDINGS.md
-			// A9; MTLFragmentProgram.cpp declares them and reads them that way), so the
-			// writer binds the image only.
-			for (u32 index = 0; index < fragment_texture_count; ++index)
-			{
-				unit(binds.fragment_stencil[index], previous.fragment_stencil[index], fragment_stencil_slot_base + index);
-			}
+				// The depth-as-texture inputs take one index each and carry no sampler:
+				// their MSL form is a separate texture read with read() (REVIEW-FINDINGS.md
+				// A9; MTLFragmentProgram.cpp declares them and reads them that way), so the
+				// writer binds the image only.
+				for (u32 index = 0; index < fragment_texture_count; ++index)
+				{
+					unit(binds.fragment_stencil[index], previous.fragment_stencil[index], fragment_stencil_slot_base + index);
+				}
 
-			unit(binds.fragment_depth_input, previous.fragment_depth_input, fragment_depth_input_slot);
+				unit(binds.fragment_depth_input, previous.fragment_depth_input, fragment_depth_input_slot);
+			}
 		}
 
 		m_bound[stage] = binds;
@@ -126,6 +141,59 @@ namespace mtl
 
 		// The caller re-binds the table only when a slot was written, because
 		// Metal 4 snapshots the table at the encoder bind (REALISATION.md).
+		return changed;
+	}
+
+	bool argument_binder::bind_interpreter(MTL4::ArgumentTable* table, bool vertex_stage,
+		const argument_binds& binds, const interpreter_bindings& interpreter)
+	{
+		if (table == nullptr)
+		{
+			return false;
+		}
+
+		// The interpreter draws into its own tables, so nothing else ever writes
+		// the compact range; the two caches stay separate.  `bind` writes only the
+		// named slots here: the compact sampler arrays own the texture range, and
+		// their unit order is baked into the shader (LLD-shader-interpreter §4.2,
+		// §7.1).
+		bool changed = bind(table, vertex_stage, binds, false);
+		const u32 stage = vertex_stage ? 0u : 1u;
+
+		if (interpreter.instructions && m_interpreter_instructions[stage] != interpreter.instructions)
+		{
+			table->setAddress(interpreter.instructions, texture_slot_base);
+			m_interpreter_instructions[stage] = interpreter.instructions;
+			changed = true;
+		}
+
+		if (!vertex_stage)
+		{
+			const bool first = !m_interpreter_has_textures[stage];
+
+			for (u32 index = 0; index < interpreter.texture_count; ++index)
+			{
+				const texture_bind& value = interpreter.textures[index];
+				texture_bind& previous = m_interpreter_textures[stage][index];
+
+				if (first || value.texture._impl != previous.texture._impl)
+				{
+					table->setTexture(value.texture, texture_slot_base + index);
+					changed = true;
+				}
+
+				if (first || value.sampler._impl != previous.sampler._impl)
+				{
+					table->setSamplerState(value.sampler, index);
+					changed = true;
+				}
+
+				previous = value;
+			}
+
+			m_interpreter_has_textures[stage] = true;
+		}
+
 		return changed;
 	}
 }

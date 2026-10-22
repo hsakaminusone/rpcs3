@@ -6,8 +6,10 @@
 #include "Emu/RSX/MTL/MTLFormats.h"
 #include "Emu/RSX/MTL/MTLPassScheduler.h"
 #include "Emu/RSX/MTL/MTLPipeline.h"
+#include "Emu/RSX/MTL/MTLProgramPipeline.h"
 #include "Emu/RSX/MTL/MTLRasterState.h"
 #include "Emu/RSX/MTL/MTLSamplerState.h"
+#include "Emu/RSX/MTL/MTLTextureCache.h"
 
 // The Metal 4 backend state contract, GPU-free.
 //
@@ -26,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -314,6 +317,46 @@ TEST(MTLPassSchedulerLifetime, EmptyFlushIsSilent)
 	EXPECT_FALSE(scheduler.split_requested());
 }
 
+TEST(MTLPassSchedulerLifetime, CyclicReferenceQueuesOneTextureBarrier)
+{
+	// I4: the cache flags a cyclic reference and the renderer turns the flag into one
+	// queue-scope edge on the next pass.  The flag is single-read, so two samples of
+	// the same surface in one clause emit one barrier.
+	struct probe_cache : mtl::texture_cache
+	{
+		using mtl::texture_cache::insert_texture_barrier;
+	};
+
+	probe_cache cache;
+	mtl::command_recorder recorder;
+
+	EXPECT_FALSE(cache.consume_texture_barrier_request());
+
+	cache.insert_texture_barrier(recorder, nullptr, true);
+	cache.insert_texture_barrier(recorder, nullptr, false);
+
+	EXPECT_EQ(cache.diagnostic_texture_barriers, 2u);
+	EXPECT_TRUE(cache.consume_texture_barrier_request());
+	EXPECT_FALSE(cache.consume_texture_barrier_request());
+
+	// The request orders an already closed encoder, so it is never an illegal
+	// intra-pass edge and it does not outlive its frame.
+	mtl::pass_scheduler scheduler;
+
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.request_texture_barrier();
+	EXPECT_FALSE(scheduler.split_requested());
+
+	scheduler.flush(nullptr);
+	EXPECT_FALSE(scheduler.split_requested());
+
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.flush(nullptr);
+	EXPECT_FALSE(scheduler.split_requested());
+}
+
 // =============================================================================
 // 5. Surface pixel formats (MTLFormats.cpp:32-84; HLD-02 §2.7)
 // =============================================================================
@@ -380,12 +423,24 @@ TEST(MTLFormatsTexture, TextureFormatMatchesTheBackendTable)
 		{ CELL_GCM_TEXTURE_B8, MTL::PixelFormat::PixelFormatR8Unorm },
 		{ CELL_GCM_TEXTURE_A8R8G8B8, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_D8R8G8B8, MTL::PixelFormat::PixelFormatBGRA8Unorm },
+#if !defined(__APPLE__) || !defined(ARCH_X64)
+		// The uploader keeps a packed format packed here (TextureUtils.cpp:950), so the
+		// host format holds the guest bits; the read permutes its field order.
+		{ CELL_GCM_TEXTURE_R5G6B5, MTL::PixelFormat::PixelFormatB5G6R5Unorm },
+		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm },
+		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm },
+		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGR5A1Unorm },
+		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm },
+		{ CELL_GCM_TEXTURE_R6G5B5, MTL::PixelFormat::PixelFormatB5G6R5Unorm },
+#else
+		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015).
 		{ CELL_GCM_TEXTURE_R5G6B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_R6G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
+#endif
 		{ CELL_GCM_TEXTURE_G8B8, MTL::PixelFormat::PixelFormatRG8Unorm },
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO8, MTL::PixelFormat::PixelFormatRG8Unorm },
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO_S8, MTL::PixelFormat::PixelFormatRG8Snorm },
@@ -430,11 +485,26 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 	constexpr auto o = MTL::TextureSwizzleOne;
 
 	const row table[] = {
+#if !defined(__APPLE__) || !defined(ARCH_X64)
+		// Metal names a packed format from its most significant field, so the read
+		// restores the guest field order (REVIEW-RSX-NATIVE.md R1).  The guest
+		// A4R4G4B4 is stored R4G4B4A4, so every field moves one place.
+		{ CELL_GCM_TEXTURE_A1R5G5B5, { a, b, g, r } },
+		{ CELL_GCM_TEXTURE_R5G5B5A1, { a, b, g, r } },
+		{ CELL_GCM_TEXTURE_R6G5B5, { o, b, g, r } },
+		{ CELL_GCM_TEXTURE_R5G6B5, { o, b, g, r } },
+		{ CELL_GCM_TEXTURE_A4R4G4B4, { r, a, b, g } },
+		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, b, g, r } },
+#else
+		// The Intel uploader expands every packed format to BGRA8, so the guest
+		// channels already sit in the A-R-G-B order.
 		{ CELL_GCM_TEXTURE_A1R5G5B5, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_R5G5B5A1, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_R6G5B5, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_R5G6B5, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, { a, r, g, b } },
+		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, r, g, b } },
+#endif
 		{ CELL_GCM_TEXTURE_A8R8G8B8, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT, { a, r, g, b } },
@@ -450,7 +520,6 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 		{ CELL_GCM_TEXTURE_Y16_X16_FLOAT, { r, g, r, g } },
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO8, { r, g, r, g } },
 		{ CELL_GCM_TEXTURE_COMPRESSED_HILO_S8, { r, g, r, g } },
-		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, r, g, b } },
 		{ CELL_GCM_TEXTURE_D8R8G8B8, { o, r, g, b } },
 	};
 
@@ -613,6 +682,53 @@ TEST(MTLConstantsLayout, CapacityConstantsDescribeTheRings)
 	EXPECT_EQ(mtl::constants_heap::overlay_uniform_capacity, 128u * 1024u);
 }
 
+TEST(MTLConstantsRing, ABlockStartsAlignedAndAdvancesByItsAlignedSize)
+{
+	// A three-byte index block consumes four bytes, so the next block starts on a
+	// four-byte boundary and the draw's byte address stays aligned.
+	const mtl::ring_block first = mtl::allocate_ring_block(0, 3, 64, 4);
+	EXPECT_FALSE(first.grow);
+	EXPECT_EQ(first.offset, 0u);
+	EXPECT_EQ(first.end, 4u);
+	EXPECT_EQ(first.capacity, 64u);
+
+	const mtl::ring_block second = mtl::allocate_ring_block(first.end, 5, first.capacity, 4);
+	EXPECT_FALSE(second.grow);
+	EXPECT_EQ(second.offset, 4u);
+	EXPECT_EQ(second.end, 12u);
+	EXPECT_EQ(second.capacity, 64u);
+}
+
+TEST(MTLConstantsRing, AFittingBlockEndsExactlyAtCapacity)
+{
+	const mtl::ring_block block = mtl::allocate_ring_block(0, 0x100, 0x100, 4);
+	EXPECT_FALSE(block.grow);
+	EXPECT_EQ(block.offset, 0u);
+	EXPECT_EQ(block.end, 0x100u);
+	EXPECT_EQ(block.capacity, 0x100u);
+}
+
+TEST(MTLConstantsRing, AnOversizedBlockGrowsTheBufferAndStartsAtZero)
+{
+	// The old ring allocated its small capacity and then copied the oversized
+	// block past the end.  The reservation must instead ask for a buffer that
+	// holds the block (MTLConstants.cpp:104-146, byte_ring at :187-213).
+	const mtl::ring_block block = mtl::allocate_ring_block(32, 0x100, 64, 4);
+	EXPECT_TRUE(block.grow);
+	EXPECT_EQ(block.offset, 0u);
+	EXPECT_EQ(block.end, 0x100u);
+	EXPECT_EQ(block.capacity, 0x100u);
+}
+
+TEST(MTLConstantsRing, AnOverflowGrowsEvenWhenTheBlockItselfFits)
+{
+	const mtl::ring_block block = mtl::allocate_ring_block(60, 8, 64, 4);
+	EXPECT_TRUE(block.grow);
+	EXPECT_EQ(block.offset, 0u);
+	EXPECT_EQ(block.end, 8u);
+	EXPECT_EQ(block.capacity, 64u);
+}
+
 // =============================================================================
 // 9. Depth bounds and the emulated depth encoding
 //     (MTLDepthStencil.cpp:106-129; MTLDepthStencil.h:50-57;
@@ -733,8 +849,10 @@ TEST(MTLDepthBounds, CaptureAppliesTheClampAndTheEncoding)
 //      (MTLRasterState.cpp:97-105; rsx_utils.h:278-361; LLD-raster §3.1)
 // =============================================================================
 
-TEST(MTLScissorGeometry, ScissorRectIsTheResolvedExtent)
+TEST(MTLScissorGeometry, ScissorRectFollowsTheClipSpaceFlip)
 {
+	constexpr u16 clip_height = 64;
+
 	for (u32 x1 = 0; x1 < 16; ++x1)
 	{
 		for (u32 y1 = 0; y1 < 16; ++y1)
@@ -744,10 +862,12 @@ TEST(MTLScissorGeometry, ScissorRectIsTheResolvedExtent)
 				for (u32 height = 0; height < 8; ++height)
 				{
 					SCOPED_TRACE(std::to_string(x1) + "," + std::to_string(y1) + " " + std::to_string(width) + "x" + std::to_string(height));
-					const MTL::ScissorRect rect = mtl::build_scissor_rect(x1, y1, x1 + width, y1 + height);
+					const MTL::ScissorRect rect = mtl::build_scissor_rect(x1, y1, x1 + width, y1 + height, clip_height);
 
+					// The flip moves a guest region to the mirrored target row and
+					// keeps its width and height (LLD-raster §3.1).
 					EXPECT_EQ(rect.x, x1);
-					EXPECT_EQ(rect.y, y1);
+					EXPECT_EQ(rect.y, clip_height - (y1 + height));
 					EXPECT_EQ(rect.width, width);
 					EXPECT_EQ(rect.height, height);
 				}
@@ -756,7 +876,7 @@ TEST(MTLScissorGeometry, ScissorRectIsTheResolvedExtent)
 	}
 }
 
-TEST(MTLScissorGeometry, ViewportIsTheSurfaceClip)
+TEST(MTLScissorGeometry, ViewportIsTheSurfaceClipWithOneYFlip)
 {
 	constexpr u16 widths[] = { 1, 2, 640, 1280, 1920 };
 	constexpr u16 heights[] = { 1, 240, 720, 1080 };
@@ -768,10 +888,14 @@ TEST(MTLScissorGeometry, ViewportIsTheSurfaceClip)
 			SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
 			const MTL::Viewport viewport = mtl::build_viewport(width, height, 0.25, 0.75);
 
+			// The rectangle is the surface clip, not the RSX viewport rect
+			// (LLD-raster §3.1): the transform lives in `scale_offset_mat`.  The
+			// height is negated because the shader clip space is y-down and
+			// Metal's is y-up (invariant 2, kk_cmd_draw.c:785-793).
 			EXPECT_DOUBLE_EQ(viewport.originX, 0.0);
-			EXPECT_DOUBLE_EQ(viewport.originY, 0.0);
+			EXPECT_DOUBLE_EQ(viewport.originY, static_cast<f64>(height));
 			EXPECT_DOUBLE_EQ(viewport.width, static_cast<f64>(width));
-			EXPECT_DOUBLE_EQ(viewport.height, static_cast<f64>(height));
+			EXPECT_DOUBLE_EQ(viewport.height, -static_cast<f64>(height));
 			EXPECT_DOUBLE_EQ(viewport.znear, 0.25);
 			EXPECT_DOUBLE_EQ(viewport.zfar, 0.75);
 		}
@@ -994,15 +1118,17 @@ TEST(MTLRasterDerivations, CullModeFollowsTheEnableAndFace)
 	}
 }
 
-TEST(MTLRasterDerivations, FrontFaceIsTheWinding)
+TEST(MTLRasterDerivations, FrontFaceFollowsTheClipSpaceFlip)
 {
 	mtl::raster_state state{};
 
+	// A Y mirror reverses the screen-space orientation, so the guest winding maps
+	// to the opposite Metal winding.
 	state.front_face = rsx::front_face::cw;
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
 
 	state.front_face = rsx::front_face::ccw;
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
 }
 
 TEST(MTLRasterDerivations, FillModeFollowsTheSurvivingFace)
@@ -1150,7 +1276,7 @@ TEST(MTLSamplerMapping, MinifyFilterNamesBothTheFilterAndTheMipMode)
 		{ rsx::texture_minify_filter::linear_nearest, MTL::SamplerMinMagFilterLinear, MTL::SamplerMipFilterNearest },
 		{ rsx::texture_minify_filter::nearest_linear, MTL::SamplerMinMagFilterNearest, MTL::SamplerMipFilterLinear },
 		{ rsx::texture_minify_filter::linear_linear, MTL::SamplerMinMagFilterLinear, MTL::SamplerMipFilterLinear },
-		{ rsx::texture_minify_filter::convolution_min, MTL::SamplerMinMagFilterLinear, MTL::SamplerMipFilterLinear },
+		{ rsx::texture_minify_filter::convolution_min, MTL::SamplerMinMagFilterLinear, MTL::SamplerMipFilterNotMipmapped },
 	};
 
 	EXPECT_EQ(sizeof(table) / sizeof(table[0]), 7u);
@@ -1180,18 +1306,20 @@ TEST(MTLSamplerMapping, MagnifyFilterMatchesTheDomain)
 	}
 }
 
-TEST(MTLSamplerMapping, AnisotropyIsTheGuestMultiplier)
+TEST(MTLSamplerMapping, AnisotropyRoundsUpToTheMetalPowerOfTwo)
 {
 	using row = mapping_row<rsx::texture_max_anisotropy, u32>;
 
+	// Metal accepts only 1, 2, 4, 8 and 16 (K1).  A guest value that is not a
+	// power of two rounds up, never down.
 	const row table[] = {
 		{ rsx::texture_max_anisotropy::x1, 1 },
 		{ rsx::texture_max_anisotropy::x2, 2 },
 		{ rsx::texture_max_anisotropy::x4, 4 },
-		{ rsx::texture_max_anisotropy::x6, 6 },
+		{ rsx::texture_max_anisotropy::x6, 8 },
 		{ rsx::texture_max_anisotropy::x8, 8 },
-		{ rsx::texture_max_anisotropy::x10, 10 },
-		{ rsx::texture_max_anisotropy::x12, 12 },
+		{ rsx::texture_max_anisotropy::x10, 16 },
+		{ rsx::texture_max_anisotropy::x12, 16 },
 		{ rsx::texture_max_anisotropy::x16, 16 },
 	};
 
@@ -1199,6 +1327,38 @@ TEST(MTLSamplerMapping, AnisotropyIsTheGuestMultiplier)
 	{
 		SCOPED_TRACE(static_cast<u32>(entry.guest));
 		EXPECT_EQ(mtl::get_max_anisotropy(entry.guest), entry.host);
+	}
+}
+
+TEST(MTLSamplerMapping, LodBiasRoundsNearestMipsAndClampsToMetal)
+{
+	struct row
+	{
+		rsx::texture_minify_filter filter;
+		f32 guest;
+		f32 host;
+	};
+
+	const row table[] = {
+		// A nearest mip filter quantizes to 0.5 steps (VKDraw.cpp:506-511).
+		{ rsx::texture_minify_filter::nearest_nearest, 0.24f, 0.0f },
+		{ rsx::texture_minify_filter::nearest_nearest, 0.26f, 0.5f },
+		{ rsx::texture_minify_filter::linear_nearest, -0.26f, -0.5f },
+		{ rsx::texture_minify_filter::linear_nearest, 1.74f, 1.5f },
+		// A linear mip filter keeps the guest value.
+		{ rsx::texture_minify_filter::nearest_linear, 0.26f, 0.26f },
+		{ rsx::texture_minify_filter::linear_linear, -1.74f, -1.74f },
+		// The Metal range is [-16.0, 15.999] (MTLSamplerDescriptor.lodBias).
+		{ rsx::texture_minify_filter::linear_linear, 20.0f, 15.999f },
+		{ rsx::texture_minify_filter::linear_linear, -20.0f, -16.0f },
+		{ rsx::texture_minify_filter::nearest_nearest, 20.0f, 15.999f },
+		{ rsx::texture_minify_filter::nearest_nearest, -20.0f, -16.0f },
+	};
+
+	for (const row& entry : table)
+	{
+		SCOPED_TRACE(static_cast<u32>(entry.filter));
+		EXPECT_FLOAT_EQ(mtl::get_sampler_lod_bias(entry.filter, entry.guest), entry.host);
 	}
 }
 
@@ -1274,6 +1434,11 @@ TEST(MTLSamplerMapping, LatchEqualityTracksEveryField)
 	}
 	{
 		mtl::sampler_state other = base;
+		other.lod_bias = 0.5f;
+		EXPECT_FALSE(base == other);
+	}
+	{
+		mtl::sampler_state other = base;
 		other.max_aniso = 8;
 		EXPECT_FALSE(base == other);
 	}
@@ -1290,6 +1455,11 @@ TEST(MTLSamplerMapping, LatchEqualityTracksEveryField)
 	{
 		mtl::sampler_state other = base;
 		other.compare = rsx::comparison_function::never;
+		EXPECT_FALSE(base == other);
+	}
+	{
+		mtl::sampler_state other = base;
+		other.force_nearest = true;
 		EXPECT_FALSE(base == other);
 	}
 }
@@ -1314,10 +1484,12 @@ TEST(MTLSamplerMapping, LatchHashTracksEveryField)
 		{ "mag_filter", [&] { mtl::sampler_state s = base; s.mag_filter = rsx::texture_magnify_filter::linear; return s; }() },
 		{ "min_lod", [&] { mtl::sampler_state s = base; s.min_lod = 1.0f; return s; }() },
 		{ "max_lod", [&] { mtl::sampler_state s = base; s.max_lod = 2.0f; return s; }() },
+		{ "lod_bias", [&] { mtl::sampler_state s = base; s.lod_bias = 0.5f; return s; }() },
 		{ "max_aniso", [&] { mtl::sampler_state s = base; s.max_aniso = 8; return s; }() },
 		{ "border_color", [&] { mtl::sampler_state s = base; s.border_color = MTL::SamplerBorderColorOpaqueWhite; return s; }() },
 		{ "depth_compare", [&] { mtl::sampler_state s = base; s.depth_compare = true; return s; }() },
 		{ "compare", [&] { mtl::sampler_state s = base; s.compare = rsx::comparison_function::never; return s; }() },
+		{ "force_nearest", [&] { mtl::sampler_state s = base; s.force_nearest = true; return s; }() },
 	};
 
 	for (const probe& entry : probes)
@@ -1853,6 +2025,274 @@ TEST(MTLFormatsDepthPlane, EncodesZeroWhenNoStencilPlaneIsNamed)
 	EXPECT_EQ(packed[1], 0xFFu);
 	EXPECT_EQ(packed[2], 0xFFu);
 	EXPECT_EQ(packed[3], 0xFFu);
+}
+
+// =============================================================================
+// Surface component layout
+//      (MTLFormats.cpp get_surface_component_layout; DEVIATIONS-SURFACE.md S7)
+// =============================================================================
+
+namespace
+{
+	using layout4 = std::array<MTL::TextureSwizzle, 4>;
+
+	layout4 identity_layout()
+	{
+		return { MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+	}
+}
+
+TEST(MTLFormatsSurfaceLayout, SingleChannelFormatsForceTheGuestChannels)
+{
+	// R8Unorm stores one channel; the guest reads it in every colour and an opaque
+	// alpha.  R32Float repeats one value.  RG8Unorm puts guest blue in host red.
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::b8),
+		(layout4{ MTL::TextureSwizzleOne, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed }));
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x32),
+		(layout4{ MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed }));
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::g8b8),
+		(layout4{ MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed }));
+}
+
+TEST(MTLFormatsSurfaceLayout, TheXByteStatesItsAlpha)
+{
+	// A z variant stores no alpha, so a guest alpha read is zero; an o variant
+	// reads as opaque.  The colour channels keep the host order.
+	const layout4 zero = { MTL::TextureSwizzleZero, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+	const layout4 one = { MTL::TextureSwizzleOne, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x1r5g5b5_z1r5g5b5), zero);
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x8r8g8b8_z8r8g8b8), zero);
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x8b8g8r8_z8b8g8r8), zero);
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x1r5g5b5_o1r5g5b5), one);
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x8r8g8b8_o8r8g8b8), one);
+	EXPECT_EQ(mtl::get_surface_component_layout(rsx::surface_color_format::x8b8g8r8_o8b8g8r8), one);
+}
+
+TEST(MTLFormatsSurfaceLayout, PackedFormatsKeepTheGuestOrder)
+{
+	// The host format already carries the guest channels in the guest bit order, so
+	// no reordering is wanted (the texture path states the same map).
+	for (const rsx::surface_color_format format : {
+		rsx::surface_color_format::r5g6b5,
+		rsx::surface_color_format::a8r8g8b8,
+		rsx::surface_color_format::a8b8g8r8,
+		rsx::surface_color_format::w16z16y16x16,
+		rsx::surface_color_format::w32z32y32x32 })
+	{
+		SCOPED_TRACE(static_cast<u32>(format));
+		EXPECT_EQ(mtl::get_surface_component_layout(format), identity_layout());
+	}
+}
+
+// =============================================================================
+// Format-aware clear colour and write mask
+//      (MTLFormats.cpp resolve_surface_clear; DEVIATIONS-SURFACE.md S3, S4)
+// =============================================================================
+
+TEST(MTLFormatsClear, FloatSurfacesTakeNoColourClear)
+{
+	// A float surface has no hardware colour clear, so Vulkan and OpenGL drop the
+	// colour aspect (VKGSRender.cpp:1528-1535).
+	for (const rsx::surface_color_format format : {
+		rsx::surface_color_format::x32,
+		rsx::surface_color_format::w16z16y16x16,
+		rsx::surface_color_format::w32z32y32x32 })
+	{
+		const mtl::resolved_clear clear = mtl::resolve_surface_clear(format, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
+
+		SCOPED_TRACE(static_cast<u32>(format));
+		EXPECT_EQ(clear.mask, 0u);
+		EXPECT_FALSE(clear.fast);
+	}
+}
+
+TEST(MTLFormatsClear, TheClearWordFollowsTheSurfaceStorage)
+{
+	// The clear registers are one A8R8G8B8 word, so a reordered format swaps the
+	// bytes before the value reaches Metal.  A packed format renormalises them.
+	{
+		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
+		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_RED_BIT));
+		EXPECT_TRUE(clear.fast);
+		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
+		EXPECT_FLOAT_EQ(clear.color.blue, 0x11 / 255.0);
+	}
+
+	{
+		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::g8b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
+		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RG_MASK));
+		EXPECT_TRUE(clear.fast);
+		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
+	}
+
+	{
+		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::a8b8g8r8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
+		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RGBA_MASK));
+		EXPECT_TRUE(clear.fast);
+		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
+		EXPECT_FLOAT_EQ(clear.color.blue, 0x11 / 255.0);
+	}
+
+	{
+		// B5G6R5: the 16-bit guest word is the two middle bytes of the clear colour.
+		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::r5g6b5, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
+		const u16 raw = 0x2233;
+		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RGBA_MASK));
+		EXPECT_TRUE(clear.fast);
+		EXPECT_FLOAT_EQ(clear.color.red, rsx::renormalize_color8(raw >> 11, 0x1f) / 255.0);
+		EXPECT_FLOAT_EQ(clear.color.green, rsx::renormalize_color8(raw >> 5, 0x3f) / 255.0);
+		EXPECT_FLOAT_EQ(clear.color.blue, rsx::renormalize_color8(raw, 0x1f) / 255.0);
+	}
+}
+
+TEST(MTLFormatsClear, AChannelTheFormatDoesNotStoreIsNoOp)
+{
+	// b8 stores the blue byte alone, so a red-only clear writes nothing.
+	const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_RED_BIT);
+	EXPECT_EQ(clear.mask, 0u);
+	EXPECT_FALSE(clear.fast);
+}
+
+TEST(MTLFormatsClear, APartialMaskIsNotAFastClear)
+{
+	const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::a8r8g8b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_RED_BIT);
+	EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_RED_BIT));
+	EXPECT_FALSE(clear.fast);
+}
+
+TEST(MTLFormatsClear, TheRSXMaskMapsToTheMetalWriteMask)
+{
+	EXPECT_EQ(mtl::to_color_write_mask(0), MTL::ColorWriteMaskNone);
+	EXPECT_EQ(mtl::to_color_write_mask(RSX_GCM_CLEAR_COLOR_RGBA_MASK), MTL::ColorWriteMaskAll);
+	EXPECT_EQ(mtl::to_color_write_mask(RSX_GCM_CLEAR_RED_BIT | RSX_GCM_CLEAR_GREEN_BIT),
+		MTL::ColorWriteMaskRed | MTL::ColorWriteMaskGreen);
+	EXPECT_EQ(mtl::to_color_write_mask(RSX_GCM_CLEAR_BLUE_BIT), MTL::ColorWriteMaskBlue);
+	EXPECT_EQ(mtl::to_color_write_mask(RSX_GCM_CLEAR_ALPHA_BIT), MTL::ColorWriteMaskAlpha);
+}
+
+TEST(MTLFormatsTexelSize, AnUncompressedFormatNamesItsTexel)
+{
+	const struct
+	{
+		MTL::PixelFormat format;
+		u32 size;
+	} table[] = {
+		{ MTL::PixelFormat::PixelFormatR8Unorm, 1 },
+		{ MTL::PixelFormat::PixelFormatB5G6R5Unorm, 2 },
+		{ MTL::PixelFormat::PixelFormatDepth16Unorm, 2 },
+		{ MTL::PixelFormat::PixelFormatRGBA8Unorm, 4 },
+		{ MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB, 4 },
+		{ MTL::PixelFormat::PixelFormatDepth32Float, 4 },
+		{ MTL::PixelFormat::PixelFormatRGBA16Float, 8 },
+		{ MTL::PixelFormat::PixelFormatDepth32Float_Stencil8, 8 },
+		{ MTL::PixelFormat::PixelFormatRGBA32Float, 16 },
+	};
+
+	for (const auto& entry : table)
+	{
+		SCOPED_TRACE(static_cast<u32>(entry.format));
+		EXPECT_EQ(mtl::get_texel_size(entry.format), entry.size);
+	}
+}
+
+TEST(MTLFormatsTexelSize, ACompressedBlockIsNotATexel)
+{
+	EXPECT_EQ(mtl::get_texel_size(MTL::PixelFormat::PixelFormatBC1_RGBA), 0u);
+	EXPECT_EQ(mtl::get_texel_size(MTL::PixelFormat::PixelFormatBC3_RGBA), 0u);
+}
+
+TEST(MTLTextureExtent, ZeroFieldsBecomeTheSmallestLegalTexture)
+{
+	const mtl::texture_extent extent = mtl::normalize_texture_extent(MTL::TextureType2D, 0, 0, 0, 0);
+	EXPECT_EQ(extent.width, 1);
+	EXPECT_EQ(extent.height, 1);
+	EXPECT_EQ(extent.depth, 1);
+	EXPECT_EQ(extent.mipmaps, 1);
+}
+
+TEST(MTLTextureExtent, ACubeFaceIsSquareAndUsesTheWidth)
+{
+	const mtl::texture_extent extent = mtl::normalize_texture_extent(MTL::TextureTypeCube, 64, 32, 0, 3);
+	EXPECT_EQ(extent.width, 64);
+	EXPECT_EQ(extent.height, 64);
+	EXPECT_EQ(extent.depth, 1);
+	EXPECT_EQ(extent.mipmaps, 3);
+}
+
+TEST(MTLTextureExtent, ACubeDescriptorHasOneArraySlice)
+{
+	// L10: Metal rejects arrayLength 6 for a cube; the six RSX faces are the
+	// upload slice argument, not the descriptor's array length.
+	MTL::TextureDescriptor* descriptor = mtl::texture_cache::make_descriptor(
+		MTL::PixelFormat::PixelFormatBC3_RGBA, MTL::TextureTypeCube, 256, 256, 6, 7);
+	ASSERT_NE(descriptor, nullptr);
+	EXPECT_EQ(descriptor->textureType(), MTL::TextureTypeCube);
+	EXPECT_EQ(descriptor->arrayLength(), 1u);
+	EXPECT_EQ(descriptor->depth(), 1u);
+	EXPECT_EQ(descriptor->mipmapLevelCount(), 7u);
+	descriptor->release();
+}
+
+TEST(MTLTextureExtent, TheMipChainIsCappedAtTheExtent)
+{
+	// 4x4 holds 1 + log2(4) = 3 levels.
+	const mtl::texture_extent over = mtl::normalize_texture_extent(MTL::TextureType2D, 4, 4, 1, 9);
+	EXPECT_EQ(over.mipmaps, 3);
+
+	const mtl::texture_extent legal = mtl::normalize_texture_extent(MTL::TextureType2D, 64, 32, 1, 6);
+	EXPECT_EQ(legal.width, 64);
+	EXPECT_EQ(legal.height, 32);
+	EXPECT_EQ(legal.depth, 1);
+	EXPECT_EQ(legal.mipmaps, 6);
+}
+
+TEST(MTLTextureExtent, OnlyAVolumeKeepsADepth)
+{
+	const mtl::texture_extent flat = mtl::normalize_texture_extent(MTL::TextureType2D, 8, 8, 5, 1);
+	EXPECT_EQ(flat.depth, 1);
+
+	// An 8x4x0 volume holds 1 + log2(8) = 4 levels.
+	const mtl::texture_extent volume = mtl::normalize_texture_extent(MTL::TextureType3D, 8, 4, 0, 5);
+	EXPECT_EQ(volume.depth, 1);
+	EXPECT_EQ(volume.mipmaps, 4);
+}
+
+TEST(MTLPipelineJobs, EqualKeysShareOneJobAndFailedKeysStayFailed)
+{
+	mtl::pipeline_jobs jobs;
+
+	mtl::vertex_program vertex;
+	vertex.id = 101;
+	mtl::fragment_program fragment;
+	fragment.id = 202;
+	mtl::pipeline_properties properties{};
+
+	mtl::shader_context context{};
+	context.jobs = &jobs;
+
+	auto callback = [](std::unique_ptr<mtl::pipeline>&) -> mtl::pipeline* { return nullptr; };
+
+	// The registry key must deduplicate exactly like the shared pipeline key.
+	EXPECT_TRUE(jobs.submit(vertex, fragment, properties, context, callback));
+	EXPECT_FALSE(jobs.submit(vertex, fragment, properties, context, callback));
+
+	mtl::pipeline_properties other = properties;
+	other.write_mask[0] = static_cast<MTL::ColorWriteMask>(1);
+	EXPECT_TRUE(jobs.submit(vertex, fragment, other, context, callback));
+	EXPECT_FALSE(jobs.submit(vertex, fragment, other, context, callback));
+
+	mtl::vertex_program second_vertex;
+	second_vertex.id = 103;
+	EXPECT_TRUE(jobs.submit(second_vertex, fragment, properties, context, callback));
+
+	// The empty MSL fails the library stage.  The jobs must leave the registry,
+	// record permanent failure and release their tasks without a GPU.
+	EXPECT_TRUE(jobs.wait_for_idle(std::chrono::seconds(2), {}, [] { return false; }));
+	EXPECT_TRUE(jobs.permanently_failed(vertex.id, fragment.id, properties));
+	EXPECT_TRUE(jobs.permanently_failed(vertex.id, fragment.id, other));
+	EXPECT_TRUE(jobs.permanently_failed(second_vertex.id, fragment.id, properties));
+	EXPECT_TRUE(jobs.shutdown());
 }
 
 #endif // RSX_ENABLE_METAL4

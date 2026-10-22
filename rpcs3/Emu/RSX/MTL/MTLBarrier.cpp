@@ -2,6 +2,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "MTLInstrumentation.h"
+
 namespace mtl
 {
 	bool stages_legal_intra_pass(MTL::Stages producer)
@@ -11,6 +13,18 @@ namespace mtl
 
 	bool emit_barrier(MTL4::CommandEncoder* encoder, const barrier_spec& spec)
 	{
+		// TODO(excise): level 2; the barrier stream and its stage pair (area J).
+		if (spec.cross_pass)
+		{
+			MTL_PROBE_LATCH(2, "sync/barrier cross pass");
+		}
+		else
+		{
+			MTL_PROBE_LATCH(2, "sync/barrier intra pass");
+		}
+		MTL_PROBE_HISTOGRAM(2, "sync/barrier producer stage", static_cast<u32>(spec.producer), "producer stage");
+		MTL_PROBE_HISTOGRAM(2, "sync/barrier consumer stage", static_cast<u32>(spec.consumer), "consumer stage");
+
 		if (spec.cross_pass)
 		{
 			encoder->barrierAfterQueueStages(spec.producer, spec.consumer, spec.visibility);

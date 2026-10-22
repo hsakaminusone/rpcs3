@@ -65,7 +65,12 @@ namespace mtl
 
 	MTL::Winding capture_front_face(const raster_state& state)
 	{
-		return state.front_face == rsx::front_face::cw ? MTL::WindingClockwise : MTL::WindingCounterClockwise;
+		// The viewport negates its height, and a Y mirror reverses the screen-space
+		// orientation of every triangle, so the guest winding maps to the opposite
+		// Metal winding (invariant 2).
+		const bool clockwise = state.front_face == rsx::front_face::cw;
+
+		return clockwise ? MTL::WindingCounterClockwise : MTL::WindingClockwise;
 	}
 
 	MTL::TriangleFillMode capture_fill_mode(const raster_state& state)
@@ -98,12 +103,23 @@ namespace mtl
 
 	MTL::Viewport build_viewport(u16 clip_width, u16 clip_height, f64 znear, f64 zfar)
 	{
-		return MTL::Viewport{ 0.0, 0.0, static_cast<f64>(clip_width), static_cast<f64>(clip_height), znear, zfar };
+		// The rectangle keeps its top edge and its height is negated, because the
+		// translated clip space is y-down and Metal's NDC is y-up
+		// (kk_cmd_draw.c:785-793).  The present and overlay passes carry the same
+		// flip for the same reason (MTLOverlays.cpp:381).
+		const f64 height = static_cast<f64>(clip_height);
+
+		return MTL::Viewport{ 0.0, height, static_cast<f64>(clip_width), -height, znear, zfar };
 	}
 
-	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2)
+	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u16 clip_height)
 	{
-		return MTL::ScissorRect{ x1, y1, x2 - x1, y2 - y1 };
+		// The geometry lands mirrored about the surface, so a region given in guest
+		// window coordinates lands at the mirrored target row.  It keeps its width
+		// and its height.
+		const u32 y = static_cast<u32>(clip_height) - y2;
+
+		return MTL::ScissorRect{ x1, y, x2 - x1, y2 - y1 };
 	}
 }
 

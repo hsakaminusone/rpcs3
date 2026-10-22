@@ -36,6 +36,11 @@ namespace mtl
 
 		void Task();
 
+		// The shader-interpreter source shares the decompiler's declarations but
+		// not its generated main (LLD-shader-interpreter.md §6).
+		void emitInterpreterPrelude(std::stringstream& OS);
+		void emitInterpreterGlobals(std::stringstream& OS);
+
 	protected:
 		std::string getFloatTypeName(usz elementCount) override;
 		std::string getHalfTypeName(usz elementCount) override;
