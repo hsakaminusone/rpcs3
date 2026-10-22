@@ -340,3 +340,96 @@ New probes added and their levels:
 - The interpreter never ran in the 22:28 run because the real pipeline won every draw
   (`draw/recompiler` 116 503, `draw/interpreter` 0); the interpreter is a first-use fallback, and
   with the asynchronous variant prebuild the fallback was never needed.
+
+---
+
+## 9. The 2026-10-22 02:5x level-5 run — objective data
+
+Artifacts: probe file 25 064 lines, `RPCS3.log` 24 493 lines (E 115, W 1536, S 184, U 168, A 4, T 1, F 0).
+
+### 9.1 The desync capture, in full
+
+```
+get=0x1f48c8c8 put=0xd3732c get_guest=0xffffffff restore_point=0x10a0e20
+code_start=0x1f48c8c8 ret_addr=0x10a0e24 last_label=0x60300800/0x1
+label_in_ring=0 label_offset=0x0 cmd=0x3f48c8ca method_index=0x3232 method_known=0
+words: <unmapped>
+```
+
+Repeated 21 times with identical values. The measurements in it:
+
+| field | value | what it is |
+|---|---|---|
+| `get` | 0x1f48c8c8 | the host's GET, 300 MB past the PUT and outside the ring's window `0x50100000..0x53200000` |
+| `get_guest` | 0xffffffff | the address is unmapped, so the read that follows is the FIFO error |
+| `put` | 0xd3732c | the guest's PUT, inside the ring |
+| `restore_point` | 0x10a0e20 | where the recovery puts the GET back — inside the ring, and the host walks into the same jump again |
+| `code_start` | 0x1f48c8c8 | the last jump target, equal to the wild address, so the host followed a jump *to* it |
+| `cmd` | 0x3f48c8ca | the word read: `0x3f48c8c8 & 0xe0000003 == 0x20000000`, the **old-jump** pattern |
+| `method_index` | 0x3232 | the method the word would name, and `method_known=0` — it names no method |
+| `label_in_ring` | 0 | the label address is not in a page the FIFO maps, so the label write is not the corruption |
+
+### 9.2 The refused draws
+
+```
+[14.125] skip frame 0, config valid 1, conditional render disabled 0, no attachments 1,
+         scissor 0x0+256+64, window clip 268369920x268369920, viewport 0x0+256+64,
+         scissor invalid 1, scissor clipped 1
+[47.042] skip frame 0, config valid 0, conditional render disabled 0, no attachments 0,
+         scissor 0x0+1920+1080, window clip 268369920x268369960, viewport 0x0+4096+4096,
+         scissor invalid 0, scissor clipped 1
+```
+
+The 64 samples split 63 `config valid 0` and 1 `no attachments 1`. The 63 are at 47.042–47.050 s and
+55.461–55.528 s in two bursts; the desync capture is at 99.774 s. **The refusals and the desync are
+44 s apart and are not the same event.**
+
+`rtt_config_valid` is set inside the colour-attachment loop, after
+`ensure(layout.color_addresses[index])` (`RSXThread.cpp:1794`), and the loop skips the attachment —
+and so never sets the flag — when `color_buffer_unused` (`:1724`) or when the pitch check fails with a
+pitch ≤ 64 (`:1740`). Only the pitch check logs, and the run's log has **no**
+`Framebuffer setup error: Color target failed pitch check`, so the pitch check passed and the
+colour target was dropped as unused. The scissor path is excluded by the numbers: the rectangle is
+1920×1080 at the origin and `scissor invalid 0`.
+
+### 9.3 The run's reach and its faults
+
+| interval | `draw/subdraws` |
+|---|---|
+| 30.210 s | 16 389 |
+| 35.502 s | 12 897 |
+| 40.773 s | 14 782 |
+| 98.994 s | 51 211 |
+
+The 02:31 level-2 run had 669 draws over 702 frames; the 23:04 level-3 run had 116 503. The level-5
+run reached real gameplay and froze there, so **the probe level changes how far the run gets** and
+the runs are not comparable without that.
+
+All 65 faults were on guest threads and all were handled, with `fault/sections to flush` 0 and
+`fault/sections to unprotect` 0.
+
+At the end the guest's threads were alive: `sys_cond_wait` aborted after 37.157 s
+(`CPamfDemuxer::ReadThread`), `vdecEntry` after 37.876 s (`HLE Video Decoder`), and the audio and
+input threads never blocked. **The RSX thread is stuck; the guest is not waiting on it.**
+
+### 9.4 The log census
+
+Errors (115): 54 `VM: Failed to lock sudo memory`, 21 `FIFO error: possible desync event`,
+11 `SPU: Trampoline simplified`, 10 `SIG: Thread [cellAudio Thread] is too sleepy`,
+6 `'_CellDmuxCoreOpReleaseAu' failed with 0x8061000a : CELL_EPERM`,
+4 `'cellVdecGetPicItem' failed with 0x80610104`, 2 `'sys_cond_destroy' failed with CELL_ESRCH`, and
+the rest are `ppu_loader` PRX-registration notices, a missing translation directory, and missing
+`BLJS30001` game files and region fonts.
+
+Warnings (1536): 819 SPU `MFC_EAH`/`MFC_Cmd` notices, 71
+`ROP reads from rN without writing to it` (upstream debug noise,
+`FragmentProgramDecompiler.cpp:849`), 65 `sys_memory_allocate`, 54 `_sys_prx_start_module`,
+34 `sys_memory_free`, 7 `sys_event_queue_receive` aborts.
+
+**Nothing in the shared log is Metal-specific.**
+
+### 9.5 The measurement environment
+
+`SYS: Low Power Mode is enabled, performance may be reduced` at 0:00:00.000312, and
+`pmset -g batt` reports `Now drawing from 'Battery Power'` at 40 % with `lowpowermode 1`. Every
+performance figure in this document was taken on a throttled, battery-powered machine.
