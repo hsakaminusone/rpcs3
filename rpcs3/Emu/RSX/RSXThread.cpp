@@ -3095,6 +3095,36 @@ namespace rsx
 					reg < rsx::methods.size() && rsx::methods[reg] != &invalid_method;
 			}
 
+			// The FIFO offset that maps to the last label address, if any.  The
+			// iomap maps one guest page per FIFO page, so a guest address can
+			// fall inside the command ring.  When it does, the label write lands
+			// in the middle of the pending command stream, which is the desync.
+			// TODO(excise): level 1; the search is on the error path only.
+			{
+				info.label_in_ring = false;
+				info.label_offset = 0;
+
+				if (info.last_label_address != 0)
+				{
+					for (u32 page = 0; page < iomap_table.ea.size(); ++page)
+					{
+						const u32 base = iomap_table.ea[page].load();
+
+						if (base == umax)
+						{
+							continue;
+						}
+
+						if (info.last_label_address >= base && info.last_label_address < base + 0x100000)
+						{
+							info.label_offset = (page << 20) | (info.last_label_address - base);
+							info.label_in_ring = true;
+							break;
+						}
+					}
+				}
+			}
+
 			if (const u32 addr = fifo_ctrl->translate_address(info.get); addr != umax)
 			{
 				for (u32 index = 0; index < 8; ++index)

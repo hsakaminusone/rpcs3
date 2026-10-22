@@ -202,7 +202,11 @@ namespace rsx
 			u32 position = 0;
 		};
 
-		static constexpr u32 dispatch_history_size = 8;
+		// The ring is 256 entries so that a capture can reach from the error back
+		// to the jump target: the error is a fixed distance after the target in
+		// three of the four captures (0x39c bytes, L58), and the commands in
+		// between are what the host has to show.
+		static constexpr u32 dispatch_history_size = 256;
 
 		// What the shared code knows about a desync when it recovers.
 		struct fifo_desync_info
@@ -217,6 +221,8 @@ namespace rsx
 			u32 last_label_address = 0;
 			u32 last_label_value = 0;
 			bool last_command_method_known = false;
+			bool label_in_ring = false;
+			u32 label_offset = 0;
 			u32 words[8] = {};
 			bool words_valid = false;
 			dispatch_entry history[dispatch_history_size]{};
