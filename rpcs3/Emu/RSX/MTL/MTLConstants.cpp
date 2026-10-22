@@ -4,6 +4,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "util/logs.hpp"
+
 namespace mtl
 {
 	namespace
@@ -37,6 +39,14 @@ namespace mtl
 		if (m_buffer)
 		{
 			m_view = make_stream_view(m_buffer, m_buffer->length());
+		}
+
+		// A ring without a view binds a null texture, and the vertex fetch then
+		// reads zeros with no error from Metal (the same silent class that
+		// resource_manager::check_residency reports).
+		if (!m_buffer || !m_view)
+		{
+			rsx_log.error("Metal 4: the vertex stream ring has no %s", m_buffer ? "texture view" : "buffer");
 		}
 
 		m_count = 0;
@@ -100,12 +110,16 @@ namespace mtl
 			return nullptr;
 		}
 
-		if (m_count + size > m_capacity)
+		const ring_block reservation = allocate_ring_block(m_count, size, m_capacity, 4);
+
+		if (reservation.grow)
 		{
 			// A new buffer needs a new view.  The retired pair is still referenced
 			// by the draws already encoded this frame, so both releases are
-			// deferred (HLD-02 I7).
-			MTL::Buffer* next = m_resources->new_buffer(m_capacity, MTL::StorageModeShared);
+			// deferred (HLD-02 I7).  A single allocation can exceed the working-set
+			// capacity; the replacement must hold it, or the copy runs past the
+			// buffer end.
+			MTL::Buffer* next = m_resources->new_buffer(reservation.capacity, MTL::StorageModeShared);
 			if (!next)
 			{
 				return nullptr;
@@ -122,13 +136,12 @@ namespace mtl
 			m_retired_views.push_back(m_view);
 			m_buffer = next;
 			m_view = next_view;
-			m_count = 0;
+			m_capacity = reservation.capacity;
 		}
 
-		offset = static_cast<u32>(m_count);
-		void* block = static_cast<std::byte*>(m_buffer->contents()) + m_count;
-		m_count += size;
-		return block;
+		m_count = reservation.end;
+		offset = static_cast<u32>(reservation.offset);
+		return static_cast<std::byte*>(m_buffer->contents()) + reservation.offset;
 	}
 
 	void byte_ring::init(resource_manager& resources, u64 capacity)
@@ -170,7 +183,7 @@ namespace mtl
 		m_count = 0;
 	}
 
-	void* byte_ring::alloc(u64 size, u32& offset)
+	void* byte_ring::alloc(u64 size, u32& offset, u64 alignment)
 	{
 		offset = 0;
 
@@ -179,9 +192,11 @@ namespace mtl
 			return nullptr;
 		}
 
-		if (m_count + size > m_capacity)
+		const ring_block reservation = allocate_ring_block(m_count, size, m_capacity, alignment);
+
+		if (reservation.grow)
 		{
-			MTL::Buffer* next = m_resources->new_buffer(m_capacity, MTL::StorageModeShared);
+			MTL::Buffer* next = m_resources->new_buffer(reservation.capacity, MTL::StorageModeShared);
 			if (!next)
 			{
 				return nullptr;
@@ -189,13 +204,12 @@ namespace mtl
 
 			m_retired.push_back(m_buffer);
 			m_buffer = next;
-			m_count = 0;
+			m_capacity = reservation.capacity;
 		}
 
-		offset = static_cast<u32>(m_count);
-		void* block = static_cast<std::byte*>(m_buffer->contents()) + m_count;
-		m_count += size;
-		return block;
+		m_count = reservation.end;
+		offset = static_cast<u32>(reservation.offset);
+		return static_cast<std::byte*>(m_buffer->contents()) + reservation.offset;
 	}
 
 	void constants_heap::init(resource_manager& resources, u32 frame_count)
@@ -227,6 +241,7 @@ namespace mtl
 			set.persistent.init(resources, stream_capacity);
 			set.volatile_stream.init(resources, volatile_capacity);
 			set.index.init(resources, index_capacity);
+			set.instructions.init(resources, instruction_capacity);
 			set.overlay_vertices.init(resources, overlay_vertex_capacity);
 			set.overlay_uniforms.init(resources, overlay_uniform_capacity);
 		}
@@ -255,6 +270,7 @@ namespace mtl
 			set.persistent.shutdown();
 			set.volatile_stream.shutdown();
 			set.index.shutdown();
+			set.instructions.shutdown();
 			set.overlay_vertices.shutdown();
 			set.overlay_uniforms.shutdown();
 		}
@@ -284,6 +300,7 @@ namespace mtl
 		streams.persistent.begin_frame();
 		streams.volatile_stream.begin_frame();
 		streams.index.begin_frame();
+		streams.instructions.begin_frame();
 		streams.overlay_vertices.begin_frame();
 		streams.overlay_uniforms.begin_frame();
 	}

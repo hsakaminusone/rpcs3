@@ -1,4 +1,5 @@
 #include "MTLResourceManager.h"
+#include "MTLInstrumentation.h"
 
 #ifdef RSX_ENABLE_METAL4
 
@@ -31,6 +32,11 @@ namespace mtl
 		m_device = nullptr;
 	}
 
+	void heap_pool::set_residency(residency_manager* residency)
+	{
+		m_residency = residency;
+	}
+
 	MTL::Heap* heap_pool::create_heap(u64 size)
 	{
 		MTL::HeapDescriptor* descriptor = MTL::HeapDescriptor::alloc()->init();
@@ -42,6 +48,14 @@ namespace mtl
 
 		MTL::Heap* heap = m_device->newHeap(descriptor);
 		descriptor->release();
+
+		// A sub-allocation is reachable only through its heap, so the heap is the
+		// unit of residency.  It is released at shutdown, after the set is gone.
+		if (heap && m_residency)
+		{
+			m_residency->make_persistent(heap);
+		}
+
 		return heap;
 	}
 
@@ -158,22 +172,15 @@ namespace mtl
 		}
 	}
 
-	void residency_manager::init(MTL::Device* device, MTL4::CommandQueue* queue, u32 frame_count)
+	void residency_manager::init(MTL::Device* device, MTL4::CommandQueue* queue)
 	{
 		m_device = device;
 		m_queue = queue;
 
+		// The set is attached before any heap exists, so no allocation can become
+		// reachable before the set that covers it.
 		m_persistent = create_residency_set(device, 256);
 		m_queue->addResidencySet(m_persistent);
-
-		m_per_frame.resize(frame_count);
-		m_tracked.resize(frame_count);
-
-		for (u32 index = 0; index < frame_count; ++index)
-		{
-			m_per_frame[index] = create_residency_set(device, 256);
-			m_queue->addResidencySet(m_per_frame[index]);
-		}
 	}
 
 	void residency_manager::shutdown()
@@ -185,19 +192,13 @@ namespace mtl
 
 		if (m_persistent)
 		{
+			// The set goes before its allocations are released (HLD-02 I7).
 			m_queue->removeResidencySet(m_persistent);
 			m_persistent->release();
 			m_persistent = nullptr;
 		}
 
-		for (MTL::ResidencySet* set : m_per_frame)
-		{
-			m_queue->removeResidencySet(set);
-			set->release();
-		}
-
-		m_per_frame.clear();
-		m_tracked.clear();
+		m_published.clear();
 		m_device = nullptr;
 		m_queue = nullptr;
 	}
@@ -211,61 +212,50 @@ namespace mtl
 
 		m_persistent->addAllocation(allocation);
 		m_persistent->commit();
+		m_published.insert(allocation);
 	}
 
-	void residency_manager::on_frame_begin(u32 index)
+	void residency_manager::remove(MTL::Allocation* allocation)
 	{
-		m_current = index;
-	}
-
-	void residency_manager::on_bind(MTL::Allocation* allocation)
-	{
-		if (!allocation || m_per_frame.empty())
+		if (!allocation || !m_persistent)
 		{
 			return;
 		}
 
-		const u32 slot = m_current % static_cast<u32>(m_per_frame.size());
-		m_per_frame[slot]->addAllocation(allocation);
-		m_tracked[slot].insert(allocation);
-	}
-
-	void residency_manager::commit_frame()
-	{
-		if (m_per_frame.empty())
+		// Only a published allocation is in the set, and a repeated removal must not
+		// touch the set again.
+		if (m_published.erase(allocation) == 0)
 		{
 			return;
 		}
 
-		m_per_frame[m_current % static_cast<u32>(m_per_frame.size())]->commit();
+		m_persistent->removeAllocation(allocation);
+		m_persistent->commit();
 	}
 
-	void residency_manager::on_commit_complete(u32 index)
+	bool residency_manager::is_persistent(MTL::Allocation* allocation) const
 	{
-		if (m_per_frame.empty())
-		{
-			return;
-		}
-
-		const u32 slot = index % static_cast<u32>(m_per_frame.size());
-
-		for (MTL::Allocation* allocation : m_tracked[slot])
-		{
-			m_per_frame[slot]->removeAllocation(allocation);
-		}
-
-		m_tracked[slot].clear();
-		m_per_frame[slot]->commit();
+		return m_published.count(allocation) != 0;
 	}
 
 	void resource_manager::init(const device& dev, u32 frame_count)
 	{
 		m_device = dev.dev();
 		m_guest = dev.window().buffer;
+		m_supports_bc = m_device->supportsBCTextureCompression();
+
+		// TODO(excise): level 2; the compression capability decides the DXT path.
+		MTL_NOTE(2, "Metal 4: BC texture compression is %s", m_supports_bc ? "available" : "unavailable");
+
 		m_shared.init(m_device, MTL::StorageModeShared, shared_block_size);
 		m_private.init(m_device, MTL::StorageModePrivate, private_block_size);
-		m_residency.init(m_device, dev.queue(), frame_count);
+		m_residency.init(m_device, dev.queue());
 		m_deferred.resize(frame_count);
+
+		// Every heap the pools create is published to the persistent set, so heap
+		// residency covers each sub-allocation for its whole life (HLD-02 §2.6 I5).
+		m_shared.set_residency(&m_residency);
+		m_private.set_residency(&m_residency);
 
 		// The guest window is an application-lifetime resource, and every buffer
 		// binding refers to it (HLD-02 I5).
@@ -283,6 +273,12 @@ namespace mtl
 
 	MTL::Buffer* resource_manager::new_buffer(u64 length, MTL::StorageMode storage)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "resource/new buffer");
+		// TODO(excise): level 2; the buffer lifetime and a coarse size bucket (area G).
+		MTL_PROBE_LATCH(2, "resource/buffer created");
+		MTL_PROBE_HISTOGRAM(2, "resource buffer size",
+			length <= 4096 ? 0 : length <= 65536 ? 1 : length <= 1048576 ? 2 : 3, "buffer size bucket");
 		const MTL::ResourceOptions options = storage_options(storage);
 		const MTL::SizeAndAlign required = m_device->heapBufferSizeAndAlign(length, options);
 
@@ -305,7 +301,7 @@ namespace mtl
 		}
 
 		track(buffer, pool, heap, offset, required.size);
-		m_residency.on_bind(buffer);
+		check_residency(heap);
 		return buffer;
 	}
 
@@ -323,6 +319,11 @@ namespace mtl
 
 	MTL::Texture* resource_manager::new_texture(MTL::TextureDescriptor* descriptor, MTL::StorageMode storage)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "resource/new texture");
+		// TODO(excise): level 2; the texture lifetime and its pixel format (area G).
+		MTL_PROBE_LATCH(2, "resource/texture created");
+		MTL_PROBE_HISTOGRAM(2, "resource texture format", static_cast<u32>(descriptor->pixelFormat()), "metal pixel format");
 		descriptor->setStorageMode(storage);
 
 		const MTL::SizeAndAlign required = m_device->heapTextureSizeAndAlign(descriptor);
@@ -346,7 +347,7 @@ namespace mtl
 		}
 
 		track(texture, pool, heap, offset, required.size);
-		m_residency.on_bind(texture);
+		check_residency(heap);
 		return texture;
 	}
 
@@ -358,18 +359,10 @@ namespace mtl
 	void resource_manager::on_frame_begin(u32 index)
 	{
 		m_frame_slot = index;
-		m_residency.on_frame_begin(index);
-	}
-
-	void resource_manager::commit_frame()
-	{
-		m_residency.commit_frame();
 	}
 
 	void resource_manager::on_commit_complete(u32 index)
 	{
-		m_residency.on_commit_complete(index);
-
 		if (m_deferred.empty())
 		{
 			return;
@@ -379,6 +372,50 @@ namespace mtl
 		// used, so the objects deferred during that frame are safe to release
 		// (HLD-02 I7).  The frames on later slots may still be in flight.
 		release_list(m_deferred[index]);
+	}
+
+	void resource_manager::quarantine(u32 index)
+	{
+		if (m_deferred.empty())
+		{
+			return;
+		}
+
+		std::vector<MTL::Allocation*>& list = m_deferred[index];
+
+		if (list.empty())
+		{
+			return;
+		}
+
+		m_quarantine.insert(m_quarantine.end(), list.begin(), list.end());
+		list.clear();
+	}
+
+	void resource_manager::drain_quarantine()
+	{
+		release_list(m_quarantine);
+	}
+
+	void resource_manager::check_residency(MTL::Heap* heap)
+	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "resource/residency");
+		if (m_residency.is_persistent(heap))
+		{
+			return;
+		}
+
+		// A sub-allocation of an unpublished heap reads zeros in silence: Metal
+		// raises no validation error and no GPU fault (HLD-02 F1).  Report it here,
+		// where the cause is, rather than at the draw that shows the symptom.
+		static bool reported = false;
+		if (!reported)
+		{
+			reported = true;
+			rsx_log.error("Metal 4: heap %p is not in the persistent residency set, so its allocations read zeros",
+				static_cast<const void*>(heap));
+		}
 	}
 
 	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size)
@@ -404,6 +441,8 @@ namespace mtl
 
 	void resource_manager::garbage_collect()
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "resource/gc");
 		for (std::vector<MTL::Allocation*>& list : m_deferred)
 		{
 			release_list(list);
@@ -421,6 +460,10 @@ namespace mtl
 				m_spans.erase(found);
 			}
 
+			// The object is about to be released, so the set must stop naming it;
+			// otherwise a later allocation that reuses its span is covered by a stale
+			// entry (DEVIATIONS-SYNC.md, SY5).
+			m_residency.remove(allocation);
 			allocation->release();
 		}
 

@@ -427,6 +427,33 @@ namespace mtl
 		OS << "}\n";
 	}
 
+	void MTLVertexDecompilerThread::emitInterpreterPrelude(std::stringstream& OS)
+	{
+		insertHeader(OS);
+
+		// The interpreter reads the whole guest constant file (VKShaderInterpreter.cpp).
+		ParamType uniforms = { PF_PARAM_UNIFORM, "vec4" };
+		uniforms.items.emplace_back("vc[468]", -1);
+		insertConstants(OS, { uniforms });
+		insertInputs(OS, {});
+	}
+
+	void MTLVertexDecompilerThread::emitInterpreterFunctions(std::stringstream& OS)
+	{
+		glsl::shader_properties properties2{};
+		properties2.domain = glsl::glsl_vertex_program;
+		properties2.require_lit_emulation = properties.has_lit_op;
+		properties2.require_clip_plane_functions = true;
+		properties2.emulate_zclip_transform = true;
+		properties2.emulate_depth_clip_only = false;
+		properties2.require_instanced_render = !!(m_prog.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS);
+		properties2.emulate_depth_range = false;
+
+		glsl::insert_glsl_legacy_function(OS, properties2);
+		glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_vulkan);
+		insertFSExport(OS);
+	}
+
 	void MTLVertexDecompilerThread::Task()
 	{
 		m_shader = Decompile();

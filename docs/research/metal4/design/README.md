@@ -24,6 +24,7 @@ the difficulty/risk/confidence scales, and the document templates.
 | [`HLD-04-command-encoding.md`](HLD-04-command-encoding.md) | Recording/submission, argument tables, pipeline state, indirect command buffers, the draw model, vertex fetch. |
 | [`HLD-05-shader-binding-contract.md`](HLD-05-shader-binding-contract.md) | CgBinary → MSL, the shader facet surface, the canonical slot map, PSO assembly and cache keying. |
 | [`HLD-06-presentation-flip.md`](HLD-06-presentation-flip.md) | GCM flips, `CAMetalLayer`/drawable presentation, frame pacing, the swapchain-equivalent, the copy engines. |
+| [`HLD-07-shader-pipeline-cache.md`](HLD-07-shader-pipeline-cache.md) | The shader and pipeline cache layers: the on-disk pipeline set, the preload parallelism, and the `MTL4::PipelineDataSetSerializer` driver cache. |
 
 ## Low-level design (LLD)
 

@@ -543,12 +543,24 @@ namespace mtl
 		OS << "}\n";
 	}
 
+	void MTLFragmentDecompilerThread::emitInterpreterPrelude(std::stringstream& OS)
+	{
+		insertHeader(OS);
+		insertConstants(OS);
+	}
+
+	void MTLFragmentDecompilerThread::emitInterpreterGlobals(std::stringstream& OS)
+	{
+		insertGlobalFunctions(OS);
+	}
+
 	void MTLFragmentDecompilerThread::Task()
 	{
-		// Apple silicon supports fp16, but the seam keeps fp32 outputs so the
-		// shader does not depend on a device capability the caller does not pass
-		// (HLD-05 F6, §6 Q8).  Native depth compare removes the depth fetch.
-		device_props.has_native_half_support = false;
+		// Apple silicon executes fp16 arithmetic natively, so the low precision
+		// setting can use f16 registers instead of widening every intermediate
+		// (VKFragmentProgram.cpp:76; HLD-05 F6).  Depth compare and depth storage
+		// are native, so the two depth emulation paths stay off.
+		device_props.has_native_half_support = (g_cfg.video.shader_precision == gpu_preset_level::low);
 		device_props.emulate_depth_compare = false;
 		device_props.has_low_precision_rounding = false;
 		device_props.emulated_depth_storage = false;

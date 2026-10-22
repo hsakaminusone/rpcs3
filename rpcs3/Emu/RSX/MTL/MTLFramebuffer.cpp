@@ -1,4 +1,5 @@
 #include "MTLDevice.h"
+#include "MTLInstrumentation.h"
 
 #include "MTLFramebuffer.h"
 
@@ -41,6 +42,8 @@ namespace mtl
 
 	void framebuffer::bind(command_recorder& cmd, surface_cache& cache, const rsx::framebuffer_layout& layout, const rsx::surface_scaling_config_t& scaling)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "framebuffer/store bind");
 		// The bound set is still current, so the store walk is not repeated.  This is
 		// the per-draw path, so it must not cost a surface lookup.
 		if (m_has_layout && same_framebuffer(m_layout, layout))
@@ -96,9 +99,43 @@ namespace mtl
 
 	MTL4::RenderCommandEncoder* framebuffer::open_pass(command_recorder& cmd, u32 clear_mask, const surface_state& state)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "framebuffer/open pass");
 		if (!valid())
 		{
+			// TODO(excise): level 2; the pass that never opened (area B).
+			MTL_PROBE_LATCH(2, "framebuffer/pass refused");
 			return nullptr;
+		}
+
+		// TODO(excise): level 2; the pass stream, its clear mask and its targets.
+		MTL_PROBE_LATCH(2, "framebuffer/pass opened");
+		MTL_PROBE_HISTOGRAM(2, "framebuffer pass clear", clear_mask & 0x7u, "clear mask bits");
+		MTL_PROBE_HISTOGRAM(2, "framebuffer pass colors", m_color_count, "color attachment count");
+		// TODO(excise): level 2; the depth-stencil feature of the pass (area I).
+		if (m_depth)
+		{
+			MTL_PROBE_LATCH(2, "feature/depth attachment");
+		}
+		else
+		{
+			MTL_PROBE_LATCH(2, "feature/no depth attachment");
+		}
+		// TODO(excise): level 2; the visibility query the pass carries (area I).
+		if (m_visibility)
+		{
+			MTL_PROBE_LATCH(2, "feature/zcull query");
+		}
+		else
+		{
+			MTL_PROBE_LATCH(2, "feature/no zcull query");
+		}
+
+		// TODO(excise): level 1; a pass with no attachment and no depth cannot render
+		// anything, so the probe reports it rather than encoding a silent empty pass.
+		if (!m_color_count && !m_depth)
+		{
+			MTL_ERROR(1, "Metal 4: render pass %ux%u opened with no color and no depth attachment", m_width, m_height);
 		}
 
 		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
@@ -114,9 +151,11 @@ namespace mtl
 			descriptor->setVisibilityResultType(MTL::VisibilityResultTypeAccumulate);
 		}
 
-		const bool clear_color = (clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
+		// The colour mask is the format-aware one the caller resolved; a full
+		// MTLLoadActionClear is only legal when it covers every stored channel.
+		const bool clear_color = state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
 		const bool clear_depth = (clear_mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
-		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0;
+		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0 && state.clear_stencil_fast;
 
 		for (u32 index = 0; index < m_color_count; ++index)
 		{

@@ -63,7 +63,16 @@ namespace mtl
 		encoder->setFrontFacingWinding(state.winding);
 		encoder->setTriangleFillMode(state.fill_mode);
 		encoder->setDepthClipMode(state.depth_clip_mode);
-		encoder->setDepthTestBounds(state.depth_bounds_min, state.depth_bounds_max);
+
+		// The RSX depth-bounds test has no usable native path on this driver.  The
+		// encoder setter reaches -[AGXG17FamilyRenderContext_mtlnext
+		// setDepthTestMinBound:maxBound:] and traps there (EXC_BREAKPOINT, SIGTRAP;
+		// crash report 2026-10-18 01:07, frame 0), which is the design's position:
+		// LLD-depth-rop §3.4 maps the test to a fragment-shader discard fed by
+		// fragment constants and §4 records the drop as the bring-up fallback, the
+		// same fallback the VK path takes on a device without support
+		// (VKPipelineCompiler.cpp:118-125).  The captured bounds stay in the state,
+		// unread until that epilogue lands.
 
 		// The RSX has no depth-bias clamp term (LLD-raster §3.4).
 		encoder->setDepthBias(state.depth_bias, state.depth_slope_scale, 0.0f);
@@ -73,7 +82,8 @@ namespace mtl
 		encoder->setBlendColor(state.blend_color[0], state.blend_color[1], state.blend_color[2], state.blend_color[3]);
 
 		// The viewport rectangle is the surface clip; the RSX viewport transform
-		// lives in the vertex env (LLD-raster §3.1, invariant 1).
+		// lives in the vertex env (LLD-raster §3.1, invariant 1), and the rectangle
+		// carries the one clip-space Y flip (invariant 2).
 		const f64 znear = state.has_clip_range ? state.znear : 0.0;
 		const f64 zfar = state.has_clip_range ? state.zfar : 1.0;
 		encoder->setViewport(build_viewport(state.clip_width, state.clip_height, znear, zfar));

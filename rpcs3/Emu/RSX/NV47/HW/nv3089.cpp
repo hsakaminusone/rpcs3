@@ -31,8 +31,24 @@ namespace rsx
 			const blit_engine::transfer_origin in_origin = REGS(ctx)->blit_engine_input_origin();
 			auto src_color_format = REGS(ctx)->blit_engine_src_color_format();
 
-			const f32 scale_x = REGS(ctx)->blit_engine_ds_dx();
-			const f32 scale_y = REGS(ctx)->blit_engine_dt_dy();
+			// A zero scale register is the power-on value, not a scale of zero.  The
+			// hardware's default is 1.0, and a scale of zero cannot be a request:
+			// the subpixel correction below divides by it, and a copy with a zero
+			// scale transfers nothing.  The decoder reports the register as 0
+			// (rsx_decode.h:2044) and expects the trigger to say so, so say it here
+			// and then use the default.
+			const f32 raw_scale_x = REGS(ctx)->blit_engine_ds_dx();
+			const f32 raw_scale_y = REGS(ctx)->blit_engine_dt_dy();
+
+			if (raw_scale_x == 0.f || raw_scale_y == 0.f)
+			{
+				// TODO(excise): level 2; one line per blit, and the blit is rare.
+				rsx_log.warning("NV3089_IMAGE_IN: DS DX or DT DY is 0, using the default scale of 1.0 (ds_dx=%f, dt_dy=%f)",
+					raw_scale_x, raw_scale_y);
+			}
+
+			const f32 scale_x = (raw_scale_x == 0.f) ? 1.f : raw_scale_x;
+			const f32 scale_y = (raw_scale_y == 0.f) ? 1.f : raw_scale_y;
 
 			// Clipping
 			// Validate that clipping rect will fit onto both src and dst regions
@@ -42,7 +58,11 @@ namespace rsx
 			// Check both clip dimensions and dst dimensions
 			if (clip_w == 0 || clip_h == 0)
 			{
-				rsx_log.warning("NV3089_IMAGE_IN: Operation NOPed out due to empty regions");
+				// The empty region is the real reason the operation transfers
+				// nothing, and it is reported before the scale so that a missing
+				// geometry is not mistaken for a missing scale.
+				rsx_log.warning("NV3089_IMAGE_IN: Operation NOPed out due to empty regions (clip %ux%u, output %ux%u)",
+					clip_w, clip_h, out_w, out_h);
 				return { false, src_info, dst_info };
 			}
 

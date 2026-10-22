@@ -579,7 +579,11 @@ namespace rsx
 		// The ZCULL unit belongs to the thread. The renderer only provides the host queries.
 		zcull_ctrl = std::make_unique<reports::ZCULL_control>();
 
-		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
+		// The in-game interface is an output pass of the renderer, so it needs the
+		// renderer's overlay tier.  Vulkan, OpenGL and Metal carry one
+		// (MTLPresent.cpp:frame_output).
+		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl ||
+			g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
 
@@ -1737,11 +1741,65 @@ namespace rsx
 		return pair;
 	}
 
+	void invalid_method(context*, u32, u32);
+
 	void thread::recover_fifo(std::source_location src_loc)
 	{
 		bool kill_itself = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::as_ps3;
 
 		const u64 current_time = get_system_time();
+
+		// The discriminating capture of a desync (RR7-FREEZE-FORENSICS.md §8.1).
+		// TODO(excise): level 1; the whole capture block is diagnostic and goes
+		// with the probe work.  The shared code only gathers the data and hands
+		// it to the backend through on_fifo_desync; the Metal 4 backend prints
+		// it through the probe facility and every other backend ignores it.  It
+		// runs on the error path only, which fires a handful of times in a run,
+		// so the cost on the normal path is nil.
+		{
+			fifo_desync_info info;
+			info.get = fifo_ctrl->get_pos();
+			info.put = +ctrl->put;
+			info.get_guest = fifo_ctrl->translate_address(info.get);
+			info.restore_point = restore_point;
+			info.code_start = last_known_code_start;
+			info.ret_addr = fifo_ret_addr;
+			info.last_command = get_fifo_cmd();
+			info.last_label_address = m_last_label_address;
+			info.last_label_value = m_last_label_value;
+
+			// The method index the offending word would name, and whether the
+			// method table knows it.  A word that names an undefined method is a
+			// data word that the host took for a command (L52), and the index says
+			// which register range the host was walking when it went wrong.
+			{
+				const u32 reg = (info.last_command & 0xffff) >> 2;
+				info.last_command_method_known =
+					reg < rsx::methods.size() && rsx::methods[reg] != &invalid_method;
+			}
+
+			if (const u32 addr = fifo_ctrl->translate_address(info.get); addr != umax)
+			{
+				for (u32 index = 0; index < 8; ++index)
+				{
+					info.words[index] = vm::read32(addr + index * 4);
+				}
+
+				info.words_valid = true;
+			}
+
+			const u32 count = m_dispatch_history_count;
+			const u32 first = (m_dispatch_history_next + dispatch_history_size - count) % dispatch_history_size;
+
+			for (u32 i = 0; i < count; ++i)
+			{
+				info.history[i] = m_dispatch_history[(first + i) % dispatch_history_size];
+			}
+
+			info.history_count = count;
+
+			on_fifo_desync(info);
+		}
 
 		if (recovered_fifo_cmds_history.size() == 20u)
 		{
@@ -1867,8 +1925,6 @@ namespace rsx
 		// Last fifo cmd for logging and utility
 		return fifo_ctrl->last_cmd();
 	}
-
-	void invalid_method(context*, u32, u32);
 
 	void thread::dump_regs(std::string& result, std::any& /*custom_data*/) const
 	{
