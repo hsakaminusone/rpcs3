@@ -1515,13 +1515,14 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 
 	auto& ctrl = *vm::_ptr<CellGcmControl>(gcm_cfg.gcm_info.control_addr);
 
-	// Flush command buffer (ie allow RSX to read up to context->current)
-	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
-
 	std::pair<u32, u32> newCommandBuffer = getNextCommandBufferBeginEnd(context->current.addr());
 	u32 offset = getOffsetFromAddress(newCommandBuffer.first);
-	// Write jump instruction
+	// Write the jump before publishing it. PUT names the last written word, so
+	// the RSX must never be able to read the jump position before the jump is
+	// there; the previous order published the position first and then wrote it.
 	*context->current = RSX_METHOD_OLD_JUMP_CMD | offset;
+	// Flush command buffer (ie allow RSX to read up to context->current)
+	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
 	// Update current command buffer
 	context->begin.set(newCommandBuffer.first);
 	context->current.set(newCommandBuffer.first);

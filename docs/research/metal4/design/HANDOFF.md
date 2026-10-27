@@ -4,28 +4,121 @@ This document hands over the Metal 4 backend. Read it first. Then read `METAL4-T
 work list, `REALISATION.md` for the per-cluster status, `REVIEW-FINDINGS.md` for the itemised
 defects, and `CONFLICTS.md` for design/tree disagreements.
 
-**This revision.** The 2026-10-21/22 window is recorded in `INVESTIGATION-2026-10-22.md` (the
-datapoints) and in `LOG-FINDINGS.md` as L36–L55. Nine runs (R1–R9) were made. The **FIFO desync
-reproduces with no probe at all**, so it is not a diagnostic artefact, and the desync capture that
-`RR7-FREEZE-FORENSICS.md` §8.1 prescribes shows why: the word the FIFO rejects is a **data word**,
-and the words around it name method indices that do not exist, so **the host is executing a data
-block as commands**. The label write is not the corrupting event (the label address is outside the
-FIFO's guest window), and the freeze is a **recovery loop that makes no progress** (`restore_point`
-equals `get`, so the recovery returns the host to the same word) that ends when the GET runs off
-the end of the mapped region. The black video and the black race rectangle are also a data-word
-problem of the same family: the guest's `NV3089` blit had every geometry register at zero while the
-same module's context registers were set, so the setup commands were consumed as part of a bulk
-data block. **The next measurement is the §8 companion control on Vulkan**, which decides whether
-the fault is shared or Metal-specific.
+**This revision (2026-10-27, after run U).** The live state is in §0, the datapoints in
+`INVESTIGATION-2026-10-22.md` §10.12–§10.20, and the findings in `LOG-FINDINGS.md` (open first).
+The results since the last revision:
 
-Three fixes landed: a zero `DS_DX`/`DT_DY` is the power-on value and is no longer divided by
-(`nv3089.cpp:34-66`); a reused Metal texture is cleared when no upload covers it, which is the one
-real divergence from the OpenGL reference and the cause of the `0xff` video surface; and a reused
-image is discarded unless its format, extent and mip count match. The desync capture is a
-**backend hook**: the shared FIFO gathers the data and calls `on_fifo_desync`, and the Metal
-backend prints it through the probe facility, so the diagnostic belongs to the backend and the
-other backends pay nothing. The 2026-10-21 design audit found 26 confirmed defects (LLD §20); the
-implementation then forced five more corrections and four optimisations (LLD §21).
+- **GET was licensing the guest to recycle a chunk the parser was still in (L145), and run U
+  confirmed the fix on device.** Run T parked at the boot handover `A+0x9d4` with `word=0x30`
+  after the parser spent 188 ms inside A on a label acquire. `sync_get()` published the end of the
+  prefetched block, not the executed position, and the guest reused A's link word. The fix is the
+  contract, not another sample: GET now publishes `m_fifo_pos`; `cellGcmCallback` writes the jump
+  before publishing PUT; the L141/L144 publish-sample layer is deleted; and the stream frontier is
+  enforced in fast mode too. Run U consumed the live `0x210a0000` at `A+0x9d4`, entered B, and made
+  2,892 cross-buffer handovers with no `Dead FIFO`, desync or read-ahead. 12 `FifoStreams` cases,
+  516/516 full suite.
+- **The black video is not the alpha test.** Run 2 compiled the alpha test out of every program and
+  captured the video draw itself (frame 879, draw 12262, `fp 100`): three non-empty B8 planes, a
+  full-screen quad, every state field correct, and four colour patches left at exactly
+  `(0,0,0,0)`. The remaining question is "wrote black" versus "never ran", which colour alone cannot
+  answer (L110, L111).
+- **The run-2 freeze was the capture, not the backend.** The 670-draw race-start window took eight
+  synchronising readbacks per draw; queue lag went from 2.9 s to 94.8 s, the queue then raised 588
+  `MTL4CommandQueueErrorDomain` failures, and the game stalled at the race start. The depth probe
+  that was supposed to be the decisive second witness returned garbage and is removed; a window now
+  probes at most 64 draws (L112, L113).
+
+- **The boot stall is the label handshake, not the link.** Run K captured the boot chunk tail
+  before it was recycled: it ends with a non-flip `NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE`
+  (`0x75c`, `0x60300800`, `0x1`) and the next `NV406E_SEMAPHORE_ACQUIRE` (`arg=0`) reads the old
+  `0` and takes the `sema == arg` fast path. The release was submitted (L134), but the acquire
+  never waited for the GPU copy, so the parser parks on the genuine `0` link at `0xcb09d4`
+  (L135). The fix is a targeted `sync_label(address)` hook: Metal commits the buffer that carries
+  the write and waits only for that slot's feedback before the acquire re-reads the word. VK
+  submits the label immediately in its own secondary command buffer and GL hands it to the host
+  DMA writer, so neither needs this wait. The old `put == addr` guard was still a real hole for
+  the healthy link case and stays fixed (L133).
+
+- **Run L: the wait fires, but the guest word still reads zero.** With L135 in the binary, the
+  boot release's slot is committed and its feedback delivered (`sync/label wait` latched 2,
+  `recorder/re-enter slot/wait` max 235.7 ms, feedback lag max 18.7 ms), and `sync/label verify`
+  still prints `sudo=0x0 guest=0x0`. **The destination was the fault:** the Metal device imports
+  the guest window at 4.58 s, but the RSX reports page that holds the label is mapped at 18.96 s,
+  and a no-copy import is fixed at creation (L136). A standalone remap experiment reproduces the
+  failure exactly. Labels now write through a per-page import created after the page exists and
+  cached for the process (L137), and the same-commit readback (`gpu=`) plus the acquire's re-read
+  word are in the build for the confirming run (§10.19).
+
+The `MTL_PROBE_FORCE_FP=<fp id>` witness remains available for the black video: it forces one
+program's colour output to magenta after every ROP stage and clears its discard (L114), which
+separates "wrote black" from "never ran" without a GPU debugger. The FIFO desync is fixed in code
+(L132) and at the equality path (L133). Run L supplied the label wait but not the word; L136 found
+the stale destination and L137 moves the label write to a per-page import. **Run M confirmed L137
+on device:** `sudo=0x0 guest=0x0` at 13.304 becomes `sudo=0x1000000 guest=0x1000000` at 13.575, the
+acquire reads `sema=0x1`, and the FIFO ran 5,060 chunks / 129,233 draws / 3,000 flips. The
+`0xcb09d4` boot park is gone.
+
+**Run M then froze at a later frontier (L138/M1).** After two minutes, at a track-load transition,
+the parser parked at `addr=0xcbe890 frontier=0xcbe890 put=0x10ae994 word=0x0`: the acquire before
+it returned, but the cross-buffer link word after the acquire was never written. The guest kept
+running (allocations to 02:22, `CnuSound2Thread` at 02:24), and the parser polls an empty FIFO, so
+the word really stayed zero. **Run P then showed the mechanism (L140):** the missing word is the
+guest's park area, and the frontier rule parked the parser on its first NOP instead of reading it.
+The fix is in the tree. The same run showed the reported
+**flickering black patches**; a classification run (`MTL_PROBE_REPLACE_TEXTURES=1`, red one-texel
+replacement for every sampled unit) is the next measurement: red patches mean texture content,
+black patches mean the surface/clear path.
+
+**Run N (classification attempt) never got to gameplay.** The same build plus
+`MTL_PROBE_REPLACE_TEXTURES=1` passed the label handshake (`sudo=0x1000000 guest=0x1000000` at
+13.106, acquire `sema=0x1`) and then hit L138 at boot instead of at a load transition: the parser
+reached the boot chunk end `addr=0xcb09d4 frontier=0xcb09d4`, PUT had moved into the other buffer
+(`put=0x10a0e20`), and the word there was `0x30`, a NOP-class data word, not a link. The run logged
+1 subdraw, 3 vertices and 27 composed flips, so the display showed only the empty frame: the
+complete black screen is the boot park, not a rendering regression and not the patch bug. It also
+means the red/black classification still needs a run that reaches the track.
+
+**Run O (clean `MTL_PROBE=2`) reached gameplay and then reproduced L138 there (15,882
+subdraws).** It parked at `addr=0xcc01f8 frontier=0xcc01f8 put=0x10b01f8 word=0x10000` — PUT in
+the other buffer — and the word at the parked frontier changed to `0x4025` 1.4 s later. `0x4025`
+passes the RSX *new-jump* test, so the frontier link predicate accepted a data word and jumped to
+`0x4024`, producing two `possible desync event` lines. The frontier test now accepts only the
+encodings the guest emits; the probe built in this tree records the frontier word for the last 8
+PUT moves and any change while parked, which separates "link published after the PUT move" from
+"chunk recycled under the parser".
+
+**The label path follows the setting (L139).** Metal forced `supports_host_gpu_labels` true, so
+every run paid the GPU write and the acquire's wait — the only block inside the FIFO loop that VK
+and GL do not have. `MTLDevice::fill_backend_config` now reads
+`g_cfg.video.host_label_synchronization`, default off: the release is a host store into the shared
+guest page (`nv47_sync.hpp:83`), the acquire does not wait, and the per-page import plus
+`sync_label` run only when the setting is on. The init log prints which path the run took.
+
+**The enabled path now waits on a completion event (SY14).** Every commit takes the next value of
+one `MTLSharedEvent` and `MTL4CommandQueue::signalEvent` marks it done; `begin_frame`,
+`reenter_slot`, `wait_for_slot`, `wait_idle` and `shutdown` poll `signaledValue` with the existing
+10 s bound. The feedback handler is left with commit diagnostics and the ZCULL counter, and the
+recorder's mutex and condition variable are gone. A satisfied wait is one atomic load; a real wait
+is a short pause spin and then a 50 µs sleep.
+
+**Run P: the host-store path freezes the same way, so the label is not the cause of L138.** The run
+started with `guest labels are written by the CPU (host store)`, no GPU label and no `sync_label`,
+and still parked at 0:00:54.940: `addr=0xcb6264 frontier=0xcb6264 put=0x10ab0e0
+word=0x2062000`. The probe shows every earlier PUT move left a real link at the frontier
+(`0x20cb0000`/`0x210a0000`); only the last move left data (`put[7] old_word=0x2062000`). Both label
+paths fail, which settles the setting as orthogonal.
+
+**The park is the guest's park area, not garbage (L140).** At 54.957 the word at `0xcb6264` became
+the jump `0x3020300`, 17 ms after the PUT move: the guest published the link late, and the parser
+followed it correctly. `0x3020300` holds a count-0 NOP with PUT still in the other buffer, so it is
+the zero-filled park the guest jumps to while it prepares the next chunk and patches afterwards.
+`stream_tracker::on_jump` gave that unknown target a strict frontier equal to the target, so the
+parser refused to read the NOP (`addr >= published_end`, word not a link) and never saw the patch;
+`fetch at/after PUT fetch=0x3020300` repeats for the rest of the run. Hardware follows the jump and
+reads whatever is there. **Fixed:** a target more than `max_put_gap` above PUT is read unbounded,
+exactly as static code below the streams already was, while a target PUT names keeps its strict
+frontier, so the published-end rule for the two command buffers is unchanged
+(`FifoStreams.ParkAreaAboveStreamsIsReadUnbounded`).
 
 **The 20:55 probe-2 run** is the first clean run of the final binary (L25–L33 in `LOG-FINDINGS.md`).
 It exits `rc=0` after 2:19, so the graceful-shutdown and archive-flush paths ran. It reaches the
@@ -57,52 +150,120 @@ video and the black FMVs.
 
 ## 0. Start here
 
-**The state.** The backend builds, boots, renders the guest frame upright and reaches real gameplay
-screens on RR7. The present/flip freeze and the cube descriptor abort are fixed. The **FIFO desync
-is open and is the blocker**: it reproduces with no probe, and the desync capture shows the host
-executing a data block as commands (L52), with the label write exonerated (L53) and the freeze
-classified as a non-advancing recovery loop (L54). The remaining known visual failures are the
-black Xevious panel, the black race-selection background video and the black FMVs; the video
-surface is sampled as a `framebuffer_storage` texture and was never written, and it read `0xff`
-because a Metal image that was never rendered into is not zeroed — the OpenGL reference clears a
-reused image and Metal did not, which is now fixed but unverified. The black rectangle on the
-title screen is a separate symptom: the texture it samples is opaque white in the guest and
-converts byte-identically, so that blackness is in the shading or the ROP. `INVESTIGATION-2026-10-22.md`
-holds the datapoints.
+**The state.** The backend builds, boots, renders the guest frame upright, and reaches the race. Run 6
+(2026-10-24) closed the large visual defects: the intro FMV picture, road, car bodies with liveries,
+guardrails, bridge, sky, HUD and the Xevious mini-game panel all render, after `capture_front_face`
+stopped inverting the guest's winding a second time (L116, DEVIATIONS-DRAW D5, **device-confirmed**).
+What is left visually is the colour the video program computes (FMV flicker/black patches, L110
+invalidated by L116 and to be re-validated) and the L99/L105 car-probe placement. Runs C and D
+(2026-10-25) quit in the known black title FMV (L12); run D repeated the boot stall. Run K
+(2026-10-26) named the label half: the release is submitted, but the acquire read the pre-release
+word and skipped the wait (L135); the per-page import (L137) fixed the boot handshake, and the
+setting now selects the label path again (L139). **The L138 freeze is the guest's park area
+(L140), fixed in the tree:** the parser followed the guest's late link correctly and then refused
+to read the park's first NOP because it had given the target a strict frontier. **Run T then named
+the recycle half (L145):** the boot handover parked at `A+0x9d4` with `word=0x30` because GET had
+already acknowledged the prefetched block end, so the guest reused A while the parser spent 188 ms
+inside it on the label acquire. `sync_get()` now publishes the executed position, `cellGcmCallback`
+writes the jump before PUT, the L141/L144 publish-sample layer is deleted, and the frontier applies
+in fast mode as well. **Run U confirmed L145 on device:** the live link at `A+0x9d4`, 2,892
+cross-buffer handovers, no `Dead FIFO`, no desync. The run reached gameplay and the visual defects
+of §7.1–§7.3 are unchanged, so they are not FIFO symptoms. The completion-event wait (SY14)
+remains unmeasured.
+
+The FIFO desync is **no longer parked at the user's request**. It is now one class with an exact
+proof — a guest *data* word read as a command header, always exactly `0x39C` after the last jump,
+reported by the malformed-command branch and replayed by recovery until `Dead FIFO` (L117–L121,
+`INVESTIGATION-2026-10-22.md` §10.11). The 2026-10-25 run (L122–L131, §10.12–§10.13) excluded the
+two boundary events that were left: there is no phase slip and no jump past PUT in a whole 65 s run.
+It also measured the producer: two command buffers of at least 136 KB at `0xcb0000` and `0x10a0000`, with `put`
+alternating between them at the same offset. What fails is the event that layout creates: the app
+moves `put` to the other buffer while the parser waits on it (50 times in 6 idle seconds), and in
+the failing frame the chunk ended with a link into the other buffer `0x2B0C` past its published end
+(L125–L127). The probes could not see that link because every test in them is numeric and the
+buffer being read has the lower address (L130). Vulkan and OpenGL write the label GPU-side; Metal
+drained the GPU on the RSX thread, which is why the race is reachable here (L129).
+
+**The label write is on the GPU only when the setting is on, and the acquire then waits for it
+(L131/L134/L135/L139, §10.13/§10.16).** The default is the CPU host store (`L139`): the word is
+written at the release and the FIFO reader never waits, which is what VK and GL do. On the GPU
+path, `release_GCM_label` stages the guest word and emits one compute-encoder `copyFromBuffer` per
+batch at the next encoder boundary, under one queue-scope barrier, so the write is ordered after
+the work ahead of it and never before it. The old drain survives only as the fallback for a label
+outside the guest window. **Runs C/D found one hole:** the batch was committed only from
+`on_semaphore_acquire_wait`, which this guest never calls — the profile has zero
+`sync/semaphore waits`. The task parks in `run_FIFO`/`FIFO_EMPTY` instead of the `cpu_wait` path,
+the staged writes were never submitted, and the producer stayed at `0xcb09d4`. The 2 GPU latches in
+run C were staging events, not visible writes. VK submits the label in its own secondary command
+buffer immediately (`VKGSRender.cpp:1744–1759`); GL hands it to the host DMA writer
+(`GLGSRender.cpp:1445–1457`). `release_GCM_label` now commits the back-end batch at the release,
+without waiting. **Run K found the second hole:** the release is submitted, but the adjacent
+acquire reads the old guest word before the GPU copy and returns through `sema == arg` (L135).
+`semaphore_acquire` now calls the backend `sync_label(address)`; the Metal recorder keeps the label
+addresses of each command buffer, commits the buffer that carries the write, and waits only for
+that slot's completion event (SY14). No acquire on the address means no wait. The next run must
+show the wait, the acquire re-reading a non-zero word, and the producer's next chunk; the race's
+larger label count remains the wider confirmation.
+
+**The FIFO frontier fix is written and tested (L132, §10.14).** `FIFO_control` now tracks the
+published end of each command stream instead of treating the single guest `put` as the end of the
+buffer being read. A word at the frontier is consumed only if it is a link (jump/call/return); a
+method packet is dispatched only when all of it is published; and the cache is capped at the
+frontier, which removes the word-at-PUT over-read that produced the 2:36.620 failure. The boot
+stream stays linear. Seven new unit cases model the boot advance, the mid-fill PUT, the stale-tail
+park, the call/return path and the frontier-at-PUT link; the full suite is 511/511. **Run C found a
+hole in the equality path (L133, §10.15):** the old `put == addr` guard returned `FIFO_EMPTY`
+before the frontier rule, so the healthy link case could never consume the link at PUT. The equality
+now takes the frontier path. **Run D then showed the run-C stall was not that path:** the word at
+the park was `0x0`, so the parser was correctly waiting; the producer was stalled by the label
+handshake. **Run K showed the release is submitted but the acquire skips its wait (L135).** The
+next run must show the label wait, the acquire re-reading the release, the link jump and the next
+chunk.
+
+**The build and run loop.** `ninja rpcs3_emu` compiles the Metal work (no Qt, ~1 min);
+`ninja rpcs3` links the app bundle and is only needed before a run. Diagnostics must be excised
+before a commit; the variant switches get their own archive suffix (`-noalpha`, `-forcefp`).
 
 **The first moves, in order.**
 
-1. Read `METAL4-TODO.md`, then `INVESTIGATION-2026-10-22.md` for the datapoints and
-   `LOG-FINDINGS.md` for L36–L55. The priority table is P0.5 label confirmation, P1 async shader
-   acceptance, P2 shader interpreter. P0.5 is **reopened**: the desync is not closed.
-2. **Run the `RR7-FREEZE-FORENSICS.md` §8 companion control: the identical scene on Vulkan.** One
-   config line (`Renderer: Vulkan` in `config_BLUS30001.yml`) and one run. If Vulkan freezes
-   identically, the fault is in the shared FIFO or in the bulk-write argument accounting and Metal
-   inherits it; if only Metal freezes, the fault is in the Metal backend's FIFO interaction. No
-   other measurement reduces the search space this much.
-3. Read the new capture when it fires. It prints the offending word's method index and whether the
-   method table knows it, the guest address of the GET, the last label write and the last eight
-   dispatched commands. The bulk commands are the only ones that carry a variable-length data
-   block: `NV4097_SET_TRANSFORM_PROGRAM` and `NV4097_SET_TRANSFORM_CONSTANT`
-   (`nv4097.cpp:130`, `:144`, `:168`, `:202`, `:244`).
-4. Re-check the level-2 and level-3 behaviour. R7 (level 3) produced 399 frames and **0 draws**
-   while R8 (level 2, the same binary) reached the race loading screen. The changed texture-cache
-   code did not execute in R7 (`texture/create` 0), so the difference is the probe level or the
-   intermittent hang landing earlier; it is not explained yet.
-5. The interpreter is implemented and the CPU tests are green (LLD §21). What remains is one
-   approved run to confirm the default `async_with_interpreter` path reaches
-   `draw/skipped pipeline pending == 0` (seen in the 20:55 run at real-pipeline coverage) and the
-   `interpreter_only` path, and to re-check the visual failures above (LLD §15.3).
-6. Do not add a startup precompile bar. The Vulkan bar is interpreter variants, not game-shader
-   precompilation (P2); Metal now has an asynchronous warm preload instead.
-7. Make the label release a **pipelined fence** instead of a full `wait_idle`. It costs 57.9 ms
-   a frame in an 82.8 ms frame while the GPU is busy 8.68 ms of it. The native form is a GPU-side
-   label write into shared memory, which unified memory allows, and Vulkan's form is
-   `vkCmdUpdateBuffer` on the GPU timeline.
-8. Excise the diagnostics, then commit as `hsaka -1.0` and push `origin/metal4`. The new
-   diagnostic code carries `TODO(excise)` markers: the `on_fifo_desync` hook and the capture
-   (`RSXThread.h`, `RSXThread.cpp`, `RSXFIFO.cpp`, `MTLGSRender.cpp`), the label record
-   (`nv47_sync.hpp`) and the new texture probes (`MTLTextureCache.h`, `MTLTextureCache.cpp`).
+1. Read `METAL4-TODO.md`, then `INVESTIGATION-2026-10-22.md` §10.12 and `LOG-FINDINGS.md` §1.2.
+   Nothing else is more current.
+2. One approved run with `MTL_PROBE=2`, default config (host-store labels). The label probe is now
+   confirmatory: run P already showed `guest labels are written by the CPU (host store)` with no
+   `sync_label`, and still parked at `0xcb6264`. What this run must show is the completion-event
+   wait (SY14): `recorder/begin frame` and `recorder/re-enter slot` near zero in steady state, no
+   `did not complete in 10 s` line, and no `recorder/wait idle` spike that the old condition
+   variable did not have. Then, once it reaches the race, the L138 probe again: `park put[*]` prints
+   the frontier word at each of the last 8 PUT moves, and `park word change` prints any change under
+   the parked parser. Run P's `old_word=0x2062000` is a link published 17 ms after the PUT move,
+   and the jump it carries is the guest's park area (L140); the fix is in the tree.
+
+   The FIFO handover is the health check: the end of the boot chunk, `jump cross-buffer
+   from=0xcb09d4 target=0x10a0000` within milliseconds of the `CALL 0`, then continuous A/B chunks.
+   A mid-fill `PUT move` with `parked=1` and no `desync` is healthy; `resume at former PUT` followed
+   by `0x10000` is the old failure and must not appear. `NOP run`, `jump cross-buffer` and the
+   32-entry jump chain are still logged. **The black FMV is L12:** wait through it (or skip it) and
+   judge the parser on the 3D scene and the race. In run B the desync arrived after the title video
+   closed, at 2:36. Read `~/Library/Caches/rpcs3/RPCS3.log` in time order and take the first
+   `FIFO diag:` line before each `FIFO error`.
+
+   F7 is decided and in the tree (L139): `MTLDevice::fill_backend_config` honours
+   `g_cfg.video.host_label_synchronization`, off by default, so the release is a CPU store and the
+   FIFO reader never waits, exactly as VK's default. The GPU write with the per-page import runs
+   only when the setting is on, and its acquire now waits on the commit's completion event (SY14).
+   A second run with the setting on is the A/B for that path; it is not needed to judge L138.
+
+   Run R (L141 in the tree) passed the old boot freeze and ran to 1:18, then parked at `0x10b1b78`
+   while PUT was in the other buffer and desynced at 1:22.24 (L142). The redirect is the fix for that
+   park. The next run must reach the same movie/level transition and either consume the abandoned
+   chunk without a park or log `FIFO diag: redirect from=… target=…`. A redirect at the transition
+   is healthy; `park word change` followed by `CALL found inside a subroutine` is the old failure.
+3. Once the desync event is named — or confirmed absent — the visual remainder is the video
+   program's colour (L110 must be re-validated, it was invalidated by L116) and the L99/L105
+   car-probe placement.
+4. Do not rebuild the depth probe as it was; the readback never produced depth (L112).
+5. Excise the diagnostics and commit only after a fix is confirmed. The winding fix is
+   device-confirmed and is the next commit.
 
 **The context that saves a day.**
 
@@ -113,14 +274,22 @@ holds the datapoints.
 | the present architecture is correct | drawable is the present image, output tier blits into it, layer presents; KK does the same |
 | the freeze is fixed | a flip opens the frame and presents; acquire does not submit; feedback wait is bounded |
 | the cube abort is fixed | `make_descriptor` sets `arrayLength = 1`; the six RSX cube faces are addressed through the upload slice. |
-| the race-start fatal is fixed in code | the probe-2 log dies after 21 FIFO desync recoveries; the label value `0x10000` is read as the next command. `MTLGSRender::release_GCM_label` now drains the queue before the CPU writes. **The 20:55 run is clean over 2:19 with no `Dead FIFO` (L25).** |
-| the race-start fatal is **open again** | the desync reproduces in every run since, **including with no probe** (R4). The capture shows the host executing a data block as commands, not a bad label write (L52, L53), and the freeze is a recovery loop that never advances (L54). The open question is the shared FIFO versus the Metal backend, which the Vulkan control decides. |
-| the black video is a data-word problem | the video surface at `0xc0880000` is sampled as a `framebuffer_storage` texture (223 binds) and read `0xff`, so it was never written; the guest's `NV3089` blit had clip, output and scale all zero while the same module's context registers were set. The OpenGL reference clears a reused image and Metal did not (T1, now fixed, unverified). |
-| the black rectangle's texture is correct | the 8×8 DXT45 it samples is opaque white in the guest and converts byte-identically, and the draw's write mask is `0xf` into an A8R8G8B8 target. The blackness is in the shading or the ROP, not the upload. |
+| the race-start fatal is fixed in code | the probe-2 log dies after 21 FIFO desync recoveries; the label value `0x10000` is read as the next command. `MTLGSRender::release_GCM_label` wrote the label on the CPU after a drain; it now writes it on the GPU, so the RSX thread never waits for a label (L131). **The 20:55 run is clean over 2:19 with no `Dead FIFO` (L25).** |
+| the FIFO desync is **root-caused and fixed in code** | a guest data word read as a command header, always `0x39C` after the last jump, via the malformed branch; recovery replays the same word until `Dead FIFO` (L117–L121). The 2026-10-25 runs excluded boundary drift and named the trigger: the producer moves `put` to the other buffer under a waiting parser, and the word at the parked position is not written for this pass. The cache also served the word **at** PUT (2:36.620). The per-stream frontier, exact cache bound and packet atomicity are in the tree (L132). Run C showed that the old `put == addr` guard could block the healthy link at PUT; the equality now takes the frontier path (L133). Run D's park word was `0x0`, so the boot stall was not the link but the unsubmitted label (L134). One run after the label fix. |
+| the guest's FIFO has **two buffers** | `0xcb0000` and `0x10a0000`, `0x3F0000` apart, each at least 136 KB; `put` alternates between them, normally naming the buffer the parser is *not* reading (L122, L123). |
+| the two-buffer switch is a **handshake, not a fixed jump** | the guest publishes a chunk and then waits for GET to reach its end before it publishes the other buffer. The link at the chunk end is written late or not at all. When the parser is parked on that end and PUT names the other buffer, it must leave the chunk and read the published buffer from its base, not wait for a link (L142). Run R waited 15 s at `0x10b1b78` and desynced at 1:22.24. |
+| the NOP path is **bounded now** | the frontier check runs before every fetch, so a count-0 header can no longer walk through unwritten zero memory; the old path reached the bad word through `0x00000000` at `0xcbf57c` (L127, L132). |
+| the probes were **blind to the link** | read-ahead, jump-past-PUT and rewind are all numeric against `put`, and here the buffer being read has the lower address, so a jump from A down into B satisfies `target <= put`. The discriminator is a slab test, `(addr ^ put) & ~0xffff`, logged as `jump cross-buffer` (L130). |
+| Metal parked the parser **because of the label drain** | VK/GL write the label GPU-side and keep work in flight; Metal drained the GPU on the RSX thread, which held the RSX at the GPU's rate. The park/catch-up cadence itself is normal on all three backends; the drain is why the race is reachable here, and L131 removes it (L129). |
+| the boot stall was **the unsubmitted label** | `release_GCM_label` staged the back-end write in the open frame, and the batch was committed only from `on_semaphore_acquire_wait`; this guest parks in `run_FIFO` and never calls it, so the write never reached the GPU and the producer stayed at `0xcb09d4` (L134). VK's immediate secondary CB and GL's host DMA writer both submit without a frame commit. The fix commits the back-end batch at the release. |
+| the remaining gaps vs VK/GL are **enumerated and ordered** | `GAP-PLAN.md` (2026-10-25) re-reads every deviation row in the code: D1–D3, D5–D7, D9, S1–S9/S11–S13, TX3/TX7/TX9, SY1–SY5/SY9 are fixed and the audit rows were stale. The open work is DR10 (pass per clause), SY10, VX4, SF14, TX10/TX11/TX20, F12, E7, the parked D4 and the capture-gated SY7/SY8/SY11. |
+| `0x00010000` **is** non-method | `0x00010000 & 0xa0030003 = 0x10000`; L37's older claim was wrong. It is the argument of `reg 0x75C`, not a header (L37, L84, L118). |
+| the parser now **stops at the published end** | `fetch_u32` refuses `addr >= frontier`; the word at the frontier is consumed only as a flow-control link, and the method packet must be fully published. This includes `addr == put`, where the link is the one published exception (L132, L133). |
+| the black video is **not** an upload or format problem | the three B8 planes carry picture (L95), `B8 → R8Unorm` matches Vulkan (L96), and the video draw's state is complete (L101). With the alpha test compiled out it still leaves the target at `(0,0,0,0)` (L110), so the remaining split is "wrote black" versus "never ran" (L111, L114). |
+| the black rectangle's texture is correct | the 8×8 DXT45 it samples is opaque white in the guest and converts byte-identically, and the write mask is `0xf` into an A8R8G8B8 target. The blackness is in the shading or the ROP, not the upload. |
 | the async link crash is fixed | Metal 4's completion-handler `newRenderPipelineState` corrupts the pipeline data set serializer (L18). Links now run through one synchronous worker; the 10:21 scan reports 66/66 ready, 0 `MDB_*`, 0 failures. All 97 links in the 20:55 run are asynchronous and none fails (L25). |
-| the probe-2 fatal | `0:05:04.547`: `Dead FIFO commands queue state has been detected!`; 21 desyncs from `0:05:04.381`; the PPU main thread then waits in `sys_semaphore_wait`. Not reproduced in the 20:55 run. |
-| the probe-5 fatal | `0:00:52.766`: the same `Dead FIFO`; the same command words (`0x2fd53cc`, then `0x3f800000`) repeat; the 105-second capture window never arms. The desync is intermittent, not closed by L13. |
-| the black video is not proven core | the earlier “no picture, shared HLE” reading is obsolete; the 20:55 run decodes frames and presents black, with 13 % of the log in the PAMF/vdec path and no draw error (L32) |
+| the desync history | the `Dead FIFO` of the 20:55/22:05 runs is the L52–L54 mechanism, intermittent; the 2026-10-22 runs reproduce it with no probe (L36). Run 2 adds one capture at 53.451 s (L115). |
+| the decode is not the video's problem | frames decode and no draw error is raised; the log's PAMF/vdec traffic is real work, not a stall (L32, L95). |
 | the texture blame is DXT | DXT45 396,544 + DXT1 171,588 + DXT23 8,530 of 708 k bound format instances, against A8R8G8B8 129,696 and B8 2,852 (L28) |
 | TX9 is built, not proven | typeless copies stage through a shared buffer; the RR7 path has not been confirmed to use it |
 | the diagnostics are switchable | `MTL_PROBE` levels 1–5; a probe run writes its bulk text to `$TMPDIR/rpcs3-mtl-probe.log`; `MTL_DEBUG_LOGS=0` / `MTL_PERF_ENABLED=0` remove all of it |
@@ -425,50 +594,44 @@ without texture) are deferred with a recorded reason. DR5 (winding) needs an on-
 
 ## 7. The pending work
 
-### 7.1 The descriptor abort (blocker)
+### 7.1 The black video and FMV (current blocker)
 
-The 22:05 run aborted in `rsx::thread` with SIGABRT. The stack is `validateWithDevice` →
-`heapTextureSizeAndAlignWithDescriptor` → `new_texture` → `create_new_texture` →
-`upload_image_from_cpu` → `upload_texture` → `load_texture_env` → `end`. This is the L1 class again.
-The last log line is a normalized cube descriptor at `0:03:35.278933`, but the crash may be a later
-descriptor that bypassed normalization.
+The hypothesis chain is closed down to one binary question. Decode and upload are faithful (L88,
+L94, L95); the B8 view swizzle matches Vulkan (L96); the draw's state is complete and the probe is
+on the video area (L101); the alpha test is compiled out and changes nothing (L110). For draw 12262
+in run 2 the target stays at exactly `(0,0,0,0)` while all three planes hold picture.
 
-Do:
+Two outcomes remain, and colour cannot separate them:
 
-1. Find every caller of `new_texture` and identify which ones bypass `normalize_texture_extent`.
-2. Validate every field at the allocation choke point: type, format, width, height, depth, mips,
-   sample count, array length, storage mode, usage, swizzle, compression.
-3. Log the full descriptor before the Metal call, with the guest address and the upload context.
-4. Clamp or reject with a safe fallback, and unit-test every illegal case.
-5. Re-run one bounded RR7 session at `MTL_PROBE=2` after the fix. Do not run without approval.
+1. **The fragment ran and wrote zero** — the sampler returns zero (view, coordinate transform,
+   binding) or the YUV math/sRGB/channel remap collapses the value.
+2. **No fragment of that program ran** — raster/clip/attachment path, even though the state fields
+   read correctly.
+
+`MTL_PROBE_FORCE_FP=<id>` (§10.7) decides it in one run by writing magenta after every ROP stage.
+If magenta appears, Test B is a sample-only output (or `MTL_PROBE_REPLACE_TEXTURES`, which answers
+the coarse question but cannot isolate one draw inside a frame, L91).
+
+Do not re-derive the depth witness: the readback returned garbage for both depth formats and was
+removed (L112). If a depth witness is ever needed again, it needs a working readback first.
 
 ### 7.2 The black Xevious mini-game
 
-The panel is the Xevious arcade window on the startup/loading screen. Input and audio work, so the
-guest logic runs and the failure is in the render or sample path. The panel may be a separate RTT
-sampled by a quad, or a surface presented directly. Determine which, then check:
+The panel is the Xevious window on the startup screen. Input and audio work, so the guest runs. It
+may be an RTT sampled by a quad or a presented surface. With L111/L114 as the method, the order is:
+does the panel's own draw write (forced output), then is its RTT cleared or overwritten before the
+sample, then is the sampled surface invalidated when the guest writes it. The 8×8 DXT45 rectangle
+is already excluded as a texture-content problem (L42).
 
-1. Is the draw refused by `should_skip_draw`? L3 now reports all four predicates.
-2. Is the RTT cleared black after it is drawn?
-3. Is it resolved and written back before the sample?
-4. Is the sampled texture invalidated when the guest writes it?
-5. Is the surface format/layout/permutation correct at 16 bits?
-6. Is there a barrier and a residency entry between the producer and the sampler?
+### 7.3 The black car
 
-### 7.3 The black video and FMV
+The car is a correct **silhouette** (L98), so geometry, cull and depth accept it; the colour is lost
+in the fragment inputs or their math. The paint texture is one repeated BC1 block (L97), so the
+question is whether that colour is what the shader expects, not whether the upload is right.
 
-The earlier reading that this is shared HLE code with no Metal path is not proven. This run decodes
-frames and presents black. Trace `cellVdec` into guest buffers, then the RSX sample path:
-
-1. `cellVdecGetPictureExt` writes through `outBuff.get_ptr()`; the pitch alignment is a TODO.
-2. Check the guest texture format, component order, swizzle, sRGB and row pitch at 1280×720.
-3. Check `on_access_violation` and `invalidate_range` for a raw CPU write.
-4. Check whether the path uses a typeless copy, an MSAA source, a scaled copy or a CPU upload.
-5. Check TX9's staged copy and its blit-to-blit barrier.
-6. Check the barrier and residency between the decode write and the fragment sample.
-
-The race-selection background and the FMV can share a cause. Do not fix one without checking the
-other.
+The car-select probes of run 1 are on background geometry (L105), so no existing probe touches the
+car body. L99 must be settled first: the presented surface holds three panels at x = 0/427/853 while
+the F12 screenshot holds one, so the probe coordinates depend on which layout the screen shows.
 
 ### 7.4 The open TODO rows
 
@@ -525,14 +688,31 @@ hit rate, per-draw CPU time, hazards per frame and a Vulkan differential.
 
 ### 7.10 Hygiene and the commit
 
+**Uncommitted today** (all in the working tree): the five correctness fixes of
+`INVESTIGATION-2026-10-22.md` §10.2 (framebuffer prep in `begin()`, framebuffer fast path, binder
+zero write, FIFO retry rewind, FIFO cache store), the probe families below, and the run-2
+diagnostics (`MTL_PROBE_NO_ALPHA_TEST`, `MTL_PROBE_FORCE_FP`, their archive suffixes). Nothing is
+committed until a fix is confirmed.
+
 1. Excise every `TODO(excise)` site, `MTLInstrumentation.h`, the acquire-stall probe and the
    main-thread heartbeat. The markers span `MTLCommandRecorder.cpp`, `MTLDevice.cpp`,
+   `MTLFragmentProgram.cpp`, `MTLProgramPipeline.cpp`, `MTLGSRender.cpp`,
    `MTLInstrumentation.h`, `MTLMetalLayer.h`, `MTLMetalLayer.mm` and `MTLPresenter.cpp`.
 2. Run the tests and the linter after excision.
 3. Commit as `hsaka -1.0 <340957754+hsakaminusone@users.noreply.github.com>`, author and committer.
 4. Push `origin/metal4`. Do not touch Vulkan or OpenGL.
 5. Split the commits where a test exists: present/flip, F24, barrier/copy ordering, frontend exit,
    shader preload, batch 1–3, excision.
+
+### 7.11 The rear window and menu text (run U)
+
+The user reports both defects unchanged after the FIFO fix, so they are not FIFO symptoms. L146
+(the rear window) has no capture yet; the first candidate is a content-transfer hazard on the
+resolve or copy that produces the window (the unconfirmed `MTLSurface.cpp` barrier fix). L147
+(the menu text) has two text paths: the title-screen line is correct and the menu line drops or
+substitutes glyphs. A stale atlas would still show glyphs; a null or invalid bind shows black, so
+the first measurement is the atlas bind at the failing menu draw. Both need a level-5 capture at
+the car/menu/rear-window scene.
 
 ---
 
@@ -598,14 +778,16 @@ logic-op and a redirected-depth program and compile the result.
 
 ## 11. How to continue
 
-1. Read `METAL4-TODO.md` and this file.
-2. Read `SUBAGENT-RR7-2026-10-20.md` when it lands; then fix the abort at the allocation choke
-   point.
-3. Ask for one bounded RR7 run at `MTL_PROBE=2` and a Vulkan/KosmicKrisp reference run. Copy the
-   log before each run.
-4. Fix the black paths from evidence: panel surface, video upload, invalidation, barrier, residency.
-5. Work the open TODO rows by severity; do not re-open fixed rows.
-6. Keep the build/test loop, the probe rule and the one-instance rule.
+1. Read `NEXT-AGENT-PROMPT.md` (the full continuation brief), then `METAL4-TODO.md` and this
+   file; the datapoints are in `INVESTIGATION-2026-10-22.md` §10.6–§10.7 and the findings in
+   `LOG-FINDINGS.md` §1.1.
+2. Build the loop: `ninja rpcs3_emu` for the Metal work, `ninja rpcs3` only before a launch.
+3. One approved run with `MTL_PROBE_FORCE_FP=100 MTL_PROBE=5` and the run-2 capture env. Copy
+   `/tmp/mtl4-forcefp*.log` and `/tmp/mtl4-dump/` before the next run.
+4. Read the video patch: magenta ⇒ sampling/view (Test B); clear ⇒ raster/pass (L114, §10.7).
+5. Keep the probe rule (bounded windows, ≤64 draws per window), the archive-suffix rule for any
+   switch that changes a shader, and the one-instance rule.
+6. Leave the FIFO desync parked until the black picture is closed.
 7. Excise, test, commit as `hsaka -1.0`, push `origin/metal4`.
 
 ---
