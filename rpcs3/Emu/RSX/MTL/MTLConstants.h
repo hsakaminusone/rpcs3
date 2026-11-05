@@ -5,6 +5,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "util/asm.hpp"
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -194,6 +196,7 @@ namespace mtl
 				m_buffer = next;
 				m_capacity = capacity;
 				m_count = 0;
+				++m_generation;
 			}
 
 			T* block = &static_cast<T*>(m_buffer->contents())[m_count];
@@ -206,9 +209,21 @@ namespace mtl
 		bool valid() const { return m_buffer != nullptr; }
 		MTL::GPUAddress address() const { return m_buffer ? m_buffer->gpuAddress() : 0; }
 
+		// TODO(excise): level 5; the raw ring, so a screenshot can record the exact
+		// bytes the GPU read for the frame it photographed.  `used` is in elements.
+		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
+		u64 used() const { return m_count; }
+		u64 capacity() const { return m_capacity; }
+		const std::vector<MTL::Buffer*>& retired() const { return m_retired; }
+
 		// The address of one block.  A block the shader reads at offset zero (a
 		// substituted push constant) is bound here, not at the ring base.
 		MTL::GPUAddress address_of(u32 index) const { return m_buffer ? m_buffer->gpuAddress() + (index * sizeof(T)) : 0; }
+
+		// TODO(excise): level 5; how many times the ring replaced its buffer.  A
+		// generation that changed inside one frame means the earlier draws read a
+		// retired buffer, so the frame snapshot must carry that generation too.
+		u32 generation() const { return m_generation; }
 
 	private:
 		resource_manager* m_resources = nullptr;
@@ -217,7 +232,33 @@ namespace mtl
 		u64 m_capacity = 0;
 		u64 m_count = 0;
 		u32 m_last = 0;
+		u32 m_generation = 0;
 	};
+
+	// The arithmetic of a growable byte ring, kept free of Metal types so a unit
+	// test can exercise it.  A block starts on an alignment boundary and consumes
+	// its aligned size, so every later block stays aligned.  A block larger than
+	// the buffer asks for a replacement buffer that holds it.
+	struct ring_block
+	{
+		u64 offset;
+		u64 end;
+		u64 capacity;
+		bool grow;
+	};
+
+	inline ring_block allocate_ring_block(u64 count, u64 size, u64 capacity, u64 alignment)
+	{
+		ensure(alignment != 0 && (alignment & (alignment - 1)) == 0);
+		const u64 aligned_size = utils::align(size, alignment);
+
+		if (count <= capacity && aligned_size <= capacity - count)
+		{
+			return { count, count + aligned_size, capacity, false };
+		}
+
+		return { 0, aligned_size, std::max(capacity, aligned_size), true };
+	}
 
 	// One vertex stream.  The shader byte-addresses the stream, so it is bound as an
 	// R8Uint texture buffer and read with `texture_buffer<uint>`: one texel is one
@@ -239,6 +280,13 @@ namespace mtl
 		bool valid() const { return m_buffer != nullptr && m_view != nullptr; }
 		MTL::ResourceID resource_id() const { return m_view ? m_view->gpuResourceID() : MTL::ResourceID{}; }
 
+		// TODO(excise): level 5; see block_ring::data.
+		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
+		u64 used() const { return m_count; }
+		u64 capacity() const { return m_capacity; }
+		const std::vector<MTL::Buffer*>& retired() const { return m_retired; }
+		u32 generation() const { return m_generation; }
+
 	private:
 		resource_manager* m_resources = nullptr;
 		MTL::Buffer* m_buffer = nullptr;
@@ -247,6 +295,7 @@ namespace mtl
 		std::vector<MTL::Texture*> m_retired_views;
 		u64 m_capacity = 0;
 		u64 m_count = 0;
+		u32 m_generation = 0;
 	};
 
 	// A per-frame ring of raw bytes, for the index buffer.  The index buffer is a
@@ -260,11 +309,20 @@ namespace mtl
 		void begin_frame();
 
 		// Reserve `size` bytes and return the byte offset.  Null when the ring
-		// cannot grow; the caller skips the draw.
-		void* alloc(u64 size, u32& offset);
+		// cannot grow; the caller skips the draw.  The interpreter's instruction
+		// blocks need a stronger alignment than the index data.
+		void* alloc(u64 size, u32& offset, u64 alignment = 4);
 
 		bool valid() const { return m_buffer != nullptr; }
 		MTL::GPUAddress address() const { return m_buffer ? m_buffer->gpuAddress() : 0; }
+		MTL::GPUAddress address_of(u32 offset) const { return address() + offset; }
+
+		// TODO(excise): level 5; see block_ring::data.
+		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
+		u64 used() const { return m_count; }
+		u64 capacity() const { return m_capacity; }
+		const std::vector<MTL::Buffer*>& retired() const { return m_retired; }
+		u32 generation() const { return m_generation; }
 
 	private:
 		resource_manager* m_resources = nullptr;
@@ -272,6 +330,137 @@ namespace mtl
 		std::vector<MTL::Buffer*> m_retired;
 		u64 m_capacity = 0;
 		u64 m_count = 0;
+		u32 m_generation = 0;
+	};
+
+	// TODO(excise): level 5; one subdraw as the GPU received it.  The manifest
+	// alone cannot attribute a collapsed glyph or a black decal: the draw
+	// parameters say where the bytes are, but not what the index range, the
+	// pipeline, the vertex descriptor, the sampler or the raster state were.  This
+	// record is written at encode time, so it is the state the command buffer
+	// captured, not a reconstruction at flip time.
+	struct draw_record
+	{
+		u32 global_id = 0;
+		u32 frame_id = 0;
+		u32 subdraw = 0;
+		u32 command = 0;
+		u32 primitive = 0;
+		u32 flags = 0;              // bit0 indexed, bit1 rebase, bit2 interpreter, bit3 volatile
+		u32 index_type = 0;
+		u32 index_count = 0;
+		u32 index_offset = 0;
+		u32 index_length = 0;
+		u32 vertex_count = 0;
+		u32 vertex_base = 0;
+		u32 vertex_index_offset = 0;
+		u32 vertex_base_index = 0;
+		u32 min_index = 0;
+		u32 max_index = 0;
+		u32 persistent_base = 0;
+		u32 volatile_base = 0;
+		u32 persistent_bytes = 0;
+		u32 volatile_bytes = 0;
+		u32 vp_id = 0;
+		u32 fp_id = 0;
+		u32 pipeline_key = 0;
+		u64 pipeline_state = 0;
+		u32 vertex_desc_hash = 0;
+		u32 xform_offset = 0;
+		u32 vs_context_offset = 0;
+		u32 fs_context_offset = 0;
+		u32 fs_constants_offset = 0;
+		u32 fs_texture_base_index = 0;
+		u32 fs_stipple_offset = 0;
+		u32 blend_values_index = 0;
+		u32 color_target[4] = {};
+		u32 color_format = 0;
+		u32 depth_target = 0;
+		u32 depth_format = 0;
+		u32 width = 0;
+		u32 height = 0;
+		u32 scissor[4] = {};
+		f32 viewport[4] = {};
+		u32 blend_hash = 0;
+		u32 depth_hash = 0;
+		u32 raster_hash = 0;
+		s32 attrib_desc[16] = {};
+		s32 attrib_offset[16] = {};
+		u32 tex_addr[16] = {};
+		u32 tex_format[16] = {};
+		u32 tex_width[16] = {};
+		u32 tex_height[16] = {};
+		u32 tex_sampler_hash[16] = {};
+		// The sampler state as the RSX registers hold it.  A smear is a filter,
+		// wrap or LOD defect, and a ResourceID hash cannot tell which: these are
+		// the values the Metal sampler was built from.
+		u32 tex_sampler_flags[16] = {};  // min filter | mag filter << 3 | wrap s/t/r << 5 | aniso << 14
+		f32 tex_lod[16][3] = {};         // min lod, max lod, bias
+		u32 tex_mip[16] = {};
+		u32 tex_pitch[16] = {};
+		u32 tex_dimension[16] = {};
+		u32 tex_format_ex[16] = {};
+		u32 hash_persistent = 0;
+		u32 hash_volatile = 0;
+		u32 hash_index = 0;
+		u32 hash_xform = 0;
+		u32 hash_fragment_constants = 0;
+		u32 hash_sampler = 0;
+	};
+	static_assert(sizeof(draw_record) == 1200, "the capture analysis decodes this layout by offset");
+
+	// TODO(excise): level 5; one frame's CPU rings, copied out while the frame is
+	// still current.  A frame's rings are reset at the next begin_frame, and the
+	// screenshot is written a frame or more after the key press, so the frame the
+	// user was looking at is already gone by the time the capture runs.  Keeping a
+	// few frames in memory is what lets a capture reach back to it.
+	struct frame_snapshot
+	{
+		// The ring set the shader can read.  The first six are the streams; the
+		// rest are the typed block rings.  A glyph's position is decided by the
+		// transform constants, which the first capture omitted, so every ring the
+		// shader reads is here.
+		std::vector<u8> persistent;
+		std::vector<u8> volatile_stream;
+		std::vector<u8> index;
+		std::vector<u8> instructions;
+		std::vector<u8> overlay_vertices;
+		std::vector<u8> overlay_uniforms;
+		std::vector<u8> vertex_context;
+		std::vector<u8> draw_parameters;
+		std::vector<u8> fragment_context;
+		std::vector<u8> sampler_info;
+		std::vector<u8> stipple;
+		std::vector<u8> blend_values;
+		std::vector<u8> fill_values;
+		std::vector<u8> vertex_draw_params;
+		std::vector<u8> fragment_constants;
+		std::vector<u8> transform_constants;
+		std::vector<u8> instancing_constants;
+		std::vector<u8> instancing_lookup;
+
+		// One record per subdraw, in encode order.
+		std::vector<draw_record> draws;
+
+		// The generation of every ring at the flip.  A ring that grew mid-frame
+		// retired the buffer the earlier draws read, so the dump is incomplete
+		// unless the retired generation is written too.
+		static constexpr u32 ring_count = 18;
+		u32 ring_generation[ring_count] = {};
+		u32 grew_mask = 0;
+
+		// The buffers a ring retired inside this frame.  `id` is the ring index
+		// above, so the analysis can pair a draw's generation with the bytes.
+		struct retired_ring
+		{
+			u32 id = 0;
+			std::vector<u8> data;
+		};
+		std::vector<retired_ring> retired;
+
+		u32 present = 0;
+		u32 draw_count = 0;
+		bool valid = false;
 	};
 
 	// Every per-draw ABI buffer, one set per frame slot (HLD-04 §3.3).  The draw
@@ -292,6 +481,7 @@ namespace mtl
 		static constexpr u64 stream_capacity = 8u * 1024u * 1024u;
 		static constexpr u64 volatile_capacity = 2u * 1024u * 1024u;
 		static constexpr u64 index_capacity = 2u * 1024u * 1024u;
+		static constexpr u64 instruction_capacity = 4u * 1024u * 1024u;
 
 		// The overlay passes are not RSX draws: their vertices and their uniform
 		// block are per-frame CPU data with no RSX slot, so they take their own
@@ -314,6 +504,11 @@ namespace mtl
 		vec4_block* alloc_transform_constants() { return m_sets[m_slot].transform_constants.alloc(vertex_constant_count); }
 		vec4_block* alloc_instancing_constants(u32 vec4_count) { return m_sets[m_slot].instancing_constants.alloc(vec4_count); }
 		s32* alloc_instancing_lookup(u32 count) { return m_sets[m_slot].instancing_lookup.alloc(count); }
+
+		// TODO(excise): level 5; the block a draw's offset names, so the per-draw
+		// record can hash the constants the shader actually read.
+		const vec4_block* transform_constants_data() const { return static_cast<const vec4_block*>(m_sets[m_slot].transform_constants.data()); }
+		const vec4_block* fragment_constants_data() const { return static_cast<const vec4_block*>(m_sets[m_slot].fragment_constants.data()); }
 
 		u32 vertex_context_index() const { return m_sets[m_slot].vertex_context.index(); }
 		u32 draw_parameters_index() const { return m_sets[m_slot].draw_parameters.index(); }
@@ -359,12 +554,35 @@ namespace mtl
 		stream_ring& persistent_stream() { return m_streams[m_slot].persistent; }
 		stream_ring& volatile_stream() { return m_streams[m_slot].volatile_stream; }
 		byte_ring& index_ring() { return m_streams[m_slot].index; }
+		byte_ring& instruction_ring() { return m_streams[m_slot].instructions; }
 		byte_ring& overlay_vertex_ring() { return m_streams[m_slot].overlay_vertices; }
 		byte_ring& overlay_uniform_ring() { return m_streams[m_slot].overlay_uniforms; }
 
 		bool valid() const { return m_sets[m_slot].vertex_context.valid(); }
 
+		// TODO(excise): level 5; the frame-ring capture.  A defect confined to a few
+		// vertices (a collapsed glyph quad, a smeared decal) is decided by the bytes
+		// the GPU read: correct bytes with a wrong image is a read hazard, wrong
+		// bytes is an upload fault.  `snapshot_frame` runs on every flip and keeps
+		// the last `history_depth` frames, `begin_dump` writes them when the user
+		// presses the key, and `continue_dump` writes the frames that follow.
+		// Twelve frames is four slot generations: the press lands after the frame
+		// the user saw, so the history has to reach back far enough that a press a
+		// few frames late still carries the defect.
+		static constexpr u32 history_depth = 12;
+
+		// TODO(excise): level 5; one subdraw as the GPU received it.  Written at
+		// encode time, because the ring may grow and the pipeline may be released
+		// before the flip.
+		void record_draw(const draw_record& record);
+
+		void snapshot_frame(u32 present);
+		void begin_dump(u32 index);
+		void continue_dump();
+
 	private:
+		void capture_generations(u32* out) const;
+
 		struct ring_set
 		{
 			block_ring<vertex_context> vertex_context;
@@ -386,6 +604,7 @@ namespace mtl
 			stream_ring persistent;
 			stream_ring volatile_stream;
 			byte_ring index;
+			byte_ring instructions;
 			byte_ring overlay_vertices;
 			byte_ring overlay_uniforms;
 		};
@@ -393,6 +612,22 @@ namespace mtl
 		std::array<ring_set, frame_slot_count> m_sets;
 		std::array<stream_set, frame_slot_count> m_streams;
 		u32 m_slot = 0;
+
+		// TODO(excise): level 5; the per-draw records of the open frame.  They are
+		// cleared with the rings, so a slot's records live exactly as long as the
+		// bytes they describe.
+		std::array<std::vector<draw_record>, frame_slot_count> m_draws;
+
+		// TODO(excise): level 5; the generation of every ring at begin_frame, so
+		// `grew_mask` names the rings that replaced their buffer inside the frame
+		// instead of every ring that ever grew.
+		std::array<std::array<u32, frame_snapshot::ring_count>, frame_slot_count> m_begin_generation{};
+
+		// TODO(excise): level 5; the frame-ring capture, oldest first.
+		std::array<frame_snapshot, history_depth> m_history;
+		u32 m_history_pos = 0;
+		u32 m_dump_burst = 0;
+		u32 m_dump_index = 0;
 	};
 }
 

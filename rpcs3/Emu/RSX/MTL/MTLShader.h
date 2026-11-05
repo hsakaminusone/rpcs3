@@ -31,6 +31,12 @@ namespace mtl
 	// MSL -> MTL::Library (HLD-05 §3.4).  One MTL4::Compiler per device
 	// (workaround W11).  Null on a compile error; `error` carries the diagnostic.
 	MTL::Library* compile_msl(MTL4::Compiler* compiler, const std::string& msl, NS::Error** error);
+
+	// The completion form used by the async pipeline registry.  Returns the task
+	// that owns the in-flight compile; the handler runs on a Metal compiler thread
+	// and must retain anything it stores.  Null when the submission itself failed.
+	MTL4::CompilerTask* compile_msl_async(MTL4::Compiler* compiler, const std::string& msl,
+		MTL::NewLibraryCompletionHandlerFunction handler);
 }
 
 #endif // RSX_ENABLE_METAL4

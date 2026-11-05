@@ -586,7 +586,11 @@ namespace rsx
 		// The ZCULL unit belongs to the thread. The renderer only provides the host queries.
 		zcull_ctrl = std::make_unique<reports::ZCULL_control>();
 
-		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
+		// The in-game interface is an output pass of the renderer, so it needs the
+		// renderer's overlay tier.  Vulkan, OpenGL and Metal carry one
+		// (MTLPresent.cpp:frame_output).
+		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl ||
+			g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
 
@@ -821,6 +825,7 @@ namespace rsx
 
 		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
 		fifo_ctrl->set_get(ctrl->get);
+		fifo_ctrl->reset_streams(ctrl->get);
 
 		resolution_scaling_config =
 		{
@@ -1317,6 +1322,7 @@ namespace rsx
 					{
 						vm::_ptr<atomic_be_t<u64>>(dma_address + ::offset32(&RsxDmaControl::put))->release(get_put);
 						fifo_ctrl->set_get(static_cast<u32>(get_put));
+						fifo_ctrl->reset_streams(static_cast<u32>(get_put));
 						fifo_ctrl->abort();
 						fifo_ret_addr = RSX_CALL_STACK_EMPTY;
 						last_known_code_start = static_cast<u32>(get_put);
@@ -1744,11 +1750,122 @@ namespace rsx
 		return pair;
 	}
 
+	void invalid_method(context*, u32, u32);
+
 	void thread::recover_fifo(std::source_location src_loc)
 	{
 		bool kill_itself = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::as_ps3;
 
 		const u64 current_time = get_system_time();
+
+		// The discriminating capture of a desync (RR7-FREEZE-FORENSICS.md §8.1).
+		// TODO(excise): level 1; the whole capture block is diagnostic and goes
+		// with the probe work.  The shared code only gathers the data and hands
+		// it to the backend through on_fifo_desync; the Metal 4 backend prints
+		// it through the probe facility and every other backend ignores it.  It
+		// runs on the error path only, which fires a handful of times in a run,
+		// so the cost on the normal path is nil.
+		{
+			fifo_desync_info info;
+			info.get = fifo_ctrl->get_pos();
+			info.put = +ctrl->put;
+			info.get_guest = fifo_ctrl->translate_address(info.get);
+			info.restore_point = restore_point;
+			info.code_start = last_known_code_start;
+			info.ret_addr = fifo_ret_addr;
+			info.last_command = get_fifo_cmd();
+			info.last_label_address = m_last_label_address;
+			info.last_label_value = m_last_label_value;
+
+			// The method index the offending word would name, and whether the
+			// method table knows it.  A word that names an undefined method is a
+			// data word that the host took for a command (L52), and the index says
+			// which register range the host was walking when it went wrong.
+			{
+				const u32 reg = (info.last_command & 0xffff) >> 2;
+				info.last_command_method_known =
+					reg < rsx::methods.size() && rsx::methods[reg] != &invalid_method;
+			}
+
+			// The FIFO offset that maps to the last label address, if any.  The
+			// iomap maps one guest page per FIFO page, so a guest address can
+			// fall inside the command ring.  When it does, the label write lands
+			// in the middle of the pending command stream, which is the desync.
+			// TODO(excise): level 1; the search is on the error path only.
+			{
+				info.label_in_ring = false;
+				info.label_offset = 0;
+
+				if (info.last_label_address != 0)
+				{
+					for (u32 page = 0; page < iomap_table.ea.size(); ++page)
+					{
+						const u32 base = iomap_table.ea[page].load();
+
+						if (base == umax)
+						{
+							continue;
+						}
+
+						if (info.last_label_address >= base && info.last_label_address < base + 0x100000)
+						{
+							info.label_offset = (page << 20) | (info.last_label_address - base);
+							info.label_in_ring = true;
+							break;
+						}
+					}
+				}
+			}
+
+			if (const u32 addr = fifo_ctrl->translate_address(info.get); addr != umax)
+			{
+				for (u32 index = 0; index < 8; ++index)
+				{
+					info.words[index] = vm::read32(addr + index * 4);
+				}
+
+				info.words_valid = true;
+			}
+
+			// TODO(excise): level 1; every word is translated on its own, so a page
+			// boundary or an unmapped hole shows as a marker instead of ending the
+			// dump.
+			for (u32 index = 0; index < 256; ++index)
+			{
+				if (info.get < index * 4)
+				{
+					break;
+				}
+
+				const u32 address = fifo_ctrl->translate_address(info.get - index * 4);
+				info.words_before[index] = address != umax ? static_cast<u32>(vm::read32(address)) : 0xfeed0000;
+				info.words_before_valid = true;
+			}
+
+			// TODO(excise): level 1; the cache snapshot the host was parsing out of,
+			// and the position it expected the next command at.
+			info.cache_addr = fifo_ctrl->cache_addr();
+			info.cache_size = fifo_ctrl->cache_size();
+			info.next_cmd_entry = fifo_ctrl->next_cmd_entry();
+
+			for (u32 index = 0; index < 16; ++index)
+			{
+				const u32 position = info.get - 32 + index * 4;
+				info.cache_words_valid[index] = fifo_ctrl->peek_cache(position, info.cache_words[index]);
+			}
+
+			const u32 count = m_dispatch_history_count;
+			const u32 first = (m_dispatch_history_next + dispatch_history_size - count) % dispatch_history_size;
+
+			for (u32 i = 0; i < count; ++i)
+			{
+				info.history[i] = m_dispatch_history[(first + i) % dispatch_history_size];
+			}
+
+			info.history_count = count;
+
+			on_fifo_desync(info);
+		}
 
 		if (recovered_fifo_cmds_history.size() == 20u)
 		{
@@ -1774,6 +1891,10 @@ namespace rsx
 
 		// Error. Should reset the queue
 		fifo_ctrl->set_get(restore_point);
+		// Keep the command streams the parser has already discovered: wiping them
+		// makes the next jump into a command buffer create a stream whose frontier
+		// is its own base, which parks the parser before it reads a single word.
+		fifo_ctrl->reset_streams(restore_point, true);
 		fifo_ret_addr = saved_fifo_ret;
 		std::this_thread::sleep_for(2ms);
 		fifo_ctrl->abort();
@@ -1874,8 +1995,6 @@ namespace rsx
 		// Last fifo cmd for logging and utility
 		return fifo_ctrl->last_cmd();
 	}
-
-	void invalid_method(context*, u32, u32);
 
 	void thread::dump_regs(std::string& result, std::any& /*custom_data*/) const
 	{

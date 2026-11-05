@@ -613,6 +613,9 @@ MTL_DIAL_TEST(raster, NV4097_SET_CULL_FACE)
 
 MTL_DIAL_TEST(raster, NV4097_SET_FRONT_FACE)
 {
+	// The negated viewport height carries the Y mirror on its own, so the guest
+	// winding maps straight across (MTLRasterState.cpp:66-79; device-confirmed,
+	// L116).
 	set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(rsx::front_face::cw));
 	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingClockwise);
 

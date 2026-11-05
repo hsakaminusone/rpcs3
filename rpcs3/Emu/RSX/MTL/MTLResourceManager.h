@@ -15,6 +15,8 @@ namespace mtl
 	constexpr u64 shared_block_size = 32u * 1024u * 1024u;
 	constexpr u64 private_block_size = 128u * 1024u * 1024u;
 
+	class residency_manager;
+
 	// One placement heap class and its free list (HLD-02 §2.1).  A sub-allocation is
 	// an offset into a heap.  A heap never moves, so the offset stays valid for the
 	// life of the allocation.
@@ -23,6 +25,11 @@ namespace mtl
 	public:
 		void init(MTL::Device* device, MTL::StorageMode storage, u64 block_size);
 		void shutdown();
+
+		// The pool publishes every heap it creates to the persistent residency set.
+		// A heap outlives all of its sub-allocations, so heap residency covers each
+		// of them for its whole life (HLD-02 §2.6 Tier 1).
+		void set_residency(residency_manager* residency);
 
 		// Return the heap that holds the span, or nullptr when the pool cannot grow.
 		MTL::Heap* allocate(u64 size, u64 alignment, u64& offset);
@@ -42,31 +49,36 @@ namespace mtl
 		MTL::StorageMode m_storage = MTL::StorageModeShared;
 		u64 m_block_size = 0;
 		std::vector<block> m_blocks;
+		residency_manager* m_residency = nullptr;
 	};
 
 	// Explicit residency (HLD-02 §2.6).  A Metal 4 command buffer holds no strong
-	// reference to its resources, so every reachable allocation must be resident.
-	// The persistent set holds the long-lived objects; a ring of per-frame sets holds
-	// the transient ones.
+	// reference to its resources, so every reachable allocation must be resident in
+	// a set that was committed and attached to the queue before the commit.
+	//
+	// Residency here follows resource lifetime, not frame lifetime.  The backend's
+	// resources are all cache-owned and outlive the frame that creates them, and a
+	// set that drops an allocation which is still reachable leaves the GPU reading
+	// zeros in silence (HLD-02 F1).  Every heap and every direct allocation is
+	// therefore made persistent at creation and removed only when it is released.
 	class residency_manager
 	{
 	public:
-		void init(MTL::Device* device, MTL4::CommandQueue* queue, u32 frame_count);
+		void init(MTL::Device* device, MTL4::CommandQueue* queue);
 		void shutdown();
 
 		void make_persistent(MTL::Allocation* allocation);
-		void on_frame_begin(u32 index);
-		void on_bind(MTL::Allocation* allocation);
-		void commit_frame();
-		void on_commit_complete(u32 index);
+		// Drop one allocation from the set when its owner is released.  A set that
+		// keeps an allocation forever retains a heap span that a later allocation
+		// can reuse (DEVIATIONS-SYNC.md, SY5).
+		void remove(MTL::Allocation* allocation);
+		bool is_persistent(MTL::Allocation* allocation) const;
 
 	private:
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
 		MTL::ResidencySet* m_persistent = nullptr;
-		std::vector<MTL::ResidencySet*> m_per_frame;
-		std::vector<std::unordered_set<MTL::Allocation*>> m_tracked;
-		u32 m_current = 0;
+		std::unordered_set<MTL::Allocation*> m_published;
 	};
 
 	// The resource layer (HLD-01 C5, HLD-02 §2.1).  A buffer or a texture is
@@ -85,15 +97,37 @@ namespace mtl
 		// is the offset into it, so a load needs no staging copy.
 		MTL::Buffer* guest_buffer() const { return m_guest; }
 
+		// A label is the only GPU write into guest memory.  A no-copy import is
+		// fixed at creation, so a page the CPU maps after the application-lifetime
+		// import keeps the GPU on the old physical page (L136).  A label page gets
+		// its own import, created after the page exists and cached for the process;
+		// the RSX reports and device blocks are mapped once.  Null means the address
+		// is not inside the guest window.
+		MTL::Buffer* label_buffer(u32 address, u32& offset);
+
 		// Metal's sample-count support is per device: Apple's table lists 4 as
 		// universal and 2 as "some devices", so a host request the device rejects
 		// folds up to 4 and keeps the antialiasing.
 		u8 supported_sample_count(u8 count) const;
 
+		// A DXT texture is BC on a device that supports it and expanded BGRA8 on a
+		// device that does not.  The uploader and the format table must agree, or the
+		// texture descriptor names a format the device cannot allocate.
+		bool supports_bc_texture_compression() const { return m_supports_bc; }
+
 		void make_persistent(MTL::Allocation* allocation);
+
+		// The frame slot that is recording, so a release lands on the slot whose
+		// command buffer can still reference the object.
 		void on_frame_begin(u32 index);
-		void commit_frame();
 		void on_commit_complete(u32 index);
+
+		// A slot whose commit never reported its feedback still owns a deferred
+		// list, and the GPU may still read those objects.  Move the list aside and
+		// release it only when the ring is idle, which is the first moment nothing
+		// can reference it (DEVIATIONS-SYNC.md, SY2).
+		void quarantine(u32 index);
+		void drain_quarantine();
 
 		// Deferred release (HLD-02 I7).  A Metal 4 command buffer holds no strong
 		// reference, so an object must survive until every frame that can reference it
@@ -115,14 +149,24 @@ namespace mtl
 
 		void track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size);
 		void release_list(std::vector<MTL::Allocation*>& list);
+		void check_residency(MTL::Heap* heap);
 
 		MTL::Device* m_device = nullptr;
 		MTL::Buffer* m_guest = nullptr;
+		bool m_supports_bc = true;
 		residency_manager m_residency;
 		heap_pool m_shared;
 		heap_pool m_private;
+		// One import per guest page that carries a label write (label_buffer).
+		struct label_page
+		{
+			u32 base = 0;
+			MTL::Buffer* buffer = nullptr;
+		};
+		std::vector<label_page> m_label_pages;
 		std::unordered_map<MTL::Allocation*, allocation_span> m_spans;
 		std::vector<std::vector<MTL::Allocation*>> m_deferred;
+		std::vector<MTL::Allocation*> m_quarantine;
 		u32 m_frame_slot = 0;
 	};
 

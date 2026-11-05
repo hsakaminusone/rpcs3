@@ -3,6 +3,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLArgumentBinds.h"
+#include "MTLInstrumentation.h"
 #include "MTLVertexProgram.h"
 
 #include "../Program/GLSLCommon.h"
@@ -10,6 +11,7 @@
 #include "Emu/system_config.h"
 #include "util/logs.hpp"
 
+#include <bit>
 #include <iterator>
 #include <set>
 #include <string>
@@ -17,10 +19,72 @@
 
 namespace mtl
 {
-	MTLFragmentDecompilerThread::MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader)
+	MTLFragmentDecompilerThread::MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader, u32 id)
 		: FragmentProgramDecompiler(prog, size)
 		, m_shader(shader)
 	{
+#if MTL_DEBUG_LOGS
+		// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  The list is a comma
+		// separated set of compiled-program ids; the video program is named by the
+		// draw log ("fp id"), so one run forces exactly the draw under test and no
+		// other draw in the frame can produce the patch this diagnostic reads.
+		if (const char* value = std::getenv("MTL_PROBE_FORCE_FP"); value && *value && *value != '0')
+		{
+			usz start = 0;
+
+			while (start <= std::strlen(value))
+			{
+				char* end = nullptr;
+				const unsigned long parsed = std::strtoul(value + start, &end, 10);
+
+				if (end && end != value + start && parsed == id)
+				{
+					m_force_output = true;
+					break;
+				}
+
+				if (!end || *end != ',')
+				{
+					break;
+				}
+
+				start = static_cast<usz>(end - value) + 1;
+			}
+
+			if (m_force_output)
+			{
+				MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta and its discard is cleared (MTL_PROBE_FORCE_FP)", id);
+			}
+		}
+
+		// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP_TEXTURES.  The compiled id
+		// shifts with the play sequence, so a selector that names the video by the
+		// number of textures its state enables survives a different route into the
+		// frame.  The video overlay is the only program of the title frame that
+		// enables three.
+		if (!m_force_output)
+		{
+			if (const char* value = std::getenv("MTL_PROBE_FORCE_FP_TEXTURES"); value && *value && *value != '0')
+			{
+				const unsigned long requested = std::strtoul(value, nullptr, 10);
+				u32 enabled = 0;
+
+				for (u32 unit = 0; unit < 16; ++unit)
+				{
+					if ((prog.texture_state.texture_dimensions >> (unit * 2)) & 0x3)
+					{
+						++enabled;
+					}
+				}
+
+				if (requested && enabled == requested)
+				{
+					m_force_output = true;
+					MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta because its state enables %u textures and its discard is cleared (MTL_PROBE_FORCE_FP_TEXTURES)", id, enabled);
+				}
+			}
+		}
+#endif
 	}
 
 	std::string MTLFragmentDecompilerThread::getFloatTypeName(usz elementCount)
@@ -69,6 +133,13 @@ namespace mtl
 		}
 
 		OS << "#extension GL_ARB_separate_shader_objects: enable\n\n";
+
+		if (m_force_output)
+		{
+			// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP; RSXROPEpilogue.glsl
+			// carries the two sites this switches on.
+			OS << "#define _FORCE_OUTPUT 1\n\n";
+		}
 
 		glsl::insert_subheader_block(OS);
 	}
@@ -291,6 +362,41 @@ namespace mtl
 		m_shader_props.ROP_sRGB_packing = !!(m_prog.ctrl & RSX_SHADER_CONTROL_SRGB_FRAMEBUFFER);
 		m_shader_props.ROP_alpha_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ALPHA_TEST);
 		m_shader_props.ROP_alpha_to_coverage_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE);
+
+#if MTL_DEBUG_LOGS
+		// TODO(excise): diagnostic.  MTL_PROBE_NO_ALPHA_TEST=1 compiles every
+		// fragment program without the alpha test.  A draw that leaves its target
+		// at the clear colour is then decided by one look at the pixel probe: a
+		// fragment that appears was discarded by the test, whose input is the
+		// fragment alpha as the GPU sees it, and a fragment that still does not
+		// appear never ran.  The switch is read once, when the program is built,
+		// so a run needs a cold pipeline archive; MTLDevice.cpp names that run's
+		// archive separately so the real cache is not poisoned.  It changes
+		// rendering on purpose and is for diagnosis only.
+		if (m_shader_props.ROP_alpha_test && probe::diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+		{
+			m_shader_props.ROP_alpha_test = false;
+
+			static bool noted = false;
+
+			if (!noted)
+			{
+				noted = true;
+				MTL_WARN(1, "Metal 4: diagnostic, the alpha test is compiled out of every fragment program (MTL_PROBE_NO_ALPHA_TEST)");
+			}
+		}
+#endif
+#if MTL_DEBUG_LOGS
+		if (m_force_output)
+		{
+			// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  The forced output sits
+			// after the epilogue, so the tests that discard before it are off as
+			// well; the inline kills are cleared in the epilogue itself.
+			m_shader_props.ROP_alpha_test = false;
+			m_shader_props.ROP_alpha_to_coverage_test = false;
+		}
+#endif
+
 		m_shader_props.ROP_polygon_stipple_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_POLYGON_STIPPLE);
 		m_shader_props.ROP_discard = !!(m_prog.ctrl & RSX_SHADER_CONTROL_USES_KIL);
 		m_shader_props.ROP_channel_remap = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP);
@@ -543,12 +649,24 @@ namespace mtl
 		OS << "}\n";
 	}
 
+	void MTLFragmentDecompilerThread::emitInterpreterPrelude(std::stringstream& OS)
+	{
+		insertHeader(OS);
+		insertConstants(OS);
+	}
+
+	void MTLFragmentDecompilerThread::emitInterpreterGlobals(std::stringstream& OS)
+	{
+		insertGlobalFunctions(OS);
+	}
+
 	void MTLFragmentDecompilerThread::Task()
 	{
-		// Apple silicon supports fp16, but the seam keeps fp32 outputs so the
-		// shader does not depend on a device capability the caller does not pass
-		// (HLD-05 F6, §6 Q8).  Native depth compare removes the depth fetch.
-		device_props.has_native_half_support = false;
+		// Apple silicon executes fp16 arithmetic natively, so the low precision
+		// setting can use f16 registers instead of widening every intermediate
+		// (VKFragmentProgram.cpp:76; HLD-05 F6).  Depth compare and depth storage
+		// are native, so the two depth emulation paths stay off.
+		device_props.has_native_half_support = (g_cfg.video.shader_precision == gpu_preset_level::low);
 		device_props.emulate_depth_compare = false;
 		device_props.has_low_precision_rounding = false;
 		device_props.emulated_depth_storage = false;
@@ -556,11 +674,11 @@ namespace mtl
 		m_shader = Decompile();
 	}
 
-	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets)
+	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets, u32 id)
 	{
 		u32 size = 0;
 		std::string shader;
-		MTLFragmentDecompilerThread decompiler(prog, size, shader);
+		MTLFragmentDecompilerThread decompiler(prog, size, shader, id);
 		decompiler.Task();
 
 		if (constant_offsets)

@@ -62,6 +62,11 @@ namespace mtl
 		// Hand the slot's completed capture to the frame.  False when it holds none.
 		bool deliver(u32 slot, GSFrameBase& frame);
 
+		// Drop the temporary images of every overlay that left the manager's active
+		// list, then retire those overlays.  A frame calls this once, after it
+		// submitted its output (GLPresent.cpp:283, VKPresent.cpp:256).
+		void retire_overlays(rsx::overlays::display_manager* overlays);
+
 	private:
 		// One pending capture per frame slot, so a readback never races the frame
 		// that wrote it and a screenshot costs the RSX thread no GPU wait.
