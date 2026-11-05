@@ -151,6 +151,17 @@ namespace mtl::probe
 		return level() >= need;
 	}
 
+	// TODO(excise): a diagnostic switch that changes what the backend emits, not
+	// only what it logs.  It is read once per caller, so a run has to set it
+	// before launch.  A switch of this kind must also keep its output out of the
+	// on-disk pipeline archive, or a later run would load it as the real program:
+	// MTLDevice.cpp gives such a run its own archive name.
+	inline bool diagnostic_switch(const char* name)
+	{
+		const char* value = std::getenv(name);
+		return value && value[0] && value[0] != '0';
+	}
+
 	// The clock the diagnostics stamp, in nanoseconds.  One home, so the text and
 	// the numeric halves agree.
 	inline u64 now_ns()
@@ -222,6 +233,14 @@ namespace mtl::probe
 		static const char* path()
 		{
 			static const std::string value = [] {
+				// TODO(excise): level 3; MTL_PROBE_LOG names the file for this run.
+				// The default truncates, which lost the level-5 capture of the car
+				// twice, so a run that matters sets a unique path.
+				if (const char* configured = std::getenv("MTL_PROBE_LOG"); configured && *configured)
+				{
+					return std::string(configured);
+				}
+
 				const char* tmp = std::getenv("TMPDIR");
 				std::string dir = (tmp && *tmp) ? tmp : "/tmp";
 
@@ -281,6 +300,24 @@ namespace mtl::probe
 		return value;
 	}
 
+	// TODO(excise): level 5; the directory every dump lands in.  The default is
+	// the temporary directory, which the machine purges, and a capture that is
+	// lost to the purge costs a whole run, so a run that matters names a path
+	// inside the repository (MTL_PROBE_DUMP_DIR).
+	inline const char* dump_directory()
+	{
+		static const std::string value = [] {
+			if (const char* configured = std::getenv("MTL_PROBE_DUMP_DIR"); configured && *configured)
+			{
+				return std::string(configured);
+			}
+
+			return std::string("/tmp/mtl4-dump");
+		}();
+
+		return value.c_str();
+	}
+
 	inline f64 capture_after_seconds()
 	{
 		static const f64 cached = [] {
@@ -303,24 +340,84 @@ namespace mtl::probe
 		return cached;
 	}
 
+	// TODO(excise): level 5; a patch probe reads back after every draw, and a
+	// race frame has more draws than the default allows, so the watch can be
+	// widened for one run.  The cost is one queue round trip per probe.
+	inline u32 pixel_probe_limit()
+	{
+		static const u32 cached = [] {
+			const char* text = std::getenv("MTL_PROBE_PIXEL_LIMIT");
+			const unsigned long parsed = text ? std::strtoul(text, nullptr, 10) : 0;
+			return parsed ? static_cast<u32>(parsed) : 64u;
+		}();
+
+		return cached;
+	}
+
+	// TODO(excise): level 5; a deferred texture is materialised in the texture
+	// cache but the host dump lives in the renderer, and the caller needs to read
+	// the gathered image *before* the pass consumes it.  The bind leaves the
+	// image here; the draw loop dumps and clears it.  One unit at a time, because
+	// a bind is not re-entrant.
+	struct deferred_dump_request
+	{
+		void* image = nullptr;
+		u32 address = 0;
+		u32 op = 0;
+	};
+
+	inline thread_local deferred_dump_request deferred_dump;
+
 	// The anti-flood limits.  A text site prints at most `site_line_cap` lines by
 	// itself in a run, every text site shares the interval budget, and the whole run
 	// shares the run budget.  When a limit is reached the site stops printing and
 	// counts instead, so no probe can flood a log.  All limits are compile constants,
 	// not switches.
-	constexpr u32 site_line_cap = 4096;
-	constexpr s64 interval_line_budget = 40000;
-	constexpr s64 run_line_budget = 200000;
+	// A capture window prints one block per draw, so five windows of five hundred
+	// draws need more than the default per-site cap.  The override is diagnostics
+	// only: it raises a limit, it never changes what is measured.
+	inline u32 site_line_cap()
+	{
+		static const u32 cached = [] {
+			const char* text = std::getenv("MTL_PROBE_SITE_CAP");
+			const unsigned long parsed = text ? std::strtoul(text, nullptr, 10) : 0;
+			return parsed ? static_cast<u32>(parsed) : 4096u;
+		}();
+
+		return cached;
+	}
+
+	inline s64 interval_line_budget()
+	{
+		static const s64 cached = [] {
+			const char* text = std::getenv("MTL_PROBE_INTERVAL_BUDGET");
+			const long long parsed = text ? std::strtoll(text, nullptr, 10) : 0;
+			return parsed ? static_cast<s64>(parsed) : 40000ll;
+		}();
+
+		return cached;
+	}
+
+	inline s64 run_line_budget()
+	{
+		static const s64 cached = [] {
+			const char* text = std::getenv("MTL_PROBE_RUN_BUDGET");
+			const long long parsed = text ? std::strtoll(text, nullptr, 10) : 0;
+			return parsed ? static_cast<s64>(parsed) : 200000ll;
+		}();
+
+		return cached;
+	}
 
 	inline std::atomic<s64>& interval_budget()
 	{
-		static std::atomic<s64> value{interval_line_budget};
+		static std::atomic<s64> value{interval_line_budget()};
 		return value;
 	}
 
 	inline std::atomic<s64>& run_budget()
 	{
-		static std::atomic<s64> value{run_line_budget};
+		static std::atomic<s64> value{run_line_budget()};
 		return value;
 	}
 
@@ -333,7 +430,7 @@ namespace mtl::probe
 	// Refills the interval budget.  The report interval calls this.
 	inline void refill_budget()
 	{
-		interval_budget().store(interval_line_budget, std::memory_order_relaxed);
+		interval_budget().store(interval_line_budget(), std::memory_order_relaxed);
 	}
 
 	// True while this line is inside the per-site cap, the interval budget and the
@@ -343,13 +440,13 @@ namespace mtl::probe
 	{
 		const u32 line = site_counter.fetch_add(1, std::memory_order_relaxed);
 
-		if (line >= site_line_cap)
+		if (line >= site_line_cap())
 		{
 			suppressed_lines().fetch_add(1, std::memory_order_relaxed);
 
-			if (line == site_line_cap)
+			if (line == site_line_cap())
 			{
-				mtl_log.warning("Metal 4 probe: a site reached its cap of %u lines; later lines of that site are counted only", site_line_cap);
+				mtl_log.warning("Metal 4 probe: a site reached its cap of %u lines; later lines of that site are counted only", site_line_cap());
 			}
 
 			return false;
@@ -369,7 +466,7 @@ namespace mtl::probe
 			std::call_once(once, []
 			{
 				mtl_log.warning("Metal 4 probe: the run reached its budget of %lld lines; later lines are counted only",
-					static_cast<long long>(run_line_budget));
+					static_cast<long long>(run_line_budget()));
 			});
 
 			return false;
@@ -391,6 +488,25 @@ namespace mtl::probe
 		mtl_log.notice("Metal 4 probe level %d, interval %llu frames, stall threshold %.1f ms",
 			level(), static_cast<unsigned long long>(interval()), stall_ms());
 		mtl_log.notice("Metal 4 probe: the report, the coverage table and the verbose lines go to %s", sink().path());
+
+		// TODO(excise): the switches that change what the backend emits, not only
+		// what it logs.  A run's rendering is not the shipping rendering while one
+		// is on, so the fact is stated once, before any frame, where the run's own
+		// log carries it (the archive name alone is not read by a reader of the
+		// probe log).
+		if (diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, the alpha test is compiled out of every fragment "
+				"program (MTL_PROBE_NO_ALPHA_TEST); a fragment the guest would discard is drawn instead, and "
+				"this run's pipeline archive is kept apart.");
+		}
+
+		if (diagnostic_switch("MTL_PROBE_TRACKED_HEAPS"))
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, every heap tracks hazards (MTL_PROBE_TRACKED_HEAPS); the "
+				"driver orders conflicting accesses, so a defect that goes is a missing edge and a defect that "
+				"stays is content.");
+		}
 	}
 }
 

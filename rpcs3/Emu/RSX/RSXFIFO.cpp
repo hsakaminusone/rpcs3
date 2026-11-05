@@ -123,6 +123,31 @@ namespace rsx
 			return host == umax ? 0 : +vm::read32(host | (addr & 127));
 		}
 
+		bool FIFO_control::is_valid_link(u32 word) const
+		{
+			if (!stream_tracker::is_link(word))
+			{
+				return false;
+			}
+
+			// A data word that ends in 0b10 passes the CALL mask, so the mask
+			// alone does not make a link.  The target must name mapped memory:
+			// following one into unmapped memory turns a park into a desync storm
+			// (the 0xbd192712 / 0x1d192710 capture).  A RETURN goes to the saved
+			// call address, which the parser validates itself.
+			if ((word & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
+			{
+				return translate_address(word & RSX_METHOD_CALL_OFFSET_MASK) != umax;
+			}
+
+			if ((word & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
+			{
+				return translate_address(word & RSX_METHOD_OLD_JUMP_OFFSET_MASK) != umax;
+			}
+
+			return true;
+		}
+
 		// TODO(excise): level 1; FIFO desync instrumentation.  A desync only ever
 		// shows up downstream, as a data word read as a command header; the state
 		// that makes that possible (the parser at or past the producer frontier, or
@@ -145,7 +170,9 @@ namespace rsx
 				entry.prev = m_diag_prev_put;
 				entry.put = put;
 				entry.old_word = peek_word(m_diag_prev_put);
+				entry.new_word = peek_word(put);
 				entry.get = m_fifo_pos;
+				entry.get_reg = +m_ctrl->get;
 			}
 
 			// The producer pointer only moves backwards when the guest wraps its
@@ -307,9 +334,9 @@ namespace rsx
 			// guards on a new park address; do not let a jump logged in the same
 			// millisecond hide the first stop.
 			m_diag_last_log = get_system_time();
-			rsx_log.warning("FIFO diag: parked addr=0x%x frontier=0x%x put=0x%x word=0x%x in_call=%d put_known=%d get=0x%x cache=0x%x+0x%x next=0x%x last_cmd=0x%x suppressed=%u",
+			rsx_log.warning("FIFO diag: parked addr=0x%x frontier=0x%x put=0x%x word=0x%x in_call=%d put_known=%d get=0x%x get_reg=0x%x cache=0x%x+0x%x next=0x%x last_cmd=0x%x suppressed=%u",
 				addr, frontier, put, word, m_streams.in_call() ? 1 : 0, m_streams.is_known(put) ? 1 : 0,
-				m_fifo_pos, m_cache_addr, m_cache_size, m_next_cmd_entry, m_cmd, std::exchange(m_diag_suppressed, 0u));
+				m_fifo_pos, +m_ctrl->get, m_cache_addr, m_cache_size, m_next_cmd_entry, m_cmd, std::exchange(m_diag_suppressed, 0u));
 
 			// TODO(excise): level 1; the tail of the chunk that parked.  The
 			// producer waits on the last methods of this chunk, not on the park word.
@@ -333,8 +360,8 @@ namespace rsx
 			for (u32 i = 0; i < count; i++)
 			{
 				const diag_put_entry& entry = m_diag_puts[(m_diag_put_count - count + i) & 7u];
-				rsx_log.warning("FIFO diag: park put[%u] prev=0x%x put=0x%x old_word=0x%x get=0x%x",
-					i, entry.prev, entry.put, entry.old_word, entry.get);
+				rsx_log.warning("FIFO diag: park put[%u] prev=0x%x put=0x%x old_word=0x%x new_word=0x%x get=0x%x get_reg=0x%x",
+					i, entry.prev, entry.put, entry.old_word, entry.new_word, entry.get, entry.get_reg);
 			}
 		}
 
@@ -758,7 +785,7 @@ namespace rsx
 				const u32 start = put - std::min<u32>(put - target, 0x400);
 				std::string dump;
 
-				for (u32 addr = start; addr < put; addr += 4)
+				for (u32 addr = start; addr <= put; addr += 4)
 				{
 					const u32 host = m_iotable->get_addr(addr);
 					dump += fmt::format(" %08x", host == umax ? 0 : vm::_ref<be_t<u32>>(host).value());
@@ -818,7 +845,7 @@ namespace rsx
 					// the producer cannot have recycled it. If the word is data the
 					// producer is mid-fill, or it abandoned the chunk (redirect).
 					u32 word = vm::read32(addr1 | (addr & 127));
-					const bool link = addr == published_end && stream_tracker::is_link(word);
+					const bool link = addr == published_end && is_valid_link(word);
 
 					if (!link)
 					{

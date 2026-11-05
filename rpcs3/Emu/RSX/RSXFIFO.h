@@ -249,6 +249,11 @@ namespace rsx
 			// Consumed at the start of read(), where no packet is in flight.
 			u32 m_redirect = 0;
 
+			// The producer may recycle a chunk as soon as GET acknowledges it,
+			// so a word read at the published end is taken as the link only when
+			// it is a complete link to mapped memory; see fetch_u32.
+			bool is_valid_link(u32 word) const;
+
 			// TODO(excise): level 1; FIFO desync instrumentation.  The desync only
 			// shows up downstream, as a data word read as a command header.  These
 			// record the producer frontier and the parser's own boundary so the
@@ -271,7 +276,7 @@ namespace rsx
 			// TODO(excise): level 1; the last few producer moves.  A park is
 			// explained by the move that preceded it, so keep the old and the new
 			// PUT plus the word that was at the old frontier when it moved.
-			struct diag_put_entry { u32 prev, put, old_word, get; };
+			struct diag_put_entry { u32 prev, put, old_word, new_word, get, get_reg; };
 			diag_put_entry m_diag_puts[8] = {};
 			u32 m_diag_put_count = 0;
 

@@ -10,8 +10,10 @@
 #include "Emu/system_config.h"
 #include "util/logs.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <sys/sysctl.h>
 
 namespace mtl
@@ -181,8 +183,38 @@ namespace mtl
 		if (const std::string cache_root = rpcs3::cache::get_ppu_cache();
 			!g_cfg.video.disable_on_disk_shader_cache && !cache_root.empty())
 		{
-			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u.bin",
-				cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major());
+			// TODO(excise): diagnostic.  A switch that changes a shader (the
+			// alpha-test compile-out, MTLFragmentProgram.cpp) must not write its
+			// programs into the archive a normal run loads, or the change would
+			// outlive the diagnostic.  Such a run gets its own file.
+			std::string diagnostic_suffix;
+
+			if (mtl::probe::diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+			{
+				diagnostic_suffix += "-noalpha";
+			}
+
+			if (const char* force = std::getenv("MTL_PROBE_FORCE_FP"); force && *force && *force != '0')
+			{
+				// TODO(excise): diagnostic.  The id list is part of the file name,
+				// because an archive built while a different id was forced holds
+				// that program's unforced pipeline; a name that ignored the list
+				// would load it instead of compiling the forced source.
+				std::string tag = force;
+				std::replace(tag.begin(), tag.end(), ',', '_');
+				diagnostic_suffix += "-forcefp" + tag;
+			}
+
+			if (const char* force = std::getenv("MTL_PROBE_FORCE_FP_TEXTURES"); force && *force && *force != '0')
+			{
+				// TODO(excise): diagnostic; see the id list above.
+				std::string tag = force;
+				std::replace(tag.begin(), tag.end(), ',', '_');
+				diagnostic_suffix += "-forcefpt" + tag;
+			}
+
+			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u%s.bin",
+				cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(), diagnostic_suffix);
 		}
 
 		MTL4::CompilerDescriptor* descriptor = MTL4::CompilerDescriptor::alloc()->init();
@@ -343,10 +375,14 @@ namespace mtl
 		cfg.supports_passthrough_dma = false;      // no host-pointer device DMA (HLD-02 §2.1)
 		cfg.supports_last_provoking_vertex = false;// no public provoking-vertex mode; smooth fallback
 		cfg.supports_hw_conditional_render = false;// bring-up: CPU skip (HLD-04 §3.6)
-		// The flag routes every label release through MTLGSRender::release_GCM_label.
-		// Metal writes the label on the CPU, so that hook drains the GPU before the
-		// write; without it the guest can recycle the FIFO under the GPU (L11).
-		cfg.supports_host_gpu_labels = true;
+		// The guest label is memory the CPU parser reads at the acquire.  A host
+		// store at the release is visible to that read immediately, which is what
+		// VK and GL do by default (VK: nv47_sync.hpp:83 with the setting off;
+		// GL: its host DMA writer).  The GPU write is the opt-in path: it is
+		// ordered against the work it releases, but the acquire must then wait
+		// for the GPU to land the word, and that wait holds the FIFO reader
+		// (L135, L138).  Honor the setting; do not force the cost on every run.
+		cfg.supports_host_gpu_labels = !!g_cfg.video.host_label_synchronization;
 	}
 } // namespace mtl
 

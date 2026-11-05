@@ -103,7 +103,7 @@ bool CubebBackend::Open(std::string_view dev_id, AudioFreq freq, AudioSampleSize
 	}
 
 	Close();
-	std::lock_guard lock{m_cb_mutex};
+	std::unique_lock lock{m_cb_mutex};
 
 	const bool use_default_device = dev_id.empty() || dev_id == audio_device_enumerator::DEFAULT_DEV_ID;
 
@@ -181,6 +181,10 @@ bool CubebBackend::Open(std::string_view dev_id, AudioFreq freq, AudioSampleSize
 	if (int err = cubeb_stream_start(m_stream))
 	{
 		Cubeb.error("cubeb_stream_start() failed: %i", err);
+
+		// Close() takes m_cb_mutex itself, so it must not be called with it held.
+		// Releasing it here also lets Close() wait for a callback that is still in flight.
+		lock.unlock();
 		Close();
 		return false;
 	}

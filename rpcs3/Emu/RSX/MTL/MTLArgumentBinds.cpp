@@ -35,17 +35,21 @@ namespace mtl
 
 		const u32 stage = vertex_stage ? 0u : 1u;
 		const argument_binds& previous = m_bound[stage];
-		// The first bind for a stage has nothing to compare against, so every
-		// non-zero slot is written; afterwards only a changed value is written.
+		// The first bind for a stage has nothing to compare against, so every slot
+		// is written; afterwards only a changed value is written.
 		const bool first_bind = !m_has_bound[stage];
 		bool changed = false;
 
-		// A slot is written when it is bound and either the stage has never been
-		// bound or the value changed.  A zero value is never written, so it does
-		// not count as a change.
+		// A slot is written when the stage has never been bound or the value
+		// changed, zero included.  Metal 4 captures the table once per draw, when
+		// the draw is encoded, not at setArgumentTable and not when the GPU runs
+		// it: a value written after setArgumentTable is seen by a later draw, and a
+		// value present before an earlier draw is not.  So an unwritten slot keeps
+		// the previous draw's binding.  A cleared slot (a disabled vertex stream, a
+		// predicate that is no longer set) must therefore be written as zero.
 		const auto address = [&](MTL::GPUAddress value, MTL::GPUAddress old, NS::UInteger index)
 		{
-			if (value != 0 && (first_bind || value != old))
+			if (first_bind || value != old)
 			{
 				table->setAddress(value, index);
 				changed = true;
@@ -139,8 +143,9 @@ namespace mtl
 		m_bound[stage] = binds;
 		m_has_bound[stage] = true;
 
-		// The caller re-binds the table only when a slot was written, because
-		// Metal 4 snapshots the table at the encoder bind (REALISATION.md).
+		// Re-binding is not what makes the write visible: the table is captured per
+		// draw at encode time, so the caller's re-bind is redundant but harmless.
+		// It is kept because it is one call per changed subdraw.
 		return changed;
 	}
 

@@ -17,6 +17,19 @@ namespace rsx
 			atomic_fence_seq_cst();
 
 			const bool is_flip_sema = (address == (ctx->fw.label_addr + 0x10) || address == (RSX(ctx)->device_addr + 0x30));
+
+			// TODO(excise): level 1; the boot chunk's releases are NV406E/4097
+			// semaphore methods, and only the non-flip path reaches the Metal
+			// probe.  Log the boundary so the flip/device addresses are visible.
+			static std::atomic<u32> diag_label_calls{0};
+
+			if (diag_label_calls.fetch_add(1, std::memory_order_relaxed) < 64)
+			{
+				rsx_log.warning("label: type=0x%x addr=0x%x data=0x%x flip=%d label_addr=0x%x device_addr=0x%x",
+					type, address, data, is_flip_sema ? 1 : 0, ctx->fw.label_addr, RSX(ctx)->device_addr);
+			}
+
+
 			if (!is_flip_sema)
 			{
 				// First, queue the GPU work. If it flushes the queue for us, the following routines will be faster.

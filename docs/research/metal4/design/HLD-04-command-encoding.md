@@ -357,8 +357,11 @@ emitting an illegal intra-pass barrier.
    matching `MTL4CommitFeedback` (`HLD-01` §4.6). `[V]`
 3. **Everything bound is resident.** Every argument-table-bound resource is in a committed
    `MTLResidencySet` before the commit that uses it (`HLD-01` §4.5). Residency is not ordering. `[V]`
-4. **Argument-table snapshot semantics.** A table mutation is visible only to draws encoded after it
-   (`HLD-01` §4.8). `[V]`
+4. **Argument-table capture semantics.** A table mutation is visible to draws encoded after it and
+   not to draws already encoded; the capture point is the draw encode, not `setArgumentTable` and
+   not GPU execution (measured 2026-10-22, `EXPERIMENT-metal4-semantics.mm`: a mutation with no
+   re-bind was seen by the next draw; an earlier draw kept its value). An unwritten slot therefore
+   keeps the previous draw's value, so a slot that clears must be written as zero. `[V]`
 5. **No `setBytes`.** Every constant is memory-backed and bound by `setAddress`
    (`MTL4ArgumentTable.hpp:73-80`; `HLD-05` §4.3). `[V]`/`[U]`
 6. **Stable index-buffer address.** An index buffer passed as `MTL::GPUAddress` must not move or be

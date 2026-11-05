@@ -1122,13 +1122,15 @@ TEST(MTLRasterDerivations, FrontFaceFollowsTheClipSpaceFlip)
 {
 	mtl::raster_state state{};
 
-	// A Y mirror reverses the screen-space orientation, so the guest winding maps
-	// to the opposite Metal winding.
+	// The negated viewport height already mirrors the guest's screen space into
+	// Metal's framebuffer space, so the winding maps straight across.  Inverting
+	// here counts the Y mirror twice and culls the quads the app draws with
+	// culling enabled (device-confirmed, L116).
 	state.front_face = rsx::front_face::cw;
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
 
 	state.front_face = rsx::front_face::ccw;
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
 }
 
 TEST(MTLRasterDerivations, FillModeFollowsTheSurvivingFace)

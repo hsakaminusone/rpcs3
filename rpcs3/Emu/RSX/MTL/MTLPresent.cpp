@@ -240,6 +240,14 @@ namespace mtl
 				return;
 			}
 
+			// The capture samples the image the frame's earlier encoders wrote, and
+			// the heaps do not track hazards, so the read needs the queue form of
+			// the edge, exactly as the drawable compose does (MTLGSRender.cpp:5050).
+			// Without it the capture can observe the frame's tiles before they are
+			// flushed, and a photographed frame shows content the final image does
+			// not.
+			emit_queue_barrier(pass_encoder, barrier_spec{ MTL::StageAll, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
+
 			m_scale.run(pass_encoder, constants, full, m_capture_target, image);
 
 			std::lock_guard lock(*overlays);

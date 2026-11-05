@@ -29,14 +29,17 @@ namespace mtl
 	// TODO(excise): level 5; writes the GLSL and the MSL of one program.
 	void diagnostic_dump_program(const char* stage, u32 id, const std::string& glsl, const std::string& msl)
 	{
-		if (id >= 32)
+		// TODO(excise): level 5; the car programs (fp 51/53, vp 2/4) sit above the
+		// old 32-program prefix, so the car shader was never written.  The bound is
+		// the dump budget, not the interesting ids.
+		if (id >= 512)
 		{
 			return;
 		}
 
 		std::error_code error;
-		std::filesystem::create_directories("/tmp/mtl4-dump", error);
-		const std::string base = std::string("/tmp/mtl4-dump/") + stage + "-" + std::to_string(id);
+		std::filesystem::create_directories(probe::dump_directory(), error);
+		const std::string base = std::string(probe::dump_directory()) + "/" + stage + "-" + std::to_string(id);
 
 		std::ofstream(base + ".glsl") << glsl;
 		std::ofstream(base + ".metal") << msl;
@@ -67,9 +70,9 @@ namespace mtl
 		return decompile_vertex_glsl(program, &constant_ids, &has_indexed_constants);
 	}
 
-	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets)
+	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets, u32 id)
 	{
-		return decompile_fragment_glsl(program, &constant_offsets);
+		return decompile_fragment_glsl(program, &constant_offsets, id);
 	}
 
 	namespace
@@ -982,7 +985,7 @@ namespace mtl
 		data.color_output_mask = 0;
 		data.constant_offsets.clear();
 
-		std::string glsl = decompile_fragment_program(program, data.constant_offsets);
+		std::string glsl = decompile_fragment_program(program, data.constant_offsets, data.id);
 		if (glsl.empty())
 		{
 			rsx_log.error("Metal: the fragment decompile produced no GLSL (fp id %u)", data.id);

@@ -448,8 +448,10 @@ verified *differentially* until rung-3 guest readback exists (**R43**; `11` §6)
 5. **`MTL4VisibilityOptions` selection table.** Is `.device` sufficient for *every* ordinary RSX
    dependency, including the RTT→texture case? `[I]` pending a spike; `02` §4 NR2 says `.device`
    suffices for normal placement-heap aliasing.
-6. **Fence replacement policy.** Per-commit feedback handler vs a per-frame `MTLSharedEvent` value
-   (`02` §7 Q6). RPCS3 has one `VkFence` per CB today (`vkutils/commands.cpp:58`). `[U]`
+6. **Fence replacement policy.** **Decided 2026-10-27:** a per-frame `MTLSharedEvent` timeline
+   signalled by `MTL4CommandQueue::signalEvent` after each commit. The feedback handler stays for
+   commit diagnostics and the ZCULL `completed_commits` gate, but no wait uses it
+   (DEVIATIONS-SYNC SY14, §Resolution 2026-10-27). `[V]`
 7. **`MTL4CommandAllocator` reset cadence** given many CBs per frame (`02` §7 Q7). `[U]`
 8. **Frame ring vs drawable ring.** One `MTL4CommandQueue` with batched CBs, or a second queue for
    the async stream (`02` §7 Q5/Q8; **R13**). This jointly decides `VKAsyncScheduler` and the
@@ -461,9 +463,11 @@ verified *differentially* until rung-3 guest readback exists (**R43**; `11` §6)
     wait for the GPU (`RSXThread.cpp:2917-2937`). If the Metal label path requires a real
     GPU→CPU visibility point, `sync()` may need to return a token the caller waits on — a change to
     shared code, which the RSX-first plan otherwise avoids. `[U]` — **highest-risk open question.**
-11. **`supports_host_gpu_labels` disposition.** `10` §2.2 rates it `reshape`; on unified memory the
-    label workaround may be unnecessary (`02` #15). Decide whether the label path is compute-written
-    or CPU-written. `[U]`
+11. **`supports_host_gpu_labels` disposition.** **Decided 2026-10-27:** honour
+    `g_cfg.video.host_label_synchronization` (default off). Off is the CPU store into the shared
+    guest page, which needs no GPU handshake and no FIFO reader wait (VK's default). On is the
+    compute-written label whose acquire waits on a `MTLSharedEvent` timeline signalled by
+    `MTL4CommandQueue::signalEvent` (DEVIATIONS-SYNC SY14, §Resolution 2026-10-27, L139). `[V]`
 
 **Highest-value open questions (for the human), in order:** **Q10** (does `sync()` become
 GPU-observable, and does that force a shared-code change?), **Q2/Q3** (commit/fence ordering

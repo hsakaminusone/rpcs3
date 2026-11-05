@@ -153,7 +153,11 @@ namespace mtl
 
 		// The colour mask is the format-aware one the caller resolved; a full
 		// MTLLoadActionClear is only legal when it covers every stored channel.
-		const bool clear_color = state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
+		// The caller's mask says whether a clear was asked for at all: a partial
+		// clear is a scissored fill and passes 0 here, and a load action would wipe
+		// everything outside that scissor (MTLFramebuffer.h:27-31).
+		const bool clear_color = (clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0 &&
+			state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
 		const bool clear_depth = (clear_mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
 		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0 && state.clear_stencil_fast;
 

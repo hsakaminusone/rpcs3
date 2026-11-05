@@ -134,4 +134,12 @@ Compliance note: this document quotes KosmicKrisp (Mesa) source for analysis onl
 Mesa contribution, and it is not published to the Mesa project. The Mesa `AGENTS.md` in the
 reference clone asks for a marker when prose is generated; biblioklept.
 
+## Resolution (2026-10-25)
+
+S1–S9 and S11–S13 are fixed (SF1–SF9, SF11–SF13 in `METAL4-TODO.md`). The two open rows are S10
+(a read-back on a scaled surface is bounded but not downscaled; needs a run at non-100 % scale)
+and SF14, the packed 16-bit surface write-back, which is not in this table but is recorded in
+`METAL4-TODO.md` C. S8 is the missing GPU blit and is a performance row only: the CPU fallback
+now flushes and invalidates correctly. See `GAP-PLAN.md`.
+
 <!-- doc-end -->

@@ -33,7 +33,7 @@ namespace mtl
 	// path needs to fill the fragment constant file
 	// (ProgramStateCache.h:141; MTLFragmentProgram.h).
 	std::string decompile_vertex_program(const RSXVertexProgram& program, std::vector<u16>& constant_ids, bool& has_indexed_constants);
-	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets);
+	std::string decompile_fragment_program(const RSXFragmentProgram& program, std::vector<u32>& constant_offsets, u32 id = 0);
 
 	// The library stage of one program.  The shared cache has only a real entry
 	// or a null entry; the registry needs the difference between absent, in

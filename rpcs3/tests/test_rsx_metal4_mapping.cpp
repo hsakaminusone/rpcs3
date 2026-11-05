@@ -830,18 +830,19 @@ TEST(MTLMapRaster, CullModeFollowsTheGcmCullFace)
 
 TEST(MTLMapRaster, WindingFollowsTheGcmFrontFace)
 {
-	// The draw viewport negates its height, and that reverses the screen-space
-	// orientation, so cw becomes CounterClockwise and ccw becomes Clockwise
-	// (MTLRasterState.h:54-58, invariant 2; gcm_enums.h:1656-1657).
+	// The negated draw viewport already lands the guest's screen space (y down) in
+	// Metal's framebuffer space (y down), so the mirror is carried by the viewport
+	// alone and the winding maps straight across, as it does in Vulkan
+	// (MTLRasterState.cpp:66-79, VKGSRender.cpp:205).  Device-confirmed in L116.
 	mtl::raster_state state{};
 
 	state.front_face = rsx::front_face::cw;
 	SCOPED_TRACE("cw");
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
 
 	state.front_face = rsx::front_face::ccw;
 	SCOPED_TRACE("ccw");
-	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingClockwise);
+	EXPECT_EQ(mtl::capture_front_face(state), MTL::WindingCounterClockwise);
 }
 
 TEST(MTLMapRaster, TheLatchedRegistersProduceTheDerivedCullMode)
@@ -890,7 +891,7 @@ TEST(MTLMapRaster, TheLatchedRegistersProduceTheDerivedCullMode)
 
 				EXPECT_EQ(mtl::capture_cull_mode(state), expected);
 				EXPECT_EQ(mtl::capture_front_face(state),
-					winding == rsx::front_face::cw ? MTL::WindingCounterClockwise : MTL::WindingClockwise);
+					winding == rsx::front_face::cw ? MTL::WindingClockwise : MTL::WindingCounterClockwise);
 			}
 		}
 	}

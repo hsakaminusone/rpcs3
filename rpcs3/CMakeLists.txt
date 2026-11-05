@@ -200,6 +200,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_pair.cpp
             tests/test_rsx_cfg.cpp
             tests/test_rsx_fp_asm.cpp
+            tests/test_rsx_fifo_streams.cpp
             tests/test_rsx_metal4_dials.cpp
             tests/test_rsx_metal4_interpreter.cpp
             tests/test_rsx_metal4_mapping.cpp

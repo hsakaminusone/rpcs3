@@ -714,6 +714,40 @@ substitutes glyphs. A stale atlas would still show glyphs; a null or invalid bin
 the first measurement is the atlas bind at the failing menu draw. Both need a level-5 capture at
 the car/menu/rear-window scene.
 
+### 7.12 The scissored clear (L148, built, needs a run)
+
+`MTLFramebuffer::open_pass` derived the colour load action from `state.clear_color_fast` and
+ignored its `clear_mask` argument. `clear_surface`'s partial path passes `clear_mask = 0` on
+purpose, because Metal has no scissored clear and the fill shader draws the scissor instead
+(`MTLGSRender.cpp:1789`); the still-true `clear_color_fast` then opened that pass with
+`MTLLoadActionClear` and wiped the whole attachment. Depth and stencil already honoured the mask,
+so only colour was affected, and the code contradicted its own contract
+(`MTLFramebuffer.h:27-31`). The colour load action now also requires the caller's colour bit; the
+whole-attachment path is unchanged, so no full clear changed behaviour.
+
+This is a proven defect independent of whether it explains the reported visuals. The measured
+census puts 5,393 colour-only clears in 5,612 frames, so the affected path is per-frame; whether
+any of those clears is scissored is exactly what the three new level-2 latches
+(`clear/whole load action`, `clear/scissored fill`, `clear/scissored fill full color`) report. The
+run-U bumper montage is ambiguous on its own: the patch is block-shaped and changes every frame,
+which a whole-target wipe alone does not explain. The run decides, then L146/L147 are re-checked
+against the same build before any level-5 capture is spent.
+
+### 7.13 The quit hang (N13, fixed, needs a run)
+
+The `.ips` from the forced quit put `cellAudio Thread` in `CubebBackend::Close()+80` waiting on
+`m_cb_mutex`, and `Emulation Join Thread` waiting on that thread. `Close()` is reached from
+`CubebBackend::Open()`'s `cubeb_stream_start()` failure path (`CubebBackend.cpp:184`) while `Open()`
+still holds `m_cb_mutex` (`:106`), so the thread deadlocks on itself. The log agrees: start fails
+at `0:00:05.506`, the stream is destroyed at `:565`, and that thread says nothing again until the
+join starts reporting it as too sleepy at `0:03:17`. The game therefore ran the whole session with
+no audio. `Open()` now uses a `unique_lock` and unlocks before the failure-path `Close()`.
+
+This also explains the earlier forced-terminate abort: with the thread unjoinable, the stop path
+times out and tears the JIT down under live threads. The remaining audio defect is the start
+failure itself (`AudioOutputUnitStart` returns `kAudioHardwareIllegalOperationError`); the deadlock
+fix only makes it non-fatal. Verify a clean window close, then treat the start failure separately.
+
 ---
 
 ## 8. Accepted limitations

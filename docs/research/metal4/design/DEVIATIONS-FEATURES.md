@@ -94,15 +94,15 @@ the whole MTL tree has no read of that key.
 | A46 | `anisotropic_level_override` (`system_config.h:174`) | `RSXTexture.cpp:217` (shared) | MTL sampler state | honoured | not a deviation | anisotropic override works | - | none |
 | A47 | `texture_lod_bias` (`system_config.h:175`) | `RSXTexture.cpp:315` (shared) | MTL sampler state | honoured | not a deviation | LOD bias works | - | none |
 | A48 | `min_scalable_dimension` (`system_config.h:176`) | `RSXThread.cpp:1172` (shared) | same shared site | honoured | not a deviation | scale threshold works | - | none |
-| A49 | `shader_compiler_threads_count` (`system_config.h:177`) | `VKGSRender.cpp:700-702,1395-1397`; `GLGSRender.cpp:127` | Metal never reads it; `rsx_cache.h:280-281` uses `utils::get_thread_count()` | user count is ignored | ignored setting | a user on a low-core or high-core machine cannot tune compile workers; Metal always uses all cores | M | apply the count in `rsx_cache.h:280-281` |
+| A49 | `shader_compiler_threads_count` (`system_config.h:177`) | `VKGSRender.cpp:700-702,1395-1397`; `GLGSRender.cpp:127` | `rsx_cache.h:282` reads the count for every backend | user count is honoured | not a deviation | the shared worker count is applied; 0 keeps `utils::get_thread_count()` | - | none |
 | A50 | `driver_recovery_timeout` (`system_config.h:178`) | `nv406e.cpp:68` (shared) | same shared site | honoured | not a deviation | works | - | none |
 | A51 | `driver_wakeup_delay` (`system_config.h:179`) | `RSXThread.cpp:3066` (shared) | same shared site | honoured | not a deviation | works | - | none |
 | A52 | `vblank_rate` / `vblank_ntsc` (`system_config.h:180-181`) | `RSXThread.cpp:1198-1199` (shared) | same shared site | honoured | not a deviation | works | - | none |
 | A53 | `decr_memory_layout` (`system_config.h:182`) | `sys_rsx.cpp:459` (shared) | same shared site | honoured | not a deviation | works | - | none |
-| A54 | `host_label_synchronization` (`system_config.h:183`) | `VKGSRender.cpp:801`; `GLGSRender.cpp:222` | Metal never reads it; Metal forces `supports_host_gpu_labels=false` (`MTLDevice.cpp:314`) | setting is ignored | ignored setting | the "Allow Host GPU Labels" workaround has no effect on Metal, so a game that needs label-driven sync cannot use it | M | implement host labels, or hide the checkbox for Metal |
-| A55 | `disable_msl_fast_math` (`system_config.h:184`) | `VK/vkutils/instance.cpp:185` (MoltenVK) | Metal never reads it | setting is ignored | ignored setting | a Metal-only setting does nothing on the Metal backend; a user who sees fast-math artifacts cannot turn fast math off | H | set the MSL math mode in `MTLShader.cpp` |
+| A54 | `host_label_synchronization` (`system_config.h:183`) | `VKGSRender.cpp:801`; `GLGSRender.cpp:222` | `MTLDevice.cpp:385` -- `supports_host_gpu_labels` follows the setting; off (default) is the shared host store, on is the GPU label write with the per-page import | honoured | not a deviation | off is VK's default and leaves the FIFO reader free of any label wait (L139); the enabled path's acquire waits on the commit's completion event (SY14) | - | none |
+| A55 | `disable_msl_fast_math` (`system_config.h:184`) | `VK/vkutils/instance.cpp:185` (MoltenVK) | `MTLShader.cpp:227,276` -- `setMathMode(MathModeSafe/MathModeFast)` | honoured | not a deviation | both the pipeline and the helper compile follow the setting | - | none |
 | A56 | `disable_async_host_memory_manager` (`system_config.h:185`) | `MM.cpp:129` (shared) | same shared site | honoured | not a deviation | works | - | none |
-| A57 | `output_scaling` (`system_config.h:186`) | `VKPresent.cpp:804-820`; `GLPresent.cpp:399-413` | Metal never reads it; `compose` always runs the bilinear `m_scale` or the calibration pass (`MTLPresent.cpp:88-97`) | `nearest` and `fsr` are silently replaced by `bilinear` | missing feature | the user selects "FidelityFX Super Resolution" and gets bilinear; `m_nearest` is initialised (`MTLPresent.cpp:31`) but never used | H | drive the upscaler from the setting; add an FSR pass |
+| A57 | `output_scaling` (`system_config.h:186`) | `VKPresent.cpp:804-820`; `GLPresent.cpp:399-413` | `MTLPresent.cpp:102` selects `m_nearest` for `nearest`, `m_scale` otherwise; FSR has no path | `nearest` honoured, `fsr` falls back to bilinear | partial | a user who selects FSR still gets bilinear; FSR needs its own pass | M | add the FSR pass, or hide the `fsr` choice when Metal is active |
 | A58 | `record_with_overlays` (`system_config.h:187`) | `VKPresent.cpp:684` | `MTLGSRender.cpp:3033` | honoured | not a deviation | recording with or without overlays works | - | none |
 | A59 | `disable_hardware_blending` (`system_config.h:188`) | `RSXThread.cpp:319` (shared) | same shared site | honoured | not a deviation | ROP blending control works | - | none |
 | A60 | `disable_hardware_texel_remapping` (`system_config.h:189`) | `VKDraw.cpp:368`; `GLDraw.cpp:398` | Metal never reads it; self-declared ignored at `MTLDevice.cpp:89` | setting is ignored | ignored setting | Metal has no hardware remap path, so the workaround is already "off"; the user sees no change | M | document it, or implement the remap path |
@@ -134,7 +134,7 @@ the whole MTL tree has no read of that key.
 | B5 | Last provoking vertex | `VKGSRender.cpp:751`; `GLGSRender.cpp:54` | `MTLDevice.cpp:312` (`false`) | smooth fallback | capability mismatch | possible; some games depend on it | flat-shader emulation with a provoking index |
 | B6 | Asynchronous compute | `VKGSRender.cpp:807` | `MTLDevice.cpp:302` (`true`) | independent command buffers | not a deviation | no | none |
 | B7 | Passthrough DMA | `VKGSRender.cpp:798` | `MTLDevice.cpp:311` (`false`) | off | capability mismatch | no; a performance feature | none for parity |
-| B8 | Host GPU labels | `VKGSRender.cpp:801`; `GLGSRender.cpp:224` | `MTLDevice.cpp:314` (`false`) | off | capability mismatch | yes, for the setting in A54 | implement label-driven sync |
+| B8 | Host GPU labels | `VKGSRender.cpp:801`; `GLGSRender.cpp:224` | `MTLDevice.cpp:385` follows the setting | follows `Allow Host GPU Labels`, off by default | not a deviation | no; the enabled path waits on the commit's completion event (SY14) | none |
 | B9 | Hardware renormalization | `GLGSRender.cpp:380` | `MTLDevice.cpp:310` (`false`) | off | capability mismatch | no; GL sets it for NVIDIA only | none |
 | B10 | Vertex cache | `VKGSRender.cpp:716` (`disable_vertex_cache`); vertex cache in shared offload | no MTL vertex cache; per-draw upload (`MTLGSRender.cpp:2115-2157`) | absent | missing feature | not for correctness; yes for CPU cost | add an index/vertex cache |
 | B11 | GPU blit engine (NV3089) | `VKGSRender.cpp:2870`; `GLGSRender.cpp:1395` | `MTLGSRender.cpp:3264-3291` returns `false` | CPU blit only | missing feature | yes, for parity of `force_cpu_blit_processing` and `disable_blit_engine_upscaling` | implement `scaled_image_from_memory` |
@@ -143,7 +143,7 @@ the whole MTL tree has no read of that key.
 | B14 | RCAS sharpening | `VK fsr_pass.cpp:182`; `GL fsr_pass.cpp:157` | Metal never reads the key | absent | missing feature | yes, with B12 | add the CAS step to the FSR pass |
 | B15 | Debug overlay statistics text | `VKPresent.cpp:947`; `GLPresent.cpp:470` | no call to `set_debug_overlay_text` | empty overlay | missing feature | yes, for the debug overlay | fill the text in `MTLGSRender.cpp` |
 | B16 | Shader compilation hint | `VKGSRender.cpp:2045-2054`; `GLGSRender.cpp:889` | Metal never reads the key | no hint | missing feature | no | show the hint on a pipeline build |
-| B17 | Async pipeline compile | `VKGSRender.cpp:1395-1397` | Metal builds in `MTLShader.cpp` / `MTLDevice.cpp:157-188` | synchronous only | different behaviour | no, if compiler threads stay tunable | keep synchronous; wire A49 |
+| B17 | Async pipeline compile | `VKGSRender.cpp:1395-1397` | Metal builds in `MTLShader.cpp` / `MTLDevice.cpp:157-188` | synchronous only | different behaviour | no; the worker count is tunable (A49) | keep synchronous |
 | B18 | Alpha window support | `GLPresent.cpp:397` (`has_alpha`) | `MTLMetalLayer.mm:128` sets `opaque = YES` | never transparent | capability mismatch | no; RPCS3 has no transparent-window video setting | none |
 | B19 | HDR output | no VK/GL site | `MTLMetalLayer.mm:140` uses `kCGColorSpaceSRGB` only | sRGB 8-bit only | optional enhancement | no; no backend implements HDR | optional, see C9-C13 |
 | B20 | Variable refresh rate | no VK/GL site | `MTLMetalLayer.mm:174` toggles display sync; `MTLPresenter.cpp:303` uses `presentAfterMinimumDuration` | sync off gives an uncapped present | optional enhancement | no | optional; a frame-limit policy is the real control |
@@ -180,28 +180,23 @@ the whole MTL tree has no read of that key.
 These keys are read by Vulkan or OpenGL but never read by Metal. The user sees the
 control and it does nothing.
 
-1. `output_scaling` and `rcas_sharpening_intensity` (A57, A61). The output scaling
-   combo and the sharpening slider are visible for Metal
-   (`settings_dialog.cpp:599`, `settings_dialog.cpp:897-902`). Metal always scales
-   bilinearly (`MTLPresent.cpp:88-97`). This is the most visible ignore.
-2. `disable_msl_fast_math` (A55). The setting exists for Apple GPUs
-   (`tooltips.h:57`), the checkbox is shown on macOS (`settings_dialog.cpp:1500-1503`),
-   and the Metal backend never reads it. Only MoltenVK reads it
-   (`instance.cpp:185`).
-3. `shadermode` (A7). "Interpreter only" still produces recompiled shaders. Metal
+1. `rcas_sharpening_intensity` (A61). The sharpening slider is visible for Metal and
+   Metal has no RCAS pass. `output_scaling` (A57) now selects `nearest` or the bilinear
+   pass (`MTLPresent.cpp:102`); only the `fsr` choice still falls back to bilinear.
+2. `shadermode` (A7). "Interpreter only" still produces recompiled shaders. Metal
    has no interpreter.
-4. `shader_compiler_threads_count` (A49). Metal uses `utils::get_thread_count()`
-   at `rsx_cache.h:280-281`.
-5. `host_label_synchronization` (A54). The capability is forced false at
-   `MTLDevice.cpp:314`, and the setting is never read.
-6. `disable_vertex_cache` (A26). Metal has no vertex cache, so the workaround is
+3. `disable_vertex_cache` (A26). Metal has no vertex cache, so the workaround is
    always on.
-7. `force_high_precision_z_buffer` (A21). Metal is always high precision.
-8. `disable_hardware_texel_remapping` (A60). Metal has no hardware remap path.
-9. `log_programs`, `debug_output`, `renderdoc_compatiblity`,
+4. `force_high_precision_z_buffer` (A21). Metal is always high precision.
+5. `disable_hardware_texel_remapping` (A60). Metal has no hardware remap path.
+6. `log_programs`, `debug_output`, `renderdoc_compatiblity`,
    `show_shader_compilation_hint` (A15, A16, A18, A63). Developer-facing, low impact.
-10. `force_cpu_blit_processing`, `disable_blit_engine_upscaling` (A31, A62). Both
-    are no-ops, because no GPU blit path exists.
+7. `force_cpu_blit_processing`, `disable_blit_engine_upscaling` (A31, A62). Both
+   are no-ops, because no GPU blit path exists.
+
+`disable_msl_fast_math` (A55), `shader_compiler_threads_count` (A49) and
+`host_label_synchronization` (A54) were on this list and are now honoured
+(`MTLShader.cpp:227,276`, `rsx_cache.h:282`, `MTLDevice.cpp:385`).
 
 The self-declared list at `MTLDevice.cpp:79-113` is not a reliable source for this
 section. Six of its ten entries are false positives (see Table A notes). Also, the
@@ -212,26 +207,22 @@ build prints nothing.
 
 ## 6. Missing features, ranked by user-visible impact
 
-1. **Output scaling mode (A57, B12, B13).** Highest impact. The user selects FSR or
-   nearest, and Metal renders bilinear. This affects every game and every frame.
-   The nearest pass even exists (`MTLPresent.cpp:31`) and is never run.
+1. **FSR output scaling (A57, B12, B13).** The `nearest` choice now runs the nearest
+   pass and bilinear is the default (`MTLPresent.cpp:102`), so only `fsr` still falls
+   back to bilinear. This affects every game and every frame when it is selected.
 2. **RCAS sharpening (A61, B14).** Part of the same control group. The slider is
    shown and does nothing.
-3. **Disable MSL fast math (A55).** Apple-only control. A user with fast-math
-   artifacts has no fix on the Metal backend.
-4. **Shader mode (A7).** A user with a shader stall cannot fall back to the
+3. **Shader mode (A7).** A user with a shader stall cannot fall back to the
    interpreter. This is a compatibility feature, not a performance feature.
-5. **Debug overlay text (A17, B15).** The overlay opens and stays empty. A tester
+4. **Debug overlay text (A17, B15).** The overlay opens and stays empty. A tester
    cannot read the RSX statistics.
-6. **Shader compiler threads (A49).** A user cannot tune compile workers.
-7. **Host GPU labels (A54, B8).** A sync workaround is unavailable.
-8. **Vertex cache (A26, B10).** A CPU-cost feature is missing. The workaround
+5. **Vertex cache (A26, B10).** A CPU-cost feature is missing. The workaround
    setting cannot be used because the feature is absent.
-9. **GPU blit (A31, A62, B11).** A performance and parity gap. `force_cpu_blit_processing`
+6. **GPU blit (A31, A62, B11).** A performance and parity gap. `force_cpu_blit_processing`
    and `disable_blit_engine_upscaling` both do nothing.
-10. **Last provoking vertex (B5).** A correctness gap for a small number of games.
-11. **Shader compilation hint, program log, debug output, RenderDoc (A63, A15, A16, A18).**
-    Developer-facing. Low impact.
+7. **Last provoking vertex (B5).** A correctness gap for a small number of games.
+8. **Shader compilation hint, program log, debug output, RenderDoc (A63, A15, A16, A18).**
+   Developer-facing. Low impact.
 
 ---
 

@@ -3,6 +3,7 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/Memory/vm.h"
 #include "util/logs.hpp"
 
 #include <algorithm>
@@ -43,7 +44,14 @@ namespace mtl
 		descriptor->setType(MTL::HeapTypePlacement);
 		descriptor->setStorageMode(m_storage);
 		// The pass scheduler inserts the barriers, so a heap does not track hazards.
-		descriptor->setHazardTrackingMode(MTL::HazardTrackingModeUntracked);
+		// TODO(excise): a diagnostic that hands the ordering back to the driver.  A
+		// tracked heap delays every access to a sub-allocation until the conflicting
+		// access completes, so a run with this on answers one question: is a visual
+		// defect a missing edge (the defect goes) or content (the defect stays)?  It
+		// changes what the backend emits, so the boot states it.
+		descriptor->setHazardTrackingMode(probe::diagnostic_switch("MTL_PROBE_TRACKED_HEAPS")
+			? MTL::HazardTrackingModeTracked
+			: MTL::HazardTrackingModeUntracked);
 		descriptor->setSize(size);
 
 		MTL::Heap* heap = m_device->newHeap(descriptor);
@@ -265,6 +273,15 @@ namespace mtl
 	void resource_manager::shutdown()
 	{
 		garbage_collect();
+
+		// The label imports leave the residency set before their memory goes (L136).
+		for (label_page& page : m_label_pages)
+		{
+			m_residency.remove(page.buffer);
+			page.buffer->release();
+		}
+
+		m_label_pages.clear();
 		m_residency.shutdown();
 		m_shared.shutdown();
 		m_private.shutdown();
@@ -302,6 +319,43 @@ namespace mtl
 
 		track(buffer, pool, heap, offset, required.size);
 		check_residency(heap);
+		return buffer;
+	}
+
+	MTL::Buffer* resource_manager::label_buffer(u32 address, u32& offset)
+	{
+		// The host page is the unit of a guest mapping, so it is the unit of the
+		// import.  A page re-mapped after this call would keep the GPU on the old
+		// physical page, which is why the import is made here, after the page exists,
+		// rather than with the application-lifetime window (L136).
+		constexpr u32 page_size = 0x10000;
+		const u32 base = address & ~(page_size - 1);
+
+		for (const label_page& page : m_label_pages)
+		{
+			if (page.base == base)
+			{
+				offset = address - base;
+				return page.buffer;
+			}
+		}
+
+		if (address >= guest_address_space)
+		{
+			return nullptr;
+		}
+
+		MTL::Buffer* buffer = m_device->newBuffer(vm::g_sudo_addr + base, page_size,
+			MTL::ResourceStorageModeShared, nullptr);
+		if (!buffer)
+		{
+			rsx_log.error("Metal 4: the label import at 0x%x could not be created", base);
+			return nullptr;
+		}
+
+		m_residency.make_persistent(buffer);
+		m_label_pages.push_back({ base, buffer });
+		offset = address - base;
 		return buffer;
 	}
 

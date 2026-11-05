@@ -65,12 +65,16 @@ namespace mtl
 
 	MTL::Winding capture_front_face(const raster_state& state)
 	{
-		// The viewport negates its height, and a Y mirror reverses the screen-space
-		// orientation of every triangle, so the guest winding maps to the opposite
-		// Metal winding (invariant 2).
+		// The guest rule is stated in screen space, where y grows downward.  The
+		// negated viewport height already lands that space in Metal's framebuffer
+		// coordinates, which also grow downward, so the mirror is accounted for by
+		// the viewport alone and the winding maps straight across.  This is the
+		// Vulkan backend's arrangement too: a positive rectangle and a direct
+		// mapping (VKGSRender.cpp:205).  Inverting here as well flips the test a
+		// second time and culls the quads the app draws with culling enabled.
 		const bool clockwise = state.front_face == rsx::front_face::cw;
 
-		return clockwise ? MTL::WindingCounterClockwise : MTL::WindingClockwise;
+		return clockwise ? MTL::WindingClockwise : MTL::WindingCounterClockwise;
 	}
 
 	MTL::TriangleFillMode capture_fill_mode(const raster_state& state)

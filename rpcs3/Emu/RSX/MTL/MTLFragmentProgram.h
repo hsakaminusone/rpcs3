@@ -25,14 +25,23 @@ namespace mtl
 	// (FragmentProgramDecompiler.h:189).  The draw path needs it to fill the
 	// fragment constant file (ProgramStateCache.h:141), and the decompiler is the
 	// only thing that can produce it.
-	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets = nullptr);
+	// `id` is the compiled-program id the cache assigned, used only by the
+	// TODO(excise) MTL_PROBE_FORCE_FP diagnostic to name the one program whose
+	// output is forced.
+	std::string decompile_fragment_glsl(const RSXFragmentProgram& prog, std::vector<u32>* constant_offsets = nullptr, u32 id = 0);
 
 	// The subclass the base-class contract names (FragmentProgramDecompiler.h:8-21).
 	// It emits GLSL text only; the SPIR-V, MSL and library steps stay in
 	// MTLProgramPipeline.
 	struct MTLFragmentDecompilerThread : public FragmentProgramDecompiler
 	{
-		MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader);
+		MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader, u32 id = 0);
+
+		// TODO(excise): MTL_PROBE_FORCE_FP=<id>[,<id>...] forces the colour output
+		// of the named fragment programs, and clears their discard, so the write
+		// stage of one draw is observed on its own.  Read once, when the program
+		// is built, so the run needs a cold archive.
+		bool m_force_output = false;
 
 		void Task();
 

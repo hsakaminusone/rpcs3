@@ -199,12 +199,15 @@ namespace mtl
 		// the last bind are written.  vertex_stage selects which half of the set
 		// applies.  Returns true when a slot was written.
 		//
-		// The return value is a write signal, not a bind signal.  Metal 4 snapshots
-		// the table when the encoder binds it, and every draw opens its own pass and
-		// therefore its own encoder (MTLCommandRecorder.cpp:174), so the caller
-		// re-binds the table on every draw.  Skipping the re-bind when no slot was
-		// written leaves that encoder without the table, and every read of it is then
-		// unbound (REVIEW-FINDINGS.md F19).
+		// Metal 4 captures the table once per draw, when the draw is encoded, not
+		// at setArgumentTable and not when the GPU executes it (measured on this
+		// device, 2026-10-22: a value written after setArgumentTable is seen by a
+		// later draw, and a value present at an earlier draw is not changed by a
+		// later write).  An unwritten slot therefore keeps the previous draw's
+		// binding, so a slot that becomes zero must be written as zero.  The
+		// return value is advisory: the caller re-binds the table on every subdraw
+		// (MTLGSRender.cpp:3322), which keeps the bind stream simple and is safe
+		// under the per-draw capture.
 		// `bind_textures` selects the texture-unit writes.  The interpreter passes
 		// false because its compact sampler arrays own the table's texture range.
 		bool bind(MTL4::ArgumentTable* table, bool vertex_stage, const argument_binds& binds, bool bind_textures = true);

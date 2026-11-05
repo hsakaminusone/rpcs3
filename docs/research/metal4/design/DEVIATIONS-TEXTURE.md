@@ -265,6 +265,10 @@ now use `encode_depth_plane` after a bounded read-back wait.
 | TX3, TX5, TX7–TX14 | Open. |
 | TX20 | Open (planned: the `R6G5B5` expansion). |
 
+Updated 2026-10-25: TX3, TX7 and TX9 are fixed (TX7's view path now keeps the source type,
+3D and cube included, and applies the composed layout). The open rows are TX5, TX8, TX10, TX11,
+TX13 (no action), TX14 and TX20. See `GAP-PLAN.md`.
+
 Build and tests: 143/143 MTL, 490/490 full.
 
 ---

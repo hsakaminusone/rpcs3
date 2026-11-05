@@ -818,6 +818,7 @@ namespace rsx
 
 		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
 		fifo_ctrl->set_get(ctrl->get);
+		fifo_ctrl->reset_streams(ctrl->get);
 
 		resolution_scaling_config =
 		{
@@ -1314,6 +1315,7 @@ namespace rsx
 					{
 						vm::_ptr<atomic_be_t<u64>>(dma_address + ::offset32(&RsxDmaControl::put))->release(get_put);
 						fifo_ctrl->set_get(static_cast<u32>(get_put));
+						fifo_ctrl->reset_streams(static_cast<u32>(get_put));
 						fifo_ctrl->abort();
 						fifo_ret_addr = RSX_CALL_STACK_EMPTY;
 						last_known_code_start = static_cast<u32>(get_put);
@@ -1818,6 +1820,33 @@ namespace rsx
 				info.words_valid = true;
 			}
 
+			// TODO(excise): level 1; every word is translated on its own, so a page
+			// boundary or an unmapped hole shows as a marker instead of ending the
+			// dump.
+			for (u32 index = 0; index < 256; ++index)
+			{
+				if (info.get < index * 4)
+				{
+					break;
+				}
+
+				const u32 address = fifo_ctrl->translate_address(info.get - index * 4);
+				info.words_before[index] = address != umax ? static_cast<u32>(vm::read32(address)) : 0xfeed0000;
+				info.words_before_valid = true;
+			}
+
+			// TODO(excise): level 1; the cache snapshot the host was parsing out of,
+			// and the position it expected the next command at.
+			info.cache_addr = fifo_ctrl->cache_addr();
+			info.cache_size = fifo_ctrl->cache_size();
+			info.next_cmd_entry = fifo_ctrl->next_cmd_entry();
+
+			for (u32 index = 0; index < 16; ++index)
+			{
+				const u32 position = info.get - 32 + index * 4;
+				info.cache_words_valid[index] = fifo_ctrl->peek_cache(position, info.cache_words[index]);
+			}
+
 			const u32 count = m_dispatch_history_count;
 			const u32 first = (m_dispatch_history_next + dispatch_history_size - count) % dispatch_history_size;
 
@@ -1855,6 +1884,10 @@ namespace rsx
 
 		// Error. Should reset the queue
 		fifo_ctrl->set_get(restore_point);
+		// Keep the command streams the parser has already discovered: wiping them
+		// makes the next jump into a command buffer create a stream whose frontier
+		// is its own base, which parks the parser before it reads a single word.
+		fifo_ctrl->reset_streams(restore_point, true);
 		fifo_ret_addr = saved_fifo_ret;
 		std::this_thread::sleep_for(2ms);
 		fifo_ctrl->abort();

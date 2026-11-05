@@ -215,8 +215,9 @@ defines the slot map**: `vk::pipeline_binding_table` reserves **12 fixed slots**
 state 3, fragment texture params 4, vertex buffers 5, conditional predicate 8, rasteriser env 9,
 instancing table 10, instancing constants 11, textures from 12). `[V]` Under RSX-first this is not a
 "descriptor layout" — it is **the RSX shader's argument register file**, re-expressed with
-`setAddress`/`setTexture`/`setSamplerState`. The table snapshots at draw time, so it is safe to mutate
-between draws (`09` §4). `[V]`
+`setAddress`/`setTexture`/`setSamplerState`. The table is captured per draw, when the draw is
+encoded, so it is safe to mutate between draws — but a slot that is not written keeps the previous
+draw's value, so a cleared slot must be written as zero (measured 2026-10-22; `CONFLICTS.md` X5). `[V]`
 
 **Why it differs from the VK plan.** The VK-derived plan owns an entire descriptor-set/layout/pool
 subsystem (`vkutils/descriptors.{h,cpp}` 785 LOC, `VKCommonPipelineLayout` 39, `pipeline_binding_table`

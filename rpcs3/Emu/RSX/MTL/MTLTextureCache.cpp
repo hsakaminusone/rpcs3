@@ -208,10 +208,10 @@ namespace mtl
 						const u32 index = diagnostic_dumps++;
 						const usz raw_write_size = std::min<usz>(raw_size, 16u * 1024u * 1024u);
 						diagnostic_dump_bytes += raw_size + size;
-						char path[192];
+						char path[512];
 
-						std::snprintf(path, sizeof(path), "/tmp/mtl4-dump/guest-%u-addr%x-fmt%x-sw%u-%ux%u-sz%llu.bin",
-							index, address, gcm_format, is_swizzled ? 1u : 0u,
+						std::snprintf(path, sizeof(path), "%s/guest-%u-addr%x-fmt%x-sw%u-%ux%u-sz%llu.bin",
+							probe::dump_directory(), index, address, gcm_format, is_swizzled ? 1u : 0u,
 							static_cast<u32>(layout.width_in_texel), static_cast<u32>(layout.height_in_texel),
 							static_cast<unsigned long long>(raw_size));
 						if (std::FILE* out = std::fopen(path, "wb"))
@@ -223,8 +223,8 @@ namespace mtl
 							std::fclose(out);
 						}
 
-						std::snprintf(path, sizeof(path), "/tmp/mtl4-dump/conv-%u-addr%x-fmt%x-sw%u-%ux%u-sz%u.bin",
-							index, address, gcm_format, is_swizzled ? 1u : 0u,
+						std::snprintf(path, sizeof(path), "%s/conv-%u-addr%x-fmt%x-sw%u-%ux%u-sz%u.bin",
+							probe::dump_directory(), index, address, gcm_format, is_swizzled ? 1u : 0u,
 							static_cast<u32>(layout.width_in_texel), static_cast<u32>(layout.height_in_texel), size);
 						if (std::FILE* out = std::fopen(path, "wb"))
 						{
@@ -756,6 +756,11 @@ namespace mtl
 		MTL_PROBE_HISTOGRAM(2, "texture bind dimension", static_cast<u32>(desc->image_type), "bind dimension");
 		MTL_PROBE_HISTOGRAM(2, "texture bind format class", static_cast<u32>(desc->format_class), "format class");
 
+		// TODO(excise): level 2; the sample count of the image a unit samples.  It
+		// says whether a surface read binds the multisampled image or its resolve
+		// target, which is the path a resolved image takes to a shader.
+		MTL_PROBE_HISTOGRAM(2, "texture bind samples", desc->samples, "sample count");
+
 		if (desc->is_cyclic_reference)
 		{
 			// TODO(excise): level 2; the section is both a render target and a
@@ -790,6 +795,17 @@ namespace mtl
 			// TODO(excise): level 2; a deferred copy or gather ran at bind.
 			MTL_PROBE_LATCH(2, "texture/bind deferred");
 			deferred = true;
+
+			// TODO(excise): level 5; the materialised image is about to be sampled,
+			// so this is the last point before the pass where its content can be
+			// read back.  The gather is the car's reflection unit, the one surface
+			// whose image the capture window never had at bind time.
+			if (probe::at_least(5))
+			{
+				probe::deferred_dump = { image->value(), desc->ref_address,
+					static_cast<u32>(desc->external_subresource_desc.op) };
+			}
+
 			return { image->resource_id(), sampler->gpuResourceID() };
 		}
 

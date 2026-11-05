@@ -3,11 +3,17 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLInstrumentation.h"
+#include "MTLBarrier.h"
 
+#include "Emu/Memory/vm.h"
+#include "util/asm.hpp"
 #include "util/logs.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <mach/mach_time.h>
+#include <thread>
 
 namespace mtl
 {
@@ -32,6 +38,16 @@ namespace mtl
 		m_queue = dev.queue();
 		m_resources = &resources;
 
+		// One timeline for every commit.  The queue signals it after the commit's
+		// work, so the CPU can read completion without the feedback handler's lock
+		// (SY14; metal-cpp MTL4CommandQueue.hpp:142).  A device that cannot create a
+		// shared event cannot report completion at all, which is a backend fault.
+		m_completion_event = m_device->newSharedEvent();
+		if (!m_completion_event)
+		{
+			die("Metal 4: the completion event could not be created");
+		}
+
 		for (frame_slot& slot : m_slots)
 		{
 			allocate_slot(slot);
@@ -40,6 +56,19 @@ namespace mtl
 		for (std::atomic<u64>& completed : m_completed)
 		{
 			completed.store(0, std::memory_order_relaxed);
+		}
+
+		m_label_staging = resources.new_buffer(static_cast<u64>(frame_slot_count) * label_staging_bytes, MTL::StorageModeShared);
+		if (!m_label_staging)
+		{
+			die("Metal 4: the label staging buffer could not be allocated");
+		}
+
+		// TODO(excise): level 2; probe word per slot.
+		m_label_probe = resources.new_buffer(static_cast<u64>(frame_slot_count) * sizeof(u32), MTL::StorageModeShared);
+		if (!m_label_probe)
+		{
+			die("Metal 4: the label probe buffer could not be allocated");
 		}
 	}
 
@@ -59,6 +88,10 @@ namespace mtl
 	// the allocator is not (DEVIATIONS-SYNC.md, SY3).
 	void command_recorder::release_slot(frame_slot& slot)
 	{
+		// The slot is being abandoned or rebuilt, so its label addresses no longer
+		// describe anything the GPU can still write.
+		slot.labels.clear();
+
 		if (slot.interpreter_fragment_table)
 		{
 			slot.interpreter_fragment_table->release();
@@ -125,38 +158,94 @@ namespace mtl
 		}
 	}
 
+	bool command_recorder::slot_idle(const frame_slot& slot) const
+	{
+		return !slot.completion_value || !m_completion_event ||
+			slot.completion_value <= m_completion_event->signaledValue();
+	}
+
+	bool command_recorder::await_value(u64 value, const char* what)
+	{
+		if (!value || !m_completion_event || m_completion_event->signaledValue() >= value)
+		{
+			return true;
+		}
+
+		// The wait is bounded, because a signal that never arrives must not stop
+		// the RSX thread (VKPresent.cpp:250 bounds the same wait with
+		// FRAME_PRESENT_TIMEOUT).  A commit finishes in microseconds to
+		// milliseconds, so a short pause spin covers the common case and lets the
+		// thread sleep only when the GPU is genuinely behind.  The clock is read
+		// on the sleep path only, so the spin costs nothing but the event read.
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(recorder_feedback_timeout);
+		u32 spins = 0;
+
+		while (m_completion_event->signaledValue() < value)
+		{
+			if (++spins < 256)
+			{
+				utils::pause();
+				continue;
+			}
+
+			if (std::chrono::steady_clock::now() >= deadline)
+			{
+				rsx_log.error("Metal 4: %s waited %u s for completion value %llu, the event is at %llu",
+					what, recorder_feedback_timeout, value, m_completion_event->signaledValue());
+				return false;
+			}
+
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+		}
+
+		return true;
+	}
+
+	bool command_recorder::await_slot(const frame_slot& slot, const char* what)
+	{
+		return await_value(slot.completion_value, what);
+	}
+
 	bool command_recorder::wait_idle()
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/wait idle");
 
-		std::unique_lock lock(m_mutex);
-		return m_condition.wait_for(lock, std::chrono::seconds(recorder_feedback_timeout),
-			[this] { return ring_idle(); });
+		u64 target = 0;
+
+		for (const frame_slot& slot : m_slots)
+		{
+			target = std::max(target, slot.completion_value);
+		}
+
+		return await_value(target, "wait idle");
 	}
 
 	void command_recorder::shutdown()
 	{
 		// Drain the ring before the objects go away (HLD-04 §2.4).  The wait is
-		// bounded: a commit whose feedback never arrives must not hold the shutdown
+		// bounded: a commit whose signal never arrives must not hold the shutdown
 		// for ever, because the window close that owns this call would never return.
-		bool idle = true;
+		u64 target = 0;
+
+		for (const frame_slot& slot : m_slots)
 		{
-			std::unique_lock lock(m_mutex);
+			target = std::max(target, slot.completion_value);
+		}
 
-			if (!m_condition.wait_for(lock, std::chrono::seconds(recorder_feedback_timeout), [this] { return ring_idle(); }))
+		const bool idle = await_value(target, "shutdown");
+
+		if (!idle)
+		{
+			u32 in_flight = 0;
+
+			for (const frame_slot& slot : m_slots)
 			{
-				u32 in_flight = 0;
-
-				for (const frame_slot& slot : m_slots)
-				{
-					in_flight += slot.in_flight.load() ? 1u : 0u;
-				}
-
-				rsx_log.error("Metal 4: the frame ring did not drain in %u s, %u slot(s) still in flight; their objects are leaked rather than released",
-					recorder_feedback_timeout, in_flight);
-				idle = false;
+				in_flight += slot_idle(slot) ? 0u : 1u;
 			}
+
+			rsx_log.error("Metal 4: the frame ring did not drain in %u s, %u slot(s) still in flight; their objects are leaked rather than released",
+				recorder_feedback_timeout, in_flight);
 		}
 
 		// Releasing a slot whose GPU work is unfinished frees memory the queue may
@@ -167,6 +256,20 @@ namespace mtl
 			for (frame_slot& slot : m_slots)
 			{
 				release_slot(slot);
+			}
+
+			// The staging buffer is read by the GPU, so it goes with the slots.
+			if (m_label_staging)
+			{
+				m_resources->defer_release(m_label_staging);
+				m_label_staging = nullptr;
+			}
+
+			// The queue would signal a released event on a late commit.
+			if (m_completion_event)
+			{
+				m_completion_event->release();
+				m_completion_event = nullptr;
 			}
 		}
 
@@ -189,30 +292,27 @@ namespace mtl
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/begin frame/wait feedback");
-			std::unique_lock lock(m_mutex);
 
-			if (slot.in_flight.load())
+			if (!slot_idle(slot))
 			{
 				// TODO(excise): level 4; deep-probe line.
-				MTL_NOTE(4, "Metal 4: slot %u is in flight, begin_frame waits for its feedback", m_slot);
+				MTL_NOTE(4, "Metal 4: slot %u is in flight, begin_frame waits for its completion", m_slot);
+				reported = await_slot(slot, "begin frame");
 			}
-
-			reported = m_condition.wait_for(lock, std::chrono::seconds(recorder_feedback_timeout),
-				[&slot] { return !slot.in_flight.load(); });
 		}
 
 		if (!reported)
 		{
-			// The commit never reported back, so its allocator cannot be reset:
+			// The commit never completed, so its allocator cannot be reset:
 			// resetting an allocator whose GPU work is unfinished is undefined.  The
 			// slot takes fresh objects, the generation advances so the late feedback
 			// is ignored, and the stalled objects are abandoned rather than reset.
 			// The frame ring keeps moving and the RSX thread keeps running.
-			rsx_log.error("Metal 4: slot %u did not report its feedback in %u s, the slot takes fresh objects",
+			rsx_log.error("Metal 4: slot %u did not complete in %u s, the slot takes fresh objects",
 				m_slot, recorder_feedback_timeout);
 			allocate_slot(slot);
 			slot.generation.fetch_add(1, std::memory_order_relaxed);
-			slot.in_flight.store(false);
+			slot.completion_value = 0;
 		}
 
 		m_resources->on_frame_begin(m_slot);
@@ -253,7 +353,12 @@ namespace mtl
 			// Never reset an allocator while its GPU work is in flight (HLD-01 §4.7).
 			slot.allocator->reset();
 			slot.command_buffer->beginCommandBuffer(slot.allocator);
+			slot.label_staging_offset = 0;
+			slot.labels.clear();
+			m_pending_count = 0;
+			m_reenter_pending = false;
 			m_encoder = nullptr;
+			m_compute_encoder = nullptr;
 		}
 
 #if MTL_PERF_ENABLED
@@ -261,7 +366,7 @@ namespace mtl
 
 		for (const frame_slot& other : m_slots)
 		{
-			in_flight += other.in_flight.load() ? 1u : 0u;
+			in_flight += slot_idle(other) ? 0u : 1u;
 		}
 
 		// TODO(excise): level 1; instantaneous value.
@@ -276,9 +381,29 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/submit");
 
+		if (m_reenter_pending)
+		{
+			// A label commit already submitted the frame's last commands, so only the
+			// drawable is left; a commit with nothing in it would be pure overhead.
+			m_reenter_pending = false;
+
+			if (m_drawable)
+			{
+				// TODO(excise): level 1; block timer.
+				MTL_PERF_SCOPE(1, "recorder/submit/signal drawable");
+				m_queue->signalDrawable(m_drawable);
+				m_drawable = nullptr;
+			}
+
+			m_slot = (m_slot + 1) % frame_slot_count;
+			return;
+		}
+
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/submit/close encoder");
+			// A label recorded after the last pass belongs to this commit.
+			flush_label_writes();
 			close_encoder();
 		}
 
@@ -292,7 +417,6 @@ namespace mtl
 		}
 
 		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
-		slot.in_flight.store(true);
 
 		commit_slot(slot, index, generation);
 
@@ -321,9 +445,17 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/readback wait");
 
+		if (m_reenter_pending)
+		{
+			reenter_slot();
+		}
+
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/readback wait/close encoder");
+			// A pending label must reach the commit; a readback may be what the guest
+			// uses to learn that the GPU finished.
+			flush_label_writes();
 			close_encoder();
 		}
 
@@ -335,41 +467,72 @@ namespace mtl
 			slot.command_buffer->endCommandBuffer();
 		}
 
-		slot.in_flight.store(true);
-
 		// Each commit takes a generation of its own, so a late feedback of the
 		// frame's earlier commit cannot clear this one.
 		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
 		commit_slot(slot, m_slot, generation);
 
+		// The slot came back, so its GPU work is complete and the same slot serves
+		// the rest of the frame (HLD-04 §3.1).
+		reenter_slot();
+	}
+
+	void command_recorder::reenter_slot()
+	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "recorder/re-enter slot");
+
+		frame_slot& slot = m_slots[m_slot];
+
+		// One atomic load when the commit has already finished, which is the common
+		// case: the frame committed, the GPU ran it, and the next encoder re-enters.
 		bool reported = true;
 		{
 			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/readback wait/gpu wait");
-			std::unique_lock lock(m_mutex);
-			reported = m_condition.wait_for(lock, std::chrono::seconds(recorder_feedback_timeout),
-				[&slot] { return !slot.in_flight.load(); });
+			MTL_PERF_SCOPE(1, "recorder/re-enter slot/wait");
+			reported = await_slot(slot, "re-enter slot");
 		}
 
 		if (!reported)
 		{
-			// A readback commit that never reports cannot block the RSX thread for
-			// ever (Vulkan bounds the same wait with GENERAL_WAIT_TIMEOUT,
-			// VKTextureCache.cpp:1472).  The slot takes fresh objects because its
-			// allocator must not be reset while the abandoned command buffer may
-			// still run; the readback may then carry stale data.
-			rsx_log.error("Metal 4: the readback commit did not report its feedback in %u s, the slot takes fresh objects",
-				recorder_feedback_timeout);
+			// The commit never completed, and an allocator must not be reset while its
+			// command buffer may still run (Vulkan bounds the same wait with
+			// GENERAL_WAIT_TIMEOUT, VKTextureCache.cpp:1472).  The slot takes fresh
+			// objects.
 			allocate_slot(slot);
 			slot.generation.fetch_add(1, std::memory_order_relaxed);
-			slot.in_flight.store(false);
+			slot.completion_value = 0;
 		}
 
-		// The slot came back, so its GPU work is complete and the same slot serves
-		// the rest of the frame (HLD-04 §3.1).
+		// TODO(excise): level 2; the GPU write must be visible in the guest window.
+		if (m_diag_label_address)
+		{
+			MTL::Buffer* guest = m_resources->guest_buffer();
+			u32 actual = 0;
+
+			if (guest && m_diag_label_address <= guest->length() && guest->length() - m_diag_label_address >= sizeof(u32))
+			{
+				actual = *reinterpret_cast<const u32*>(static_cast<const u8*>(guest->contents()) + m_diag_label_address);
+			}
+
+			MTL_NOTE(2, "sync/label verify addr=0x%x expected=0x%x sudo=0x%x guest=0x%x gpu=0x%x\n",
+				m_diag_label_address, m_diag_label_value, actual, vm::_ref<u32>(m_diag_label_address),
+				(m_label_probe && m_label_probe->length() >= (m_slot + 1) * sizeof(u32))
+					? *reinterpret_cast<const u32*>(static_cast<const u8*>(m_label_probe->contents()) + m_slot * sizeof(u32))
+					: 0);
+			m_diag_label_address = 0;
+		}
+
 		slot.allocator->reset();
 		slot.command_buffer->beginCommandBuffer(slot.allocator);
+		slot.label_staging_offset = 0;
+		// The feedback proves every label of the committed command buffer visible,
+		// so the next acquire on one of them needs no wait.
+		slot.labels.clear();
+		m_pending_count = 0;
+		m_reenter_pending = false;
 		m_encoder = nullptr;
+		m_compute_encoder = nullptr;
 	}
 
 	void command_recorder::set_present_drawable(MTL::Drawable* drawable)
@@ -390,6 +553,15 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/open pass");
+
+		if (m_reenter_pending)
+		{
+			reenter_slot();
+		}
+
+		// The pass boundary is the natural place for a label batch: no open pass is
+		// split, and the writes are ordered before the pass's load actions.
+		flush_label_writes();
 		close_encoder();
 
 		MTL4::RenderCommandEncoder* encoder = m_slots[m_slot].command_buffer->renderCommandEncoder(descriptor, options);
@@ -401,6 +573,18 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/open compute");
+
+		if (m_reenter_pending)
+		{
+			reenter_slot();
+		}
+
+		flush_label_writes();
+		return open_copy_encoder();
+	}
+
+	MTL4::ComputeCommandEncoder* command_recorder::open_copy_encoder()
+	{
 		// A compute encoder is reused for consecutive copies, so a texture upload
 		// of N units costs one encoder rather than N (HLD-04 §3.1).
 		if (m_compute_encoder)
@@ -414,6 +598,222 @@ namespace mtl
 		m_encoder = encoder;
 		m_compute_encoder = encoder;
 		return encoder;
+	}
+
+	bool command_recorder::write_label(u32 address, u32 value)
+	{
+		MTL::Buffer* guest = m_resources->guest_buffer();
+
+		// The guest window is one buffer and a guest address is its offset
+		// (HLD-02 §3.5).  A misaligned or out-of-window label cannot be written by
+		// the GPU, so the caller stores it on the CPU instead.
+		if (!guest || (address & 3) || address > guest->length() || guest->length() - address < sizeof(u32))
+		{
+			return false;
+		}
+
+		if (m_reenter_pending)
+		{
+			reenter_slot();
+		}
+
+		frame_slot& slot = m_slots[m_slot];
+
+		if (slot.label_staging_offset + sizeof(u32) > label_staging_bytes)
+		{
+			// Emitting frees nothing, because the GPU still reads the region, so the
+			// slot commits and comes back with a clean one.
+			// TODO(excise): level 2; a frame that spends its whole label region.
+			MTL_PROBE_LATCH(2, "sync/label write/region wrap");
+
+			flush_label_writes();
+			flush_for_readback();
+		}
+
+		const u32 offset = m_slot * label_staging_bytes + slot.label_staging_offset;
+		std::memcpy(static_cast<u8*>(m_label_staging->contents()) + offset, &value, sizeof(u32));
+		m_pending_labels[m_pending_count++] = address;
+		slot.labels.push_back(address);
+		slot.label_staging_offset += sizeof(u32);
+
+		// TODO(excise): level 2; the last label is verified in guest memory after feedback.
+		m_diag_label_address = address;
+		m_diag_label_value = value;
+
+		// TODO(excise): level 2; the labels the GPU writes instead of the CPU.
+		MTL_PROBE_LATCH(2, "sync/label write/gpu");
+		return true;
+	}
+
+	void command_recorder::commit_pending_labels()
+	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "recorder/commit labels");
+
+		if (m_reenter_pending)
+		{
+			reenter_slot();
+		}
+
+		{
+			// TODO(excise): level 1; block timer.
+			MTL_PERF_SCOPE(1, "recorder/commit labels/encode");
+			flush_label_writes();
+			close_encoder();
+		}
+
+		frame_slot& slot = m_slots[m_slot];
+
+		{
+			// TODO(excise): level 1; block timer.
+			MTL_PERF_SCOPE(1, "recorder/commit labels/end buffer");
+			slot.command_buffer->endCommandBuffer();
+		}
+
+		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
+		commit_slot(slot, m_slot, generation);
+
+		// The GPU writes the labels when it runs this commit.  The guest is the one
+		// waiting, so the RSX thread does not: the slot comes back on the next
+		// encoder, after the completion has almost certainly arrived.
+		m_reenter_pending = true;
+	}
+
+	bool command_recorder::sync_label(u32 address)
+	{
+		bool waited = false;
+
+		for (u32 index = 0; index < frame_slot_count; ++index)
+		{
+			frame_slot& slot = m_slots[index];
+
+			bool has_address = false;
+			for (const u32 label : slot.labels)
+			{
+				if (label == address)
+				{
+					has_address = true;
+					break;
+				}
+			}
+
+			if (!has_address)
+			{
+				continue;
+			}
+
+			if (index == m_slot)
+			{
+				// The label is in the open command buffer: either still staged, or
+				// already flushed at a pass boundary.  Neither has reached the GPU,
+				// so commit the buffer.  A buffer that was committed already is
+				// waiting for its slot to come back.  Both end in re-enter, which is
+				// the wait for this slot's feedback.
+				if (!m_reenter_pending)
+				{
+					commit_pending_labels();
+				}
+
+				if (m_reenter_pending)
+				{
+					// TODO(excise): level 2; a guest acquire waited on a GPU label.
+					MTL_PROBE_LATCH(2, "sync/label wait");
+					reenter_slot();
+					waited = true;
+				}
+				else
+				{
+					slot.labels.clear();
+				}
+			}
+			else if (!slot_idle(slot))
+			{
+				// TODO(excise): level 2; a guest acquire waited on an earlier slot.
+				MTL_PROBE_LATCH(2, "sync/label wait");
+				wait_for_slot(index);
+				slot.labels.clear();
+				waited = true;
+			}
+			else
+			{
+				// This slot's commit has completed, so its label is visible.
+				slot.labels.clear();
+			}
+		}
+
+		return waited;
+	}
+
+	bool command_recorder::wait_for_slot(u32 index)
+	{
+		return await_slot(m_slots[index], "label wait");
+	}
+
+	void command_recorder::flush_label_writes()
+	{
+		if (!m_pending_count)
+		{
+			return;
+		}
+
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "recorder/flush labels");
+
+		frame_slot& slot = m_slots[m_slot];
+		const u32 first = slot.label_staging_offset - m_pending_count * sizeof(u32);
+		MTL4::ComputeCommandEncoder* encoder = open_copy_encoder();
+
+		// TODO(excise): level 2; the staged source must hold the guest word.
+		MTL_NOTE(2, "sync/label source addr=0x%x value=0x%x\n", m_pending_labels[0],
+			*reinterpret_cast<const u32*>(static_cast<const u8*>(m_label_staging->contents()) + m_slot * label_staging_bytes + first));
+
+		// A label is a release, so the write must not run before the work encoded
+		// ahead of it.  One queue-scope barrier covers the whole batch (HLD-03 §2.1).
+		emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+
+		for (u32 i = 0; i < m_pending_count; ++i)
+		{
+			// A label page has its own import, made after the CPU mapped the page,
+			// because the application-lifetime window keeps the GPU on the physical
+			// page that existed when it was created (L136).  An address outside the
+			// window falls back to the window itself.
+			u32 dst_offset = 0;
+			MTL::Buffer* dst = m_resources->label_buffer(m_pending_labels[i], dst_offset);
+
+			if (!dst)
+			{
+				dst = m_resources->guest_buffer();
+				dst_offset = m_pending_labels[i];
+			}
+
+			encoder->copyFromBuffer(m_label_staging, m_slot * label_staging_bytes + first + i * sizeof(u32),
+				dst, dst_offset, sizeof(u32));
+		}
+
+		// TODO(excise): level 2; read the last label back inside the same command
+		// buffer, so the word is what the GPU saw rather than what the guest left.
+		if (m_diag_label_address)
+		{
+			// TODO(excise): level 2; proves the readback was encoded at all.
+			MTL_PROBE_LATCH(2, "sync/label probe copy");
+			u32 probe_offset = 0;
+			MTL::Buffer* probe_source = m_resources->label_buffer(m_diag_label_address, probe_offset);
+
+			if (!probe_source)
+			{
+				probe_source = m_resources->guest_buffer();
+				probe_offset = m_diag_label_address;
+			}
+
+			emit_queue_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+			encoder->copyFromBuffer(probe_source, probe_offset,
+				m_label_probe, m_slot * sizeof(u32), sizeof(u32));
+		}
+
+		// TODO(excise): level 2; the labels in one batch.
+		MTL_PROBE_TOTAL(2, "sync/label batch", m_pending_count);
+
+		m_pending_count = 0;
 	}
 
 	void command_recorder::close_encoder()
@@ -457,6 +857,14 @@ namespace mtl
 
 		options->release();
 
+		// The queue signals the event after this commit's work, so one monotone
+		// value per commit tells the CPU when the slot has run.  This is the only
+		// completion point the waits use; the feedback handler stays for the
+		// commit-diagnostic counters and the query gate (SY14).
+		const u64 completion = ++m_completion_sequence;
+		slot.completion_value = completion;
+		m_queue->signalEvent(m_completion_event, completion);
+
 		// TODO(excise): level 1; running total.
 		MTL_PERF_COUNT(1, "recorder/commits", 1);
 	}
@@ -499,30 +907,23 @@ namespace mtl
 			index, feedback->GPUStartTime(), feedback->GPUEndTime(), m_slots[index].debug_commit_time,
 			feedback->GPUStartTime() - m_slots[index].debug_commit_time, debug_now_seconds() - feedback->GPUEndTime());
 
+		// A feedback of a commit the ring already abandoned carries an older
+		// generation, so it must not count against the slot a newer commit now owns.
+		if (m_slots[index].generation.load(std::memory_order_relaxed) != generation)
 		{
-			std::lock_guard lock(m_mutex);
-
-			// A feedback of a commit the ring already abandoned carries an older
-			// generation, so it must not release the slot a newer commit now owns.
-			if (m_slots[index].generation.load(std::memory_order_relaxed) != generation)
-			{
-				return;
-			}
-
-			// The commit is done.  A later commit of this slot proves every earlier
-			// commit of the slot done as well, because the queue is serialized (Q4).
-			m_completed[index].fetch_add(1, std::memory_order_release);
-			m_slots[index].in_flight.store(false);
+			return;
 		}
 
-		m_condition.notify_one();
+		// The commit is done.  A later commit of this slot proves every earlier
+		// commit of the slot done as well, because the queue is serialized (Q4).
+		m_completed[index].fetch_add(1, std::memory_order_release);
 	}
 
 	bool command_recorder::ring_idle() const
 	{
 		for (const frame_slot& slot : m_slots)
 		{
-			if (slot.in_flight.load())
+			if (!slot_idle(slot))
 			{
 				return false;
 			}

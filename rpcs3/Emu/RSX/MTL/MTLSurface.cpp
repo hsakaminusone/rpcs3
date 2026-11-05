@@ -9,6 +9,24 @@
 
 namespace mtl
 {
+	// A content transfer fills a surface in its own encoder.  The heaps are untracked
+	// and Metal 4 encoders may overlap, so the transfer must complete before the
+	// encoder that next samples or loads the surface (HLD-03 §3.2).  The producer
+	// form is the one a render pass can encode: its own tile store follows the
+	// barrier, so the consumer form would leave the window the resolve path already
+	// closes this way (REVIEW-FINDINGS.md, B6).
+	static void emit_content_barrier(MTL4::CommandEncoder* encoder, const surface& target, const char* reason)
+	{
+		// TODO(excise): level 2; a surface content transfer crossed a queue edge.
+		MTL_PROBE_LATCH(2, "sync/barrier content transfer");
+		// TODO(excise): level 3; which surface a content transfer filled.  A smear
+		// on a surface is either the transfer itself or a consumer that reads it
+		// too early, and only the address and the extent tell the two apart.
+		MTL_NOTE(3, "Metal 4: content transfer %s, address 0x%x, %ux%u, pitch %u, bpp %u",
+			reason, target.base_addr, target.width(), target.height(), target.rsx_pitch, target.get_bpp());
+		emit_producer_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageAll });
+	}
+
 	texture* surface::get_surface(rsx::surface_access access_type)
 	{
 		if (sample_count() == 1 || !access_type.is_transfer())
@@ -250,8 +268,14 @@ namespace mtl
 			return;
 		}
 
+		// The copies read source surfaces an earlier pass wrote, so that edge crosses
+		// an encoder too.  It is the queue-scope form every other copy in the backend
+		// takes (mirror_depth, copy_transfer_regions_impl).
+		emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit | MTL::StageDispatch, MTL4::VisibilityOptionDevice, true });
+
 		u64 newest_tag = 0;
 		bool optimize_copy = true;
+		bool copied = false;
 
 		for (u32 index = first; index < old_contents.size(); ++index)
 		{
@@ -286,6 +310,14 @@ namespace mtl
 
 			optimize_copy = optimize_copy && !covers;
 			newest_tag = source->last_use_tag;
+			copied = true;
+		}
+
+		// The copies landed in the target image, and the next encoder samples or
+		// loads it, so they must complete first.
+		if (copied)
+		{
+			emit_content_barrier(encoder, *this, "copy in");
 		}
 
 		if (!newest_tag) [[unlikely]]
@@ -359,7 +391,12 @@ namespace mtl
 			color->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
 		}
 
-		cmd.open_pass(descriptor);
+		// The clear lands in the attachment, and the next encoder samples or loads it.
+		if (MTL4::RenderCommandEncoder* encoder = cmd.open_pass(descriptor))
+		{
+			emit_content_barrier(encoder, *this, "clear");
+		}
+
 		descriptor->release();
 	}
 
@@ -409,6 +446,10 @@ namespace mtl
 		{
 			msaa_flags |= rsx::surface_state_flags::require_unresolve;
 		}
+
+		// The background copy is the surface's first content, and the next encoder
+		// samples or loads it.
+		emit_content_barrier(encoder, *this, "background");
 	}
 
 	void surface::resolve(command_recorder& cmd)

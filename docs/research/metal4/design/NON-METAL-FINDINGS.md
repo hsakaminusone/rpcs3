@@ -42,11 +42,36 @@ after 2:19.
 The `sys_spu` / `sys_event` notices are expected SPU thread lifecycle traffic, and the PAMF trace is
 the video decode. Neither is a defect; the volume is the problem.
 
+## Shared RSX FIFO (not Metal)
+
+| id | finding | count | evidence | severity | state |
+|---|---|---|---|---|---|
+| N12 | **The accurate FIFO's empty-first-argument retry is off by one and misaligns the command stream.** `FIFO_control::read()` advances the position to the first argument and fetches it; when the fetch is empty it left the position on that argument and raised `m_remaining_commands`. The retry enters `read_unsafe()`, which advances by four **before** it fetches, so the retry reads the second argument as the first, consumes one word too many, reads the next command's header as the last argument and resumes the stream on the next command's first argument — a data word parsed as a command. A data word with low bits `0b10` is a legal call encoding, which produces the wild call in the Metal run's capture (LOG-FINDINGS L59/L64/L70). The path is not exotic: the producer may publish a header before its arguments, which is why the non-accurate path's `inc_get(true)` waits for exactly that one argument. Fixed in `read()` by rewinding to the header and clearing the remaining count. This is shared code, so it is not a Metal defect and it affects every backend that runs the accurate FIFO. | one shift per empty first argument; the Metal run hit it once in 99.7 s | `RSXFIFO.cpp:509-542`, `:335-385`; `INVESTIGATION-2026-10-22.md` §9.1, §10.2 | H | fixed (shared), build and run pending |
+
+## Audio backend teardown
+
+| id | finding | count | evidence | severity | state |
+|---|---|---|---|---|---|
+| N13 | **`CubebBackend::Open()` self-deadlocks when `cubeb_stream_start()` fails.** `Open()` holds `m_cb_mutex` for its whole body, and the start-failure path called `Close()`, which takes the same non-recursive `std::timed_mutex`. The cellAudio thread blocks there forever: the game runs with no audio and `Emulator::Kill()` can never join the thread, so closing the window hangs (and the forced-terminate path then aborts in JIT teardown). | 1 per run | `RPCS3.log:2520-2524`; `rpcs3-2026-10-28-224120.ips`, thread `cellAudio Thread`: `Close()+80` → `timed_mutex::lock()` | H | fixed: the failure path unlocks before `Close()` |
+
+The stack is exact. `Close()` at `CubebBackend.cpp:209` is the `m_cb_mutex` lock; the `cellAudio`
+thread reaches it from `Open()` (`:184`), which already holds that mutex from `:106`. The two log
+lines that precede the stall are `cubeb_stream_start() failed: -1` and
+`Cubeb stream (…) destroyed successful.` — i.e. the stream is torn down and then the lock never
+returns. Everything after `0:00:05.565` is silence from that thread until `Emulation Join Thread`
+starts reporting `Thread [cellAudio Thread] is too sleepy` at `0:03:17`.
+
+The trigger on this host is `AudioOutputUnitStart` returning `kAudioHardwareIllegalOperationError`
+(`'what'`, 2003329396) at `0:00:05.505`, so the backend never starts and the run has no sound. That
+start failure is separate from the deadlock and remains open: the fix only makes the failure
+non-fatal and joinable. Reproduce and fix the start failure before calling audio healthy.
+
 ## What is not here
 
 - `Resource was destroyed whilst holding a resource reference!` is Metal teardown (L16).
 - The 12 `Metal 4: access violation` lines are the Metal guest-write diagnostic (L17).
-- The FIFO desync and fatal are Metal (L13).
+- The FIFO desync and fatal are **shared** FIFO code (N12), not Metal; the Metal run is where they were
+  observed (L13).
 - No decoder memory-pressure, jetsam, or `cellVdec` decode error appears.  The video output is not a
   decoder failure.
 

@@ -97,6 +97,14 @@ namespace mtl
 		// is the offset into it, so a load needs no staging copy.
 		MTL::Buffer* guest_buffer() const { return m_guest; }
 
+		// A label is the only GPU write into guest memory.  A no-copy import is
+		// fixed at creation, so a page the CPU maps after the application-lifetime
+		// import keeps the GPU on the old physical page (L136).  A label page gets
+		// its own import, created after the page exists and cached for the process;
+		// the RSX reports and device blocks are mapped once.  Null means the address
+		// is not inside the guest window.
+		MTL::Buffer* label_buffer(u32 address, u32& offset);
+
 		// Metal's sample-count support is per device: Apple's table lists 4 as
 		// universal and 2 as "some devices", so a host request the device rejects
 		// folds up to 4 and keeps the antialiasing.
@@ -149,6 +157,13 @@ namespace mtl
 		residency_manager m_residency;
 		heap_pool m_shared;
 		heap_pool m_private;
+		// One import per guest page that carries a label write (label_buffer).
+		struct label_page
+		{
+			u32 base = 0;
+			MTL::Buffer* buffer = nullptr;
+		};
+		std::vector<label_page> m_label_pages;
 		std::unordered_map<MTL::Allocation*, allocation_span> m_spans;
 		std::vector<std::vector<MTL::Allocation*>> m_deferred;
 		std::vector<MTL::Allocation*> m_quarantine;

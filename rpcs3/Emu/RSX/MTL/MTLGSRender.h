@@ -51,10 +51,11 @@ namespace mtl
 		void on_semaphore_acquire_wait() override;
 		void write_barrier(u32 memory_address, u32 memory_range) override;
 
-		// A back-end semaphore release is a guest-visible memory write.  Metal
-		// writes labels on the CPU, so the GPU must finish the commands before the
-		// release point before the label becomes visible (nv47_sync.hpp:13-63).
+		// A back-end semaphore release is a guest-visible memory write.  Metal can
+		// record it on the GPU, in command-stream order, so the release is fast; the
+		// acquire waits for that write before it reads the guest word.
 		bool release_GCM_label(u32 type, u32 address, u32 data) override;
+		bool sync_label(u32 address) override;
 
 		// The blit engine's GPU path.  False sends the transfer to the CPU fallback
 		// (nv3089.cpp:592-598).  Metal keeps the fallback and logs the transfer

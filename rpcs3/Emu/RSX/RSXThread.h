@@ -149,6 +149,10 @@ namespace rsx
 		{
 			u32 reg = 0;
 			u32 value = 0;
+			// TODO(excise): level 1; the command word the argument was decoded from.
+			// A desync capture compares it with the ring at the same position,
+			// which separates a mis-parsed stream from a stale FIFO cache snapshot.
+			u32 cmd = 0;
 			u32 position = 0;
 		};
 
@@ -158,6 +162,9 @@ namespace rsx
 		// between are what the host has to show.
 		static constexpr u32 dispatch_history_size = 256;
 
+		// TODO(excise): level 1; what the shared code knows about a desync when it
+		// recovers.  The backend prints it; removing it removes this struct and the
+		// fill block in recover_fifo.
 		// What the shared code knows about a desync when it recovers.
 		struct fifo_desync_info
 		{
@@ -175,6 +182,22 @@ namespace rsx
 			u32 label_offset = 0;
 			u32 words[8] = {};
 			bool words_valid = false;
+			// TODO(excise): level 1; the words leading up to the failing one, index 0
+			// at GET itself and index 255 sixty-four words earlier.  The command
+			// whose argument count ran long has its header in this window, which is
+			// what separates a host mis-count from a guest that wrote a malformed
+			// stream.
+			u32 words_before[256] = {};
+			bool words_before_valid = false;
+			// TODO(excise): level 1; the FIFO cache snapshot and the position the
+			// host expected the next command at.  The host parses out of the cache
+			// copy, so when the cached bytes differ from the ring at the same offset
+			// the host was reading a stale snapshot; the ring alone cannot show that.
+			u32 cache_addr = 0;
+			u32 cache_size = 0;
+			u32 next_cmd_entry = 0;
+			u32 cache_words[16] = {};
+			bool cache_words_valid[16] = {};
 			dispatch_entry history[dispatch_history_size]{};
 			u32 history_count = 0;
 		};
@@ -216,13 +239,14 @@ namespace rsx
 		const dispatch_entry* dispatch_history() const { return m_dispatch_history; }
 		u32 dispatch_history_count() const { return m_dispatch_history_count; }
 
-		// Record one dispatched command.  The ring keeps the last
-		// dispatch_history_size entries, newest last.
-		void note_dispatch(u32 reg, u32 value, u32 position)
+		// TODO(excise): level 1; record one dispatched command.  The ring keeps the
+		// last dispatch_history_size entries, newest last.
+		void note_dispatch(u32 reg, u32 value, u32 position, u32 cmd)
 		{
 			dispatch_entry& entry = m_dispatch_history[m_dispatch_history_next];
 			entry.reg = reg;
 			entry.value = value;
+			entry.cmd = cmd;
 			entry.position = position;
 
 			m_dispatch_history_next = (m_dispatch_history_next + 1) % dispatch_history_size;
@@ -412,6 +436,12 @@ namespace rsx
 
 		// id
 		std::string_view renderer_info() const { return m_renderer_info; }
+
+		// A semaphore acquire reads guest memory on the CPU, so a release that this
+		// backend still has in flight at `address` must complete first.  True when
+		// the backend waited; the caller then re-reads the semaphore.  A backend
+		// that writes labels host-side (VK, GL) leaves the default false.
+		virtual bool sync_label(u32 /*address*/) { return false; }
 
 	private:
 		shared_mutex m_mtx_task;
