@@ -10,6 +10,7 @@
 
 namespace mtl
 {
+	class command_recorder;
 	class resource_manager;
 
 	// The Metal 4 ZCULL backend (HLD-04 §3.8).  It owns one persistent
@@ -39,8 +40,9 @@ namespace mtl
 
 		// Create the visibility buffer and make it persistent.  A Metal 4 command
 		// buffer holds no strong reference, so the buffer must stay resident for the
-		// application lifetime.
-		void init(const device& dev, resource_manager& resources);
+		// application lifetime.  The recorder supplies the completion gate and the
+		// bounded flush that a forced read needs (Q1, Q4).
+		void init(const device& dev, resource_manager& resources, command_recorder& recorder);
 		void shutdown();
 
 		// The one buffer holds every counter, so every slot returns it.  The parent
@@ -55,9 +57,11 @@ namespace mtl
 		// It is a no-op when neither the mode nor the encoder changed.
 		void apply(MTL4::RenderCommandEncoder* encoder);
 
-		// The slot's previous frame has completed.  Bump its generation and free the
-		// counters whose completion gate has passed.
-		void on_slot_complete(u32 slot);
+		// The slot's previous frame has completed when `reported` is true.  Bump its
+		// generation and free the counters whose completion gate has passed.  On an
+		// abandoned frame neither happens, because the abandoned command buffer can
+		// still write its counter (Q3).
+		void on_slot_complete(u32 slot, bool reported);
 
 	private:
 		// One RSX query's counter.  `end_slot`/`end_generation` are the completion
@@ -67,6 +71,10 @@ namespace mtl
 			u32 index = 0;
 			u32 end_slot = 0;
 			u64 end_generation = 0;
+			// The delivered-commit count of `end_slot` when the query stopped
+			// counting.  The value is final once a later commit of the same slot
+			// reports (Q4).
+			u64 end_commit = 0;
 			bool owned = false;
 			bool counted = false;
 			bool gated = false;
@@ -91,9 +99,12 @@ namespace mtl
 
 		// The counter a query owns, or null when its handle is not a pool index.
 		query_counter* counter(rsx::reports::occlusion_query_info* query);
+		// True when the value of a stopped query is final.
+		bool query_ready(const query_counter& entry) const;
 		// Return a query's counter to the pool, or defer it until its gate passes.
 		void release_counter(query_counter& entry);
 
+		command_recorder* m_recorder = nullptr;
 		resource_manager* m_resources = nullptr;
 		MTL::Buffer* m_visibility = nullptr;
 		std::array<u64, frame_slot_count> m_generations{};
@@ -109,12 +120,8 @@ namespace mtl
 		// end_occlusion_query turns it off; apply emits it.
 		bool m_counting = false;
 		rsx::reports::occlusion_query_info* m_counting_query = nullptr;
-
-		// The mode the last apply emitted, and the encoder it emitted on.  Encoder
-		// state does not cross encoders, so a new encoder always emits.
-		MTL4::RenderCommandEncoder* m_applied_encoder = nullptr;
-		u32 m_applied_offset = 0;
-		bool m_applied_counting = false;
+		// The exhaustion log fires once, because a full pool can repeat every query.
+		bool m_exhaustion_logged = false;
 	};
 }
 

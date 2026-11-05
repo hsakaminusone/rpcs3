@@ -26,8 +26,13 @@ namespace mtl
 		rsx::texture_minify_filter min_filter = rsx::texture_minify_filter::nearest;
 		rsx::texture_magnify_filter mag_filter = rsx::texture_magnify_filter::nearest;
 
+		// CELL_GCM_TEXTURE_UN on a vertex unit.  Metal samples unnormalized
+		// coordinates only with clamp-to-edge on R and no mip filter (TX2).
+		bool unnormalized_coords = false;
+
 		f32 min_lod = 0.0f;
 		f32 max_lod = 0.0f;
+		f32 lod_bias = 0.0f;
 		u32 max_aniso = 1;
 
 		MTL::SamplerBorderColor border_color = MTL::SamplerBorderColorTransparentBlack;
@@ -37,6 +42,11 @@ namespace mtl
 		// compare value is SET_TEXTURE_ADDRESS.zfunc (LLD-texture §3.2).
 		bool depth_compare = false;
 		rsx::comparison_function compare = rsx::comparison_function::always;
+
+		// The guest format needs a decode after the fetch: signed expansion, gamma
+		// or a depth-pack decode.  Filtering the stored value before that decode is
+		// not the same operation, so such a sampler is nearest (VKDraw.cpp:419-437).
+		bool force_nearest = false;
 	};
 
 	// Read one fragment texture unit (rsx::method_registers.fragment_textures[unit]).
@@ -61,6 +71,11 @@ namespace mtl
 
 	// Metal's maxAnisotropy is 1..16 (04 §2.1 #15).
 	u32 get_max_anisotropy(rsx::texture_max_anisotropy aniso);
+
+	// Quantize the guest LOD bias for the sampler.  A nearest mip filter is
+	// rounded to the nearest 0.5 like Vulkan, and the result is clamped to the
+	// Metal range [-16, 15.999] (VKDraw.cpp:506-511; MTLSamplerDescriptor).
+	f32 get_sampler_lod_bias(rsx::texture_minify_filter filter, f32 bias);
 
 	// The custom border colour falls back to the closest of the three Metal values
 	// (04 R18).  The SNORM re-expansion runs first (RSXTexture.cpp:368-436).

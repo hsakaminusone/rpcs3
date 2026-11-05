@@ -1,4 +1,5 @@
 #include "MTLPassScheduler.h"
+#include "MTLInstrumentation.h"
 
 #ifdef RSX_ENABLE_METAL4
 
@@ -80,6 +81,8 @@ namespace mtl
 
 	void pass_scheduler::flush(MTL4::CommandEncoder* encoder)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "pass/barrier batch");
 		if (!encoder)
 		{
 			m_pending.clear();
@@ -105,6 +108,8 @@ namespace mtl
 
 	bool pass_scheduler::emit_split_barriers(MTL4::CommandEncoder* encoder)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "pass/split barriers");
 		if (!encoder || m_carried.empty())
 		{
 			return false;
@@ -119,6 +124,14 @@ namespace mtl
 		m_carried.clear();
 		m_split = false;
 		return true;
+	}
+
+	void pass_scheduler::request_texture_barrier()
+	{
+		// The surface's write stages are the fragment and tile stages of the pass
+		// that carried it, and the consumer is a sample, which is a vertex or a
+		// fragment read.
+		m_carried.push_back(barrier_spec{ MTL::StageFragment | MTL::StageTile, MTL::StageVertex | MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
 	}
 }
 

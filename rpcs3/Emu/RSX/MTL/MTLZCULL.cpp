@@ -2,7 +2,14 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "MTLCommandRecorder.h"
+#include "MTLInstrumentation.h"
 #include "MTLResourceManager.h"
+
+#include "Emu/RSX/RSXThread.h"
+#include "Emu/system_config.h"
+
+#include "util/logs.hpp"
 
 #include <algorithm>
 
@@ -24,8 +31,9 @@ namespace mtl
 		return &m_counters[query->driver_handle];
 	}
 
-	void zcull::init(const device& /*dev*/, resource_manager& resources)
+	void zcull::init(const device& /*dev*/, resource_manager& resources, command_recorder& recorder)
 	{
+		m_recorder = &recorder;
 		m_resources = &resources;
 		m_visibility = resources.new_buffer(counter_capacity * counter_stride, MTL::StorageModeShared);
 
@@ -54,9 +62,7 @@ namespace mtl
 		m_current_slot = 0;
 		m_counting = false;
 		m_counting_query = nullptr;
-		m_applied_encoder = nullptr;
-		m_applied_offset = 0;
-		m_applied_counting = false;
+		m_exhaustion_logged = false;
 	}
 
 	void zcull::shutdown()
@@ -68,6 +74,7 @@ namespace mtl
 
 		m_visibility = nullptr;
 		m_resources = nullptr;
+		m_recorder = nullptr;
 		m_counters = {};
 		m_deferred = {};
 		m_deferred_count = 0;
@@ -75,9 +82,7 @@ namespace mtl
 		m_generations = {};
 		m_counting = false;
 		m_counting_query = nullptr;
-		m_applied_encoder = nullptr;
-		m_applied_offset = 0;
-		m_applied_counting = false;
+		m_exhaustion_logged = false;
 	}
 
 	MTL::Buffer* zcull::visibility_buffer(u32 /*slot*/) const
@@ -85,15 +90,25 @@ namespace mtl
 		return m_visibility;
 	}
 
-	void zcull::on_slot_complete(u32 slot)
+	void zcull::on_slot_complete(u32 slot, bool reported)
 	{
 		if (slot >= frame_slot_count)
 		{
 			return;
 		}
 
-		m_generations[slot]++;
 		m_current_slot = slot;
+
+		if (!reported)
+		{
+			// The commit that used this slot never reported, so its command buffer
+			// may still run and may still write a counter that this slot owns.  The
+			// generation stays, so every gate that depends on it stays closed until
+			// a later commit of the slot reports (Q3).
+			return;
+		}
+
+		m_generations[slot]++;
 
 		// Submissions are serialized on one MTL4::CommandQueue, so when this slot's
 		// frame completes, every earlier frame that wrote a counter has completed
@@ -138,15 +153,22 @@ namespace mtl
 			offset = entry->index * counter_stride;
 		}
 
-		// The desired mode is the recorded state; begin_occlusion_query and
-		// end_occlusion_query change it.  Encoder state does not cross encoders, so
-		// a new encoder always emits.
-		if (encoder == m_applied_encoder && counting == m_applied_counting && offset == m_applied_offset)
+		// The mode is encoder state and does not cross encoders.  Every pass opens a
+		// new render encoder, and Metal can give that encoder the address of one
+		// that ended, so a cache keyed on the pointer is unsound: it can suppress
+		// the mode for a whole pass whose draws then count nothing (Q2).  The draw
+		// path calls this once per pass, so the emit is not redundant.
+		//
+		// Boolean mode stops counting at the first passing fragment, which is all
+		// the guest needs when precise_zpass_count is off; the shared write path
+		// collapses any non-zero count to 0xFFFF in that case (Q5, K1).
+		MTL::VisibilityResultMode mode = MTL::VisibilityResultModeDisabled;
+		if (counting)
 		{
-			return;
+			mode = g_cfg.video.precise_zpass_count ? MTL::VisibilityResultModeCounting : MTL::VisibilityResultModeBoolean;
 		}
 
-		encoder->setVisibilityResultMode(counting ? MTL::VisibilityResultModeCounting : MTL::VisibilityResultModeDisabled, offset);
+		encoder->setVisibilityResultMode(mode, offset);
 
 		if (counting)
 		{
@@ -154,15 +176,14 @@ namespace mtl
 			// for the counter's completion gate.
 			entry->counted = true;
 		}
-
-		m_applied_encoder = encoder;
-		m_applied_counting = counting;
-		m_applied_offset = offset;
 	}
 
 	void zcull::begin_occlusion_query(rsx::reports::occlusion_query_info* query)
 	{
 		query->result = 0;
+
+		// TODO(excise): level 2; the ZCULL query stream (area I).
+		MTL_PROBE_LATCH(2, "zcull/query began");
 
 		// Record counting on for this query.  apply emits it on the open encoder.
 		m_counting = true;
@@ -171,6 +192,8 @@ namespace mtl
 		query_counter* entry = counter(query);
 		if (!entry || !m_visibility)
 		{
+			// TODO(excise): level 2; a query with no counter is a different signature.
+			MTL_PROBE_LATCH(2, "zcull/query refused");
 			return;
 		}
 
@@ -179,7 +202,17 @@ namespace mtl
 		if (m_free_count == 0)
 		{
 			// Every counter is live.  The query gets none, apply emits Disabled, and
-			// get_result reports the base class's "unknown" sentinel.
+			// get_result reports zero, which is the VK and GL answer for a query with
+			// no counter (Q6).  Log once, because the pool is sized for every live
+			// query and exhaustion means the deferred window is leaking.
+			MTL_PROBE_LATCH(2, "zcull/counters exhausted");
+
+			if (!m_exhaustion_logged)
+			{
+				m_exhaustion_logged = true;
+				rsx_log.error("Metal 4: the occlusion counter pool is exhausted, a query reports no pixels");
+			}
+
 			return;
 		}
 
@@ -188,6 +221,7 @@ namespace mtl
 		entry->index = index;
 		entry->end_slot = 0;
 		entry->end_generation = 0;
+		entry->end_commit = 0;
 		entry->counted = false;
 		entry->gated = false;
 		entry->owned = true;
@@ -212,12 +246,33 @@ namespace mtl
 		}
 
 		// The query stops counting in the current frame, so the current slot is the
-		// last that can hold a write for it.  The gate passes when that slot
-		// completes.  Submissions are serialized on one queue, so this slot's
-		// completion also covers every earlier frame of the query.
+		// last that can hold a write for it.  The gate passes when a later commit of
+		// that slot reports, which the frame's own submit does.  The slot generation
+		// is the fallback for a commit whose feedback was lost (Q3, Q4).
 		entry->end_slot = m_current_slot;
 		entry->end_generation = m_generations[m_current_slot];
+		entry->end_commit = m_recorder ? m_recorder->completed_commits(m_current_slot) : 0;
 		entry->gated = true;
+	}
+
+	bool zcull::query_ready(const query_counter& entry) const
+	{
+		if (!entry.gated)
+		{
+			return false;
+		}
+
+		// A delivered commit of the slot proves the counters final: the queue is
+		// serialized, so every earlier commit of that slot has completed too.
+		if (m_recorder && m_recorder->completed_commits(entry.end_slot) > entry.end_commit)
+		{
+			return true;
+		}
+
+		// Fallback: the slot was reused, which begin_frame allows only after its
+		// previous frame reported.  A lost feedback therefore closes the gate until
+		// the slot comes back around.
+		return m_generations[entry.end_slot] > entry.end_generation;
 	}
 
 	bool zcull::check_occlusion_query_status(rsx::reports::occlusion_query_info* query)
@@ -229,25 +284,43 @@ namespace mtl
 			return true;
 		}
 
-		if (!entry->gated)
-		{
-			return false;
-		}
-
-		// The value is final once the end slot's frame completed after the query
-		// stopped counting.  on_slot_complete bumps the slot generations.
-		return m_generations[entry->end_slot] > entry->end_generation;
+		return query_ready(*entry);
 	}
 
 	void zcull::get_occlusion_query_result(rsx::reports::occlusion_query_info* query)
 	{
 		query_counter* entry = counter(query);
-		if (!entry || !entry->owned || !m_visibility)
+		if (!entry || !m_visibility)
 		{
-			// The query never got a counter.  -1 is the base class's "unknown / fully
-			// visible" sentinel.
+			// The handle is not a pool index.  -1 is the base class's "unknown /
+			// fully visible" sentinel.
 			query->result = -1;
 			return;
+		}
+
+		if (!entry->owned)
+		{
+			// The query had draws but the pool gave it no counter.  Report zero, as
+			// VK and GL do; -1 would run a block the guest expects to skip (Q6).
+			query->result = 0;
+			return;
+		}
+
+		// A forced read bypasses check_occlusion_query_status (RSXZCULL.cpp:616-620),
+		// so the read itself must make the value final.  The flush commits the open
+		// command buffer and waits for its feedback with a bound; it is the same
+		// primitive the texture readback uses (Q1).
+		if (entry->counted && !query_ready(*entry) && m_recorder)
+		{
+			m_recorder->flush_for_readback();
+
+			if (!query_ready(*entry))
+			{
+				// The feedback did not arrive in the bound.  Report the current value
+				// rather than block the RSX thread, and let release_counter defer the
+				// counter until a later commit of the slot proves the work done (K8).
+				rsx_log.error("Metal 4: the ZPASS readback did not become final in time, the result may be partial");
+			}
 		}
 
 		const u64 samples = static_cast<u64*>(m_visibility->contents())[entry->index];
@@ -277,7 +350,7 @@ namespace mtl
 			return;
 		}
 
-		if (entry.gated && m_generations[entry.end_slot] > entry.end_generation)
+		if (entry.gated && query_ready(entry))
 		{
 			// The gate already passed, so the value is final and the index is safe.
 			m_free[m_free_count++] = entry.index;

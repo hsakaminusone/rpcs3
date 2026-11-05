@@ -278,13 +278,18 @@ object, and therefore *does* enter the PSO key (`HLD-05 §2.6`). `[I]`
 
 ### 3.4 Depth bounds — emulation only
 
-`MTL::DepthStencilDescriptor` has no bounds test, and no encoder setter adds one. The chosen
+`MTL::DepthStencilDescriptor` has no bounds test. `MTL4::RenderCommandEncoder` does
+carry `setDepthTestBounds`, but there is no usable implementation behind it: the call
+from the first draw that reached an encoder trapped in the driver, `EXC_BREAKPOINT` in
+`-[AGXG17FamilyRenderContext_mtlnext setDepthTestMinBound:maxBound:]` with no argument
+outside `[0,1]` (`REVIEW-FINDINGS E7`). The chosen
 fallback is a fragment-shader compare: the epilogue reads the two bounds (fed through the fragment
 constant buffer via `MTL4ArgumentTable.setAddress`, `HLD-05 §3.3`) and `discard_fragment()`s
 fragments outside `[min, max]`. This preserves the guest-visible result (the fragment is not
 written) but *not* the early-out timing. The alternative — silently dropping the test, as the VK
 path does on unsupported devices (`VKPipelineCompiler.cpp:118-125`) — is recorded as a fallback for
-bring-up only. Difficulty 4, risk med; whether any live title exercises the test is open (§6 Q3).
+bring-up only and is the position the backend holds. Difficulty 4, risk med; whether any live title
+exercises the test is open (§6 Q3).
 `[I]`
 
 ### 3.5 Anti-aliasing, sample count, A2C, sample mask
@@ -337,7 +342,7 @@ one that spans passes needs `MTLVisibilityResultType` accumulation or a manual s
 
 | Item | Status | Fallback actually chosen |
 |---|---|---|
-| Native **depth bounds test** | **no Metal API path** — `MTL::DepthStencilDescriptor` has no bounds field | emulate: fragment-shader compare + `discard_fragment()`, bounds fed as fragment constants (§3.4). Not `impossible` because the RSX *result* survives. Bring-up may drop it, as the VK path does (`VKPipelineCompiler.cpp:118-125`). `[I]` |
+| Native **depth bounds test** | **no usable Metal API path** — `MTL::DepthStencilDescriptor` has no bounds field, and the encoder setter that does exist traps in the driver (§3.4, `REVIEW-FINDINGS E7`) | emulate: fragment-shader compare + `discard_fragment()`, bounds fed as fragment constants (§3.4). Not `impossible` because the RSX *result* survives. Bring-up drops it, as the VK path does (`VKPipelineCompiler.cpp:118-125`). `[I]` |
 | Native **ZCULL tile cull** | **no Metal API path** — no cull unit | reshape: visibility result buffer for the count (§3.6); the cull itself is simply not performed (a perf loss, never a correctness loss, because the depth test still runs). `[I]` |
 | Native **ZCULL statistics unit** | **no Metal API path** | emulate: host accumulation of the report counters from the visibility buffer, retired through the report block (`HLD-03 §3.3`). The read is a correctness obligation. `[I]` |
 | Native **per-draw sample mask** | **no MTL4 encoder setter** | shader `[[sample_mask]]` output, per-draw MSL rewrite. `[U]` |

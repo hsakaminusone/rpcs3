@@ -6,13 +6,6 @@ namespace mtl
 {
 	namespace
 	{
-		// The host sample count follows the video configuration, so the guest AA mode
-		// stays metadata when the override is off (VKRenderTargets.h:241-250).
-		u8 host_sample_count(rsx::surface_antialiasing antialias)
-		{
-			return (g_cfg.video.antialiasing_level == msaa_level::_auto) ? rsx::get_format_sample_count(antialias) : 1;
-		}
-
 		void retag(surface* object, u32 address, u32 pitch)
 		{
 			object->rsx_pitch = pitch;
@@ -42,7 +35,12 @@ namespace mtl
 
 	bool surface_cache_traits::is_compatible_surface(const surface_type& surface, const surface_type& ref, u16 width, u16 height, u8 sample_count)
 	{
-		return surface->get_gcm_format() == ref->get_gcm_format() &&
+		// The host pixel format fixes the storage, but the component layout fixes the
+		// meaning of the sample: x8r8g8b8_z, x8r8g8b8_o and a8r8g8b8 share BGRA8Unorm
+		// and differ only there.  A region merge keeps the destination surface's
+		// format, so the source must present the same channels.
+		return surface->pixel_format() == ref->pixel_format() &&
+			surface->get_native_component_layout() == ref->get_native_component_layout() &&
 			surface->get_spp() == sample_count &&
 			surface->get_surface_width<rsx::surface_metrics::pixels>() == width &&
 			surface->get_surface_height<rsx::surface_metrics::pixels>() == height;
@@ -68,7 +66,7 @@ namespace mtl
 		}
 
 		return surface->get_surface_color_format() == format &&
-			surface->get_spp() == host_sample_count(antialias) &&
+			surface->get_spp() == rsx::get_format_sample_count(antialias) &&
 			surface->matches_dimensions(width, height) &&
 			surface->get_resolution_scaling_config() == scaling;
 	}
@@ -81,7 +79,7 @@ namespace mtl
 		}
 
 		return surface->get_surface_depth_format() == format &&
-			surface->get_spp() == host_sample_count(antialias) &&
+			surface->get_spp() == rsx::get_format_sample_count(antialias) &&
 			surface->matches_dimensions(width, height) &&
 			surface->get_resolution_scaling_config() == scaling;
 	}

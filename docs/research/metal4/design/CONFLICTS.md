@@ -337,24 +337,40 @@ safe to mutate between draws". `HLD-04-command-encoding.md:134` gives
 `m_tables[stage]` the lifetime "frame ring", and `:153` lists "argument tables"
 among the `mtl::frame_ring` contents.
 
-**The tree says.** Metal 4 takes the snapshot when the encoder **binds** the
-table, not when it draws. `MTL4::RenderCommandEncoder` exposes
-`setArgumentTable` as the only binding entry point
-(`MTL4RenderCommandEncoder.hpp:84`, implementation `:207-210`), and the draw
-calls take no table operand, so a mutation that is not followed by a
-`setArgumentTable` before the draw is never seen. The order is mutate →
-`setArgumentTable` → draw, not mutate-between-draws on one binding. The
-implementation already holds that order: `argument_binder::bind` writes only the
-slots that differ and reports whether it wrote any (`MTLArgumentBinds.h:125-131`),
-and the draw re-binds a stage's table only when it did (`MTLGSRender.cpp:1010-1020`).
+**The tree said.** Metal 4 takes the snapshot when the encoder **binds** the
+table, not when it draws, so a mutation without a following
+`setArgumentTable` is never seen and the order must be mutate →
+`setArgumentTable` → draw.
+
+**Measured (2026-10-22, `EXPERIMENT-metal4-semantics.mm`, Apple A18 Pro).** Both
+halves of the tree's reading are wrong, and the truth is a third model. The
+experiment binds one table with `v=100` and encodes draw A, mutates the same
+table to `v=200` **without** re-binding it and encodes draw B, then commits.
+Draw A reads `0x64` (100); draw B reads `0xc8` (200). So:
+
+- the contents are **not** captured at `setArgumentTable` — B's mutation was
+  never re-bound and B still saw it; and
+- the contents are **not** read when the GPU executes the command — the later
+  mutation did not retroactively change A.
+
+The capture point is the **draw encode**. The order mutate → draw is sufficient;
+the order mutate → `setArgumentTable` → draw is also correct, which is why the
+backend works.
+
+**Consequence (the part that was a real bug).** Because the capture is per draw,
+**a slot that is not written for a draw keeps the value from an earlier draw**.
+`argument_binder` writes only changed slots, which is safe *only* if a change to
+zero is written too. It was not: `address()` skipped `value == 0`, so a cleared
+vertex stream, predicate or lookup buffer stayed bound from the previous draw.
+`setAddress(0, i)` is legal and the shader reads 0 (experiment D), so the fix is
+to write the zero (`MTLArgumentBinds.cpp`, and L72 in `LOG-FINDINGS.md`).
 
 **Resolution.** No design decision changes. The table stays one per stage per
 frame slot (`frame_slot::vertex_table`/`fragment_table`,
 `MTLCommandRecorder.h:23-24`), which is `HLD-04`'s `m_tables[stage]`; there is no
-argument-table ring, because the binder's diff means an unchanged table need not
-be re-bound at all. The citation is corrected: the snapshot is at bind time, so
-the "safe to mutate between draws" guarantee holds only for the (mutate, re-bind)
-pairs the binder already emits.
+argument-table ring. The implementation re-binds the table on every subdraw
+(`MTLGSRender.cpp:3322-3323`), which is safe but not required under the per-draw
+capture; it is kept because it is one call per changed subdraw.
 
 ## C8 — the packed colour texture formats
 

@@ -1,4 +1,5 @@
 #include "MTLDevice.h"
+#include "MTLInstrumentation.h"
 
 #include "MTLFill.h"
 
@@ -94,6 +95,8 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 			return;
 		}
 
+		m_stencil_states.init(m_device);
+
 		const std::string source = build_fill_source();
 		MTL4::LibraryDescriptor* descriptor = MTL4::LibraryDescriptor::alloc()->init();
 		descriptor->setSource(NS::String::string(source.c_str(), NS::UTF8StringEncoding));
@@ -146,6 +149,8 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 			m_depth_read = nullptr;
 		}
 
+		m_stencil_states.shutdown();
+
 		if (m_library)
 		{
 			m_library->release();
@@ -157,9 +162,14 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		m_device = nullptr;
 	}
 
-	MTL::RenderPipelineState* fill_pass::pipeline(MTL::PixelFormat color_format, variant kind, u8 sample_count)
+	MTL::RenderPipelineState* fill_pass::pipeline(MTL::PixelFormat color_format, variant kind, u8 sample_count, MTL::ColorWriteMask color_mask)
 	{
-		const u64 key = (static_cast<u64>(color_format) << 10) | (static_cast<u64>(sample_count) << 2) | static_cast<u64>(kind);
+		// A write mask is a pipeline property, so it joins the key.  The set of masks
+		// a title uses is tiny: all, RGB, RG, R or none.
+		const u64 key = (static_cast<u64>(color_format) << 16) |
+			(static_cast<u64>(sample_count) << 8) |
+			(static_cast<u64>(color_mask) << 4) |
+			static_cast<u64>(kind);
 
 		if (const auto it = m_pipelines.find(key); it != m_pipelines.end())
 		{
@@ -193,7 +203,7 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		{
 			MTL4::RenderPipelineColorAttachmentDescriptor* attachment = descriptor->colorAttachments()->object(0);
 			attachment->setPixelFormat(color_format);
-			attachment->setWriteMask(MTL::ColorWriteMaskAll);
+			attachment->setWriteMask(color_mask);
 		}
 
 		NS::Error* error = nullptr;
@@ -214,15 +224,18 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		return state;
 	}
 
-	void fill_pass::fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, bool write_color, bool write_depth)
+	void fill_pass::fill(MTL4::ArgumentTable* table, MTL4::RenderCommandEncoder* encoder, MTL::GPUAddress values, MTL::PixelFormat color_format, u8 sample_count, MTL::ColorWriteMask color_mask, bool write_depth, fill_stencil stencil)
 	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "fill");
 		if (!table || !encoder || !m_library || !values)
 		{
 			return;
 		}
 
+		const bool write_color = color_mask != MTL::ColorWriteMaskNone;
 		const variant kind = write_color ? (write_depth ? variant::color_depth : variant::color) : variant::depth;
-		MTL::RenderPipelineState* state = pipeline(color_format, kind, sample_count);
+		MTL::RenderPipelineState* state = pipeline(color_format, kind, sample_count, write_color ? color_mask : MTL::ColorWriteMaskNone);
 		if (!state)
 		{
 			return;
@@ -236,7 +249,25 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		encoder->setArgumentTable(table, MTL::RenderStageFragment);
 		encoder->setCullMode(MTL::CullModeNone);
 		encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
-		encoder->setDepthStencilState(write_depth ? m_depth_write : m_depth_read);
+
+		if (stencil.write_mask)
+		{
+			// The stencil plane is written by the pass operation, so the test always
+			// passes and the depth test always passes: the Replace op then stores the
+			// reference value for every covered sample (VKGSRender.cpp:1622-1638).
+			depth_stencil_state state;
+			state.depth_write = write_depth;
+			state.front = { rsx::comparison_function::always, rsx::stencil_op::keep, rsx::stencil_op::keep,
+				rsx::stencil_op::replace, 0xff, stencil.write_mask };
+			state.back = state.front;
+
+			encoder->setDepthStencilState(m_stencil_states.get(state));
+			encoder->setStencilReferenceValue(stencil.reference);
+		}
+		else
+		{
+			encoder->setDepthStencilState(write_depth ? m_depth_write : m_depth_read);
+		}
 
 		encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
 	}

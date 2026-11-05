@@ -129,3 +129,6 @@ CMakeUserPresets.json
 
 # claude
 CLAUDE.md
+
+# local game data (Ridge Racer 7 dump), 7 GB, never committed
+/filesdump/

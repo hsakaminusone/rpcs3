@@ -3,12 +3,16 @@
 #include "MTLArgumentBinds.h"
 #include "MTLCommandRecorder.h"
 #include "MTLHandles.h"
+#include "MTLInstrumentation.h"
 #include "MTLSurface.h"
 
 #ifdef RSX_ENABLE_METAL4
 
 #include "../Common/texture_cache.h"
 
+#include "util/logs.hpp"
+
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -29,6 +33,24 @@ namespace mtl
 		using texture_format          = MTL::PixelFormat;
 		using viewable_image_type     = mtl::texture*;
 	};
+
+	// The host extent of a guest texture.  Metal requires at least one texel and
+	// one mip level.  A guest field can be zero (an unused unit, or a register that
+	// was never written); a zero-extent texture has no texels, so the smallest
+	// legal host texture samples the same value.  A cube face is square, and the
+	// RSX face size is the width field, so the height follows the width.  The mip
+	// count is capped at the chain the extent can hold.  This is the RSX model,
+	// not a Metal workaround: the guest cannot describe a smaller texture or a
+	// longer chain.
+	struct texture_extent
+	{
+		u16 width = 1;
+		u16 height = 1;
+		u16 depth = 1;
+		u8 mipmaps = 1;
+	};
+
+	texture_extent normalize_texture_extent(MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps);
 
 	class cached_texture_section : public rsx::cached_texture_section<mtl::cached_texture_section, mtl::texture_cache_traits>
 	{
@@ -168,6 +190,17 @@ namespace mtl
 		std::vector<std::unique_ptr<temporary_texture>> m_temporary_surfaces;
 		const u32 max_cached_image_pool_size = 256;
 
+		// The pending cyclic-reference barrier (I4).  The sampler resolves before the
+		// consuming pass opens, so the request crosses the pass boundary as a flag.
+		bool m_texture_barrier_requested = false;
+
+		// The device decides whether a DXT source is BC or expanded BGRA8.  The
+		// renderer sets this once, after the resource layer knows the capability.
+		bool m_supports_bc = true;
+
+	public:
+		void set_bc_texture_support(bool supported) { m_supports_bc = supported; }
+
 	private:
 		void clear()
 		{
@@ -212,21 +245,49 @@ namespace mtl
 			return result;
 		}
 
+	public:
+		// Pure descriptor construction, exposed for the GPU-free contract tests.
 		static MTL::TextureDescriptor* make_descriptor(MTL::PixelFormat format, MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps)
 		{
+			const texture_extent extent = normalize_texture_extent(type, width, height, depth, mipmaps);
+
+			// A cube arrives as six faces in the RSX depth field.  Metal takes those
+			// faces through the upload slice, so the descriptor depth of one is the
+			// expected form and is not a corrected illegal request (L10).
+			const bool cube_face_extent = type == MTL::TextureTypeCube && depth == 6 &&
+				extent.depth == 1 && extent.height == extent.width;
+
+			if (!cube_face_extent && (extent.width != width || extent.height != height || extent.depth != depth || extent.mipmaps != mipmaps))
+			{
+				// The first few reports name the guest state; a title can hit this
+				// every frame, so the latch is bounded.
+				static std::atomic<u32> reports{0};
+				if (reports.fetch_add(1, std::memory_order_relaxed) < 8)
+				{
+					rsx_log.error("Metal 4: texture descriptor %ux%ux%u with %u mips is not legal; using %ux%ux%u with %u mips (type %u, format %u)",
+						width, height, depth, mipmaps, extent.width, extent.height, extent.depth, extent.mipmaps,
+						static_cast<u32>(type), static_cast<u32>(format));
+				}
+			}
+
 			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
 			descriptor->setTextureType(type);
 			descriptor->setPixelFormat(format);
-			descriptor->setWidth(width);
-			descriptor->setHeight(height);
-			descriptor->setDepth(type == MTL::TextureType3D ? depth : 1);
-			descriptor->setArrayLength(type == MTL::TextureTypeCube ? 6 : 1);
-			descriptor->setMipmapLevelCount(mipmaps);
+			descriptor->setWidth(extent.width);
+			descriptor->setHeight(extent.height);
+			descriptor->setDepth(type == MTL::TextureType3D ? extent.depth : 1);
+			// A cube has six faces but one array slice.  Metal rejects
+			// arrayLength 6 with "MTLTextureTypeCube requires that arrayLength is 1"
+			// in validateWithDevice (L10); the six faces are addressed through the
+			// slice argument of the upload and copy calls.
+			descriptor->setArrayLength(1);
+			descriptor->setMipmapLevelCount(extent.mipmaps);
 			descriptor->setSampleCount(1);
 			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView);
 			return descriptor;
 		}
 
+	private:
 		std::array<MTL::TextureSwizzle, 4> get_component_mapping(u32 gcm_format, rsx::component_order flags) const
 		{
 			switch (gcm_format)
@@ -254,6 +315,16 @@ namespace mtl
 		// The upload helper.  It is not the base's sampled-image resolver
 		// (texture_cache.h:3070), which this class must keep reachable by name.
 		void upload_texture_data(command_recorder& cmd, texture* dst, u32 gcm_format, bool is_swizzled, const std::vector<rsx::subresource_layout>& layouts) const;
+
+		// A Metal texture's contents are undefined until something writes them, so
+		// a level that no upload covers keeps whatever the previous occupant of the
+		// address left behind.  The OpenGL reference clears a reused image that is
+		// not uploaded wholly from the CPU (GLTextureCache.h:751-761) and the
+		// Vulkan reference wipes the image when the create flags ask for it
+		// (VKTextureCache.cpp:1096-1112).  Metal has neither, so the levels that no
+		// upload covers are cleared here.  The clear is a blit of a zeroed buffer
+		// over the level, because Metal 4 has no texture clear.
+		void clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u16 width, u16 height, u16 depth, u8 first_level, u8 level_count) const;
 
 		void initialize_subresource_from_memory(command_recorder& cmd, texture* dst, const deferred_subresource& desc, rsx::texture_dimension_extended type) const
 		{
@@ -401,9 +472,32 @@ namespace mtl
 			{
 				// Try and reuse this image data. It is very likely to match our needs.
 				image = cached.get_raw_texture();
-				if (!image || cached.get_image_type() != type)
+
+				// The reused allocation has to fit the new section, and the host image
+				// is never resized or reformatted.  A section that is re-created with
+				// another extent, another format or a longer mip chain therefore
+				// keeps the old allocation, and the upload then writes through a
+				// texture that cannot hold it: the levels the old image does not have
+				// are dropped (upload_texture_data skips a level the image lacks) and
+				// the ones it does have keep the previous texture's content.  The
+				// Vulkan reference discards the image on a type or depth mismatch
+				// (VKTextureCache.cpp:1076-1080); this test is the same idea with
+				// the extent, the format and the mip chain added.
+				const MTL::PixelFormat wanted_format = get_texture_format(gcm_format, m_supports_bc);
+				const bool fits =
+					image &&
+					cached.get_image_type() == type &&
+					image->pixel_format() == wanted_format &&
+					image->width() == width &&
+					image->height() == height &&
+					image->value()->mipmapLevelCount() == mipmaps;
+
+				if (!fits)
 				{
-					// Type mismatch, discard.
+					// TODO(excise): level 2; the reuse path kept the old allocation
+					// only when the type matched, without looking at the new size.
+					MTL_PROBE_LATCH(2, "texture/reuse rejected");
+					// The image does not fit, discard it.
 					cached.destroy();
 					image = nullptr;
 				}
@@ -411,15 +505,36 @@ namespace mtl
 				{
 					ensure(cached.is_managed());
 
+					// TODO(excise): level 2; what the reused allocation actually
+					// holds.  The RSX re-creates a section whenever the guest
+					// re-describes the same address, and the reused host image is
+					// never resized or reformatted, so a section re-created larger
+					// (or with a longer mip chain) keeps the old allocation and the
+					// upload then writes through a texture that cannot hold it.
+					MTL_PROBE_LATCH(2, "texture/reuse");
 					cached.set_dimensions(width, height, depth, pitch);
 					cached.set_format(image->pixel_format());
+
+					// A section that is not uploaded wholly from the CPU keeps the
+					// content of the image that held the address before, and a Metal
+					// image that was never rendered into is not even zeroed.  The
+					// OpenGL reference clears the reused image in exactly this case
+					// (GLTextureCache.h:751-761), so the reuse clears it here.
+					if (context != rsx::texture_upload_context::shader_read)
+					{
+						// TODO(excise): level 2; a reused image that no upload covers.
+						MTL_PROBE_LATCH(2, "texture/reuse cleared");
+						clear_texture(cmd, image, gcm_format, width, height, depth, 0, mipmaps);
+					}
 				}
 			}
 
 			if (!image)
 			{
+				// TODO(excise): level 2; a fresh host allocation.
+				MTL_PROBE_LATCH(2, "texture/create");
 				ensure(!cached.exists());
-				image = create_image(cmd, get_texture_format(gcm_format), get_texture_type(type), width, height, depth, static_cast<u8>(mipmaps));
+				image = create_image(cmd, get_texture_format(gcm_format, m_supports_bc), get_texture_type(type), width, height, depth, static_cast<u8>(mipmaps));
 				image->set_format_class(rsx::classify_format(gcm_format));
 
 				cached.reset(rsx_range);
@@ -472,6 +587,37 @@ namespace mtl
 			auto* section = create_new_texture(cmd, rsx_range, width, height, depth, mipmaps, pitch, gcm_format, context, type, input_swizzled,
 				rsx::component_order::default_, 0);
 
+			// TODO(excise): level 2; the subresource coverage of the upload against
+			// the chain the section declares.  A chain that stops early leaves every
+			// minified fetch reading the tail of the allocation, which is black on a
+			// freshly created private texture.
+			const u32 layer_count =
+				(type == rsx::texture_dimension_extended::texture_dimension_cubemap) ? 6u :
+				(type == rsx::texture_dimension_extended::texture_dimension_3d) ? static_cast<u32>(depth) : 1u;
+			const u32 expected = static_cast<u32>(mipmaps) * layer_count;
+			const u32 supplied = static_cast<u32>(subresource_layout.size());
+
+			MTL_PROBE_HISTOGRAM(2, "texture upload declared mips", static_cast<u32>(mipmaps), "declared mip count");
+			MTL_PROBE_HISTOGRAM(2, "texture upload subresources", supplied, "uploaded subresource count");
+			MTL_PROBE_HISTOGRAM(2, "texture upload format", gcm_format, "gcm upload format");
+
+			if (supplied < expected)
+			{
+				MTL_PROBE_LATCH(2, "texture/upload partial");
+			}
+
+			// An upload that does not cover every level leaves the rest of the
+			// image with whatever the previous occupant of the address left in it,
+			// and a Metal image that was never rendered into is not even zeroed.
+			// The image is cleared first and the upload then writes the levels it
+			// covers.
+			if (supplied < expected)
+			{
+				// TODO(excise): level 2; an upload that leaves a level unwritten.
+				MTL_PROBE_LATCH(2, "texture/upload cleared levels");
+				clear_texture(cmd, section->get_raw_texture(), gcm_format, width, height, depth, 0, mipmaps);
+			}
+
 			upload_texture_data(cmd, section->get_raw_texture(), gcm_format, input_swizzled, subresource_layout);
 			section->last_write_tag = rsx::get_shared_tag();
 			return section;
@@ -490,12 +636,29 @@ namespace mtl
 			section.set_view_flags(flags);
 		}
 
+	public:
+		u32 diagnostic_texture_barriers = 0;
+
+		// A cyclic reference queues one barrier request for the renderer.  The surface
+		// is both a render target and a sampled input, and only a pass boundary orders
+		// that pair on Metal (REVIEW-FINDINGS.md, I4).
+		bool consume_texture_barrier_request()
+		{
+			const bool requested = m_texture_barrier_requested;
+			m_texture_barrier_requested = false;
+			return requested;
+		}
+
+	protected:
 		void insert_texture_barrier(command_recorder&, texture*, bool) override
-		{}
+		{
+			++diagnostic_texture_barriers;
+			m_texture_barrier_requested = true;
+		}
 
 		bool render_target_format_is_compatible(texture* tex, u32 gcm_format) override
 		{
-			return tex->pixel_format() == get_texture_format(gcm_format);
+			return tex->pixel_format() == get_texture_format(gcm_format, m_supports_bc);
 		}
 
 		void prepare_for_dma_transfers(command_recorder&) override
@@ -563,8 +726,13 @@ namespace mtl
 
 		// Resolve one RSX texture unit to the Metal image and sampler of this draw.
 		// `descriptor` is the unit's latch (RSXThread.h:261) and `sampler` is the
-		// object built by the renderer's sampler cache (MTLGSRender.cpp:249).
-		texture_bind resolve_texture_bind(const rsx::sampled_image_descriptor_base* descriptor, MTL::SamplerState* sampler);
+		// object built by the renderer's sampler cache (MTLGSRender.cpp:249).  A
+		// legal descriptor can carry a deferred operation and no image yet; this
+		// call materializes it before the render pass opens, as VK and GL do
+		// (VKDraw.cpp:682-689).  `deferred` reports that the returned image was
+		// produced here, so the caller records the transfer write for the scheduler.
+		texture_bind resolve_texture_bind(command_recorder& cmd, rsx::sampled_image_descriptor_base* descriptor,
+			MTL::SamplerState* sampler, bool& deferred);
 	};
 }
 

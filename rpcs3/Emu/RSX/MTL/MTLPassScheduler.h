@@ -47,6 +47,14 @@ namespace mtl
 		// records the new pass (HLD-03 §2.4).
 		bool emit_split_barriers(MTL4::CommandEncoder* encoder);
 
+		// An explicit request from the texture cache (I4).  A cyclic reference samples
+		// a surface an earlier pass of this frame wrote, so the pair is a queue-scope
+		// edge: the writer's tile has flushed and only the next encoder can carry it
+		// (HLD-03 §2.1 item 5).  The request waits in the carried list, because the
+		// sampler resolves before the consuming pass opens and begin_pass clears the
+		// per-pass queue.
+		void request_texture_barrier();
+
 		bool split_requested() const { return m_split; }
 
 	private:

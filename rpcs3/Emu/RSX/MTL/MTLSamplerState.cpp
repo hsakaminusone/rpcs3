@@ -2,6 +2,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Common/TextureUtils.h"
+#include "Emu/RSX/Utils/algorithm.hpp"
 #include "Emu/RSX/rsx_methods.h"
 
 #include "util/fnv_hash.hpp"
@@ -80,9 +82,11 @@ namespace mtl
 			return MTL::SamplerMipFilterNearest;
 		case rsx::texture_minify_filter::nearest_linear:
 		case rsx::texture_minify_filter::linear_linear:
-		case rsx::texture_minify_filter::convolution_min:
-			// convolution_min looks close to linear_linear (gcm_enums.h:1532).
 			return MTL::SamplerMipFilterLinear;
+		case rsx::texture_minify_filter::convolution_min:
+			// Vulkan keeps the linear min filter but sets sample_mipmaps = false
+			// (VKFormats.cpp:44), so the chain is not sampled.
+			return MTL::SamplerMipFilterNotMipmapped;
 		}
 
 		return MTL::SamplerMipFilterNotMipmapped;
@@ -90,19 +94,36 @@ namespace mtl
 
 	u32 get_max_anisotropy(rsx::texture_max_anisotropy aniso)
 	{
+		u32 samples;
+
 		switch (aniso)
 		{
-		case rsx::texture_max_anisotropy::x1: return 1;
-		case rsx::texture_max_anisotropy::x2: return 2;
-		case rsx::texture_max_anisotropy::x4: return 4;
-		case rsx::texture_max_anisotropy::x6: return 6;
-		case rsx::texture_max_anisotropy::x8: return 8;
-		case rsx::texture_max_anisotropy::x10: return 10;
-		case rsx::texture_max_anisotropy::x12: return 12;
-		case rsx::texture_max_anisotropy::x16: return 16;
+		case rsx::texture_max_anisotropy::x1: samples = 1; break;
+		case rsx::texture_max_anisotropy::x2: samples = 2; break;
+		case rsx::texture_max_anisotropy::x4: samples = 4; break;
+		case rsx::texture_max_anisotropy::x6: samples = 6; break;
+		case rsx::texture_max_anisotropy::x8: samples = 8; break;
+		case rsx::texture_max_anisotropy::x10: samples = 10; break;
+		case rsx::texture_max_anisotropy::x12: samples = 12; break;
+		case rsx::texture_max_anisotropy::x16: samples = 16; break;
+		default: samples = 1; break;
 		}
 
-		return 1;
+		// Metal accepts only the powers of two 1, 2, 4, 8 and 16 (K1).  Round up,
+		// because the guest asked for at least this many samples, and clamp to the
+		// Metal ceiling.
+		return std::min(rsx::next_pow2(samples), 16u);
+	}
+
+	f32 get_sampler_lod_bias(rsx::texture_minify_filter filter, f32 bias)
+	{
+		if (get_mip_filter(filter) == MTL::SamplerMipFilterNearest)
+		{
+			// Round to nearest 0.5 to match the Vulkan path (VKDraw.cpp:506-511).
+			bias = std::floor(bias * 2.0f + 0.5f) * 0.5f;
+		}
+
+		return std::clamp(bias, -16.0f, 15.999f);
 	}
 
 	MTL::SamplerBorderColor get_closest_border_color(const color4f& color)
@@ -139,13 +160,14 @@ namespace mtl
 			state.mag_filter = texture.mag_filter();
 
 			// The LOD range is clamped to the resident mip chain, because the guest
-			// value can exceed it (VKDraw.cpp:467-518).  Metal has no sampler LOD
-			// bias, so the guest bias is a recorded limitation (04 R19).
+			// value can exceed it (VKDraw.cpp:467-518).  The bias is only sampled
+			// when the chain has mips, and is quantized for Metal in the helper.
 			const u32 mipmaps = texture.get_exact_mipmap_count();
 			if (get_mip_filter(state.min_filter) != MTL::SamplerMipFilterNotMipmapped && mipmaps > 1)
 			{
 				state.min_lod = std::min(texture.min_lod(), static_cast<f32>(mipmaps - 1));
 				state.max_lod = std::min(texture.max_lod(), static_cast<f32>(mipmaps - 1));
+				state.lod_bias = get_sampler_lod_bias(state.min_filter, texture.bias());
 			}
 
 			const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
@@ -168,6 +190,14 @@ namespace mtl
 		state.compare = texture.zfunc();
 		state.max_aniso = get_max_anisotropy(texture.max_aniso());
 
+		// The shader re-expands signed channels and applies gamma, and the depth
+		// pack is decoded after the fetch.  Linear filtering runs before that
+		// work, so it would filter the undecoded value (VKDraw.cpp:419-437).
+		const rsx::texture_format_ex format_ex = texture.format_ex();
+		state.force_nearest = state.depth_compare ||
+			(format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0 ||
+			format_ex.hw_SRGB_possible();
+
 		return state;
 	}
 
@@ -177,6 +207,23 @@ namespace mtl
 		// a comparison sampler and its border colour carries no expansion.
 		const auto& texture = rsx::method_registers.vertex_textures[unit];
 		sampler_state state = capture_sampler(texture);
+
+		// A vertex fetch has no derivatives, so Vulkan and OpenGL force nearest and
+		// do not sample the mip chain (VKDraw.cpp:606-619).
+		state.min_filter = rsx::texture_minify_filter::nearest;
+		state.mag_filter = rsx::texture_magnify_filter::nearest;
+		state.min_lod = 0.0f;
+		state.max_lod = 0.0f;
+		state.lod_bias = 0.0f;
+
+		// CELL_GCM_TEXTURE_UN selects unnormalized coordinates.  Metal requires
+		// clamp-to-edge on R and no mip filter for that mode (VKDraw.cpp:594,608,617;
+		// KK kk_sampler.c:52-60, :108-110).  A vertex texture is 2D, so R is unused
+		// otherwise; Vulkan binds repeat there.
+		state.unnormalized_coords = (texture.format() & CELL_GCM_TEXTURE_UN) != 0;
+		state.wrap_r = state.unnormalized_coords
+			? rsx::texture_wrap_mode::clamp_to_edge
+			: rsx::texture_wrap_mode::wrap;
 
 		state.border_color = get_closest_border_color(texture.remapped_border_color());
 		state.depth_compare = false;
@@ -202,13 +249,27 @@ namespace mtl
 		descriptor->setSAddressMode(get_address_mode(state.wrap_s));
 		descriptor->setTAddressMode(get_address_mode(state.wrap_t));
 		descriptor->setRAddressMode(get_address_mode(state.wrap_r));
-		descriptor->setMinFilter(get_min_mag_filter(state.min_filter));
-		descriptor->setMagFilter(get_min_mag_filter(state.mag_filter));
-		descriptor->setMipFilter(get_mip_filter(state.min_filter));
+		if (state.force_nearest)
+		{
+			// The filter must not run on the stored value; the shader decodes it.
+			// The mip chain stays available, with nearest selection, as in Vulkan.
+			descriptor->setMinFilter(MTL::SamplerMinMagFilterNearest);
+			descriptor->setMagFilter(MTL::SamplerMinMagFilterNearest);
+			descriptor->setMipFilter(MTL::SamplerMipFilterNearest);
+		}
+		else
+		{
+			descriptor->setMinFilter(get_min_mag_filter(state.min_filter));
+			descriptor->setMagFilter(get_min_mag_filter(state.mag_filter));
+			descriptor->setMipFilter(get_mip_filter(state.min_filter));
+			descriptor->setMaxAnisotropy(state.max_aniso);
+		}
+
 		descriptor->setLodMinClamp(state.min_lod);
 		descriptor->setLodMaxClamp(state.max_lod);
-		descriptor->setMaxAnisotropy(state.max_aniso);
+		descriptor->setLodBias(state.lod_bias);
 		descriptor->setBorderColor(state.border_color);
+		descriptor->setNormalizedCoordinates(!state.unnormalized_coords);
 
 		if (state.depth_compare)
 		{
@@ -232,10 +293,13 @@ namespace mtl
 			&& a.mag_filter == b.mag_filter
 			&& a.min_lod == b.min_lod
 			&& a.max_lod == b.max_lod
+			&& a.lod_bias == b.lod_bias
 			&& a.max_aniso == b.max_aniso
+			&& a.unnormalized_coords == b.unnormalized_coords
 			&& a.border_color == b.border_color
 			&& a.depth_compare == b.depth_compare
-			&& a.compare == b.compare;
+			&& a.compare == b.compare
+			&& a.force_nearest == b.force_nearest;
 	}
 
 	u64 hash_sampler_state(const sampler_state& state)
@@ -252,9 +316,12 @@ namespace mtl
 		hash = rpcs3::hash64(hash, static_cast<u32>(state.border_color));
 		hash = rpcs3::hash64(hash, static_cast<u16>(state.compare));
 		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_compare));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.force_nearest));
+		hash = rpcs3::hash64(hash, static_cast<u8>(state.unnormalized_coords));
 		hash = rpcs3::hash64(hash, state.max_aniso);
 		hash = rpcs3::hash64(hash, std::bit_cast<u32>(state.min_lod));
-		return rpcs3::hash64(hash, std::bit_cast<u32>(state.max_lod));
+		hash = rpcs3::hash64(hash, std::bit_cast<u32>(state.max_lod));
+		return rpcs3::hash64(hash, std::bit_cast<u32>(state.lod_bias));
 	}
 
 	void sampler_cache::shutdown()

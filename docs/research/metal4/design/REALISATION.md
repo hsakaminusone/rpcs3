@@ -426,8 +426,9 @@ entries, because MSL has no combined image sampler.
 
 The findings register (`REVIEW-FINDINGS.md`) holds the itemised list of places
 where the tree does not yet reproduce the RSX behaviour, with the evidence for
-each. Five review passes feed it; the fifth is a second reading of the
-state-latching cluster, recorded as the `E` entries.
+each. Seven passes feed it: the review passes A to E and G, and the first-light
+bring-up pass H. Pass E is a second reading of the state-latching cluster, recorded
+as the `E` entries.
 
 The blocked set shares one cause: **the pass scheduler was not wired**, so no
 hazard was recorded and `emit_barrier` had no caller. The scheduler is now driven
@@ -435,9 +436,10 @@ hazard was recorded and `emit_barrier` had no caller. The scheduler is now drive
 depth-as-texture stencil mirror and the `EQUAL` depth-test input (A3/B1, A4/B2),
 and the MSAA depth resolve (B6, see the depth/stencil cluster below).
 
-The unfinished set is the depth read-back encode (B16, the inverse of the B8 decode
-and its z16 half-to-float step) and the latch dataflow and its dead fields (E13). One
-finding is open outright: the flat-shading path (G1), because Metal has no
+The unfinished set is the five partials the register lists (E7, E8, E13, F5 and F9);
+the register carries each one's remaining half. The depth read-back encode (B16, the
+inverse of the B8 decode and its z16 half-to-float step) is now fixed at both the
+surface and texture-cache sites, so it is no longer in that set. One finding is open outright: the flat-shading path (G1), because Metal has no
 provoking-vertex state, so the RSX last-vertex convention has no native expression.
 The items the `REVIEW-FINDINGS.md` "Parked for review" table lists also wait, because
 none can be settled from the tree alone: they wait on a hardware measurement, a

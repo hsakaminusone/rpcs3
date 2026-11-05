@@ -15,6 +15,7 @@
 #include "Emu/System.h"
 #include "Emu/system_config.h"
 #include "Emu/system_utils.hpp"
+#include "Emu/RSX/MTL/MTLAvailability.h"
 #include "Emu/IdManager.h"
 #include "Emu/Io/Null/NullKeyboardHandler.h"
 #include "Emu/Io/Null/NullMouseHandler.h"
@@ -89,6 +90,16 @@ main_application::main_application()
 		cfg_log.notice("Setting the default renderer to OpenGl");
 		Emu.SetDefaultRenderer(video_renderer::opengl);
 	}
+
+#ifdef RSX_ENABLE_METAL4
+	// Metal 4 is compiled on Apple silicon and the settings dialog offers it from
+	// macOS 27.  Register it as supported, or the renderer selection is rewritten to
+	// Vulkan before the RSX thread is created.
+	if (mtl::metal4_available(mtl::macos_major()))
+	{
+		supported_renderers.insert(video_renderer::metal);
+	}
+#endif
 
 	Emu.SetSupportedRenderers(supported_renderers);
 }

@@ -1,6 +1,6 @@
 # Review findings register
 
-Three review passes read the Metal 4 implementation against the RSX behaviour.
+Eight passes read the Metal 4 implementation against the RSX behaviour.
 The method is fixed: the RSX is the source of truth, and the Vulkan backend, the
 OpenGL backend, the shared `Emu/RSX/Common` and `Emu/RSX/Core` code and the RSX
 headers are evidence for what the RSX does. A finding is recorded when the tree
@@ -31,6 +31,15 @@ The passes were:
   `MTLFormats`, `MTLFramebuffer`. The pass numbered its findings `F1..F12`, which
   collides with pass D, so they are recorded as `E1..E12`; `E5` and `E6` are the
   pass's duplicates of `C3` and `C1`.
+- **G — the capability parity pass.** The backend against
+  `rsx::thread::backend_configuration` and against the two shipping backends.
+- **H — the first-light bring-up.** The evidence of the first frame the backend
+  presented, read against the command recorder, the binding layer, the texture cache
+  and the format map. Section 7.1 of `HANDOFF.md` holds the frame measurements.
+- **J — the parity sweep.** The index subrange, the two byte rings, the 16-bit strip
+  restart, the no-attribute drain, the shader-decoded sampler filter, the typeless
+  copy, the live resolution-scale change, the fp16 setting and the skip diagnostics.
+  The rows are J1-J10.
 
 Line references are as of the review pass; every entry also names the function,
 which does not move. A finding that a fix closed is marked **Fixed**; a finding
@@ -51,6 +60,7 @@ accepted deviation is marked **Limitation**.
 | A7 | Medium | `emulate_shadow_compare` | Fixed |
 | A8 | Low | `conditional_render_predicate` | Limitation |
 | A9 | Critical | MSL binding index limits | Fixed |
+| A10 | Critical | overlay sampler index | Fixed |
 | B1 | High | depth/stencil mirror | Fixed |
 | B2 | High | depth-compare input | Fixed |
 | B3 | High | transfer-read barrier | Fixed |
@@ -66,7 +76,7 @@ accepted deviation is marked **Limitation**.
 | B13 | Medium | deferred-release slot | Fixed |
 | B14 | Low | MSAA swizzle view | Fixed |
 | B15 | High | combined-format copy no-op | Fixed |
-| B16 | High | depth read-back encode | Partial |
+| B16 | High | depth read-back encode | Fixed |
 | C1 | High | logic op | Fixed |
 | C2 | High | two-sided stencil ref | Fixed |
 | C3 | High | extended depth range | Fixed |
@@ -77,36 +87,73 @@ accepted deviation is marked **Limitation**.
 | C8 | Low | duplicate scissor build | Fixed |
 | C9 | Low | `capture_draw_state` | Limitation |
 | C10 | Low | dither | Limitation |
+| C11 | High | pipeline topology class | Fixed |
 | F1 | Critical | present source lookup | Fixed |
 | F2 | Critical | pass hazards | Fixed |
 | F3 | Critical | fill values buffer | Fixed |
 | F4 | High | multisampled present source | Fixed |
-| F5 | High | flip preamble | Partial |
+| F5 | High | flip preamble | Fixed |
 | F6 | High | split barrier loss | Fixed |
 | F7 | High | cross-encoder barriers | Fixed |
 | F8 | High | access-violation result | Fixed |
-| F9 | Medium | drawable layer setup | Partial |
+| F9 | Medium | drawable layer setup | Fixed |
 | F10 | Medium | present output pipeline | Fixed |
 | F11 | Medium | DMA/image clusters | Fixed |
 | F12 | Medium | drawable acquire block | Fixed |
+| F13 | Critical | present source format space | Fixed |
+| F14 | Critical | the composited layer | Fixed |
+| F15 | High | the stranded drawable | Fixed |
+| F16 | Critical | the layer residency gate | Fixed |
+| F17 | Critical | the commit-options lifespan | Fixed |
+| F18 | High | the savedata dialog crash | Won't fix (upstream #15092) |
+| F19 | High | the argument table per encoder | Fixed |
+| F20 | Critical | the packed texture formats | Fixed |
 | E1 | High | cull-both point/line | Fixed |
 | E2 | Critical | `surface_b` attachment | Fixed |
 | E3 | Low | PSO attachment-count key | Won't fix |
 | E4 | High | `z16_float` depth format | Fixed |
 | E5 | High | extended depth range | Duplicate of C3 |
 | E6 | High | logic op | Duplicate of C1 |
-| E7 | Medium | depth bounds test | Fixed |
+| E7 | Medium | depth bounds test | Partial |
 | E8 | Medium | sampler LOD bias | Partial |
 | E9 | Medium | A2C at 1 spp | Fixed |
 | E10 | Low | 2-sample capability | Fixed |
 | E11 | Low | PSO key hash | Fixed |
 | E12 | Low | key completeness | Limitation |
-| E13 | Low | latch dataflow and dead fields | Partial |
+| E13 | Low | latch dataflow and dead fields | Fixed |
 | E14 | Medium | state-latch hash truncation | Fixed |
-| G1 | High | flat shading | Open |
+| G1 | High | flat shading | Limitation |
 | G2 | Low | `supports_multidraw` | Limitation |
+| G3 | Medium | the boot preload dialog | Fixed |
+| F21 | Critical | the missing base flip | Fixed |
+| F22 | High | the fault wait with no flush work | Fixed |
+| F23 | High | the pipeline archive flush configuration | Fixed |
+| F24 | Critical | the RSX draw path omitted the clip-space Y flip | Fixed |
+| I1 | High | the upload blit write record | Fixed |
+| I2 | High | the unbounded shutdown drain | Fixed |
+| I3 | High | the residency set drop order | Fixed |
+| I4 | Medium | `insert_texture_barrier` | Fixed |
+| I5 | Medium | the blit-engine fast path | Limitation |
+| I6 | High | the teardown abort | Fixed |
+| I7 | Medium | the flicker content | Open |
+| I8 | Medium | the residency set lifespan | Fixed |
+| I9 | High | the transfer-copy write ordering | Fixed |
+| J1 | High | indexed subrange address | Fixed |
+| J2 | High | ring growth to the block size | Fixed |
+| J3 | Medium | ring block alignment | Fixed |
+| J4 | Medium | 16-bit strip restart | Fixed |
+| J5 | Low | no-attribute clause drain | Fixed |
+| J6 | Medium | shader-decoded sampler filter | Fixed |
+| J7 | High | typeless texture copy | Fixed |
+| J8 | Medium | live resolution-scale change | Fixed |
+| J9 | Medium | native fp16 selection | Fixed |
+| J10 | Medium | skip-reason diagnostics | Fixed |
 
-Totals: 63 findings, 47 fixed, 5 partial, 0 blocked, 1 open, 7 limitations, 2 duplicates, 1 won't fix.
+Totals: 97 findings, 80 fixed, 3 partial, 0 blocked, 1 open, 9 limitations,
+2 duplicates, 2 won't fix. The table is the whole register: the seven passes
+(A to E, G and H), the live defects the black-frame investigation found (I1-I9),
+the boot observation (G3), the present-path and draw-path investigation
+(F21-F24), and the parity sweep (J1-J10).
 
 ## A — the shader and ABI contract
 
@@ -339,6 +386,59 @@ with a clamp.
 What no test in the tree reaches is the GLSL-to-MSL hop, so the first real
 verification of the emitted declarations is first light.
 
+### A10 — the overlay samplers shared one sampler index. Fixed.
+The overlay passes are not RSX draws, but their shaders go through the same
+`spv_to_msl`, and their combined image samplers sit at the argument-table
+indices, 0 and 1, below the RSX texture-range base of 12. The A9 rule guarded
+the sampler index with `slot_has_sampler`, which is true only for the
+twelve-to-twenty-seven texture units, so a sampler below the base kept no
+index. SPIRV-Cross keeps its default index 0 for a binding that carries none,
+so both overlay samplers reached MSL at `[[sampler(0)]]` and the Metal compiler
+rejected the fragment library of the first overlay pass, `present_scale_pass`,
+verbatim: "cannot reserve 'sampler' resource location at index 0". Both overlay
+fragment shaders declare two samplers (`VideoOutCalibrationPass.glsl:6-7` and
+`OverlayRenderFS.glsl`), and the cross-compiler pushes a sampler argument for
+every declared sampled image even when the shader only fetches it, so no
+overlay fragment library could build and the output pass died with the
+translation. The status quo is measured on Apple A18 Pro through
+`MTL4::Compiler::newLibrary` with the backend's own `CompilerDescriptor`
+(`/tmp/mtlsampler`): two samplers at `[[sampler(0)]]` are rejected with that
+message, `[[sampler(0)]]` with `[[sampler(1)]]` compiles, and `[[sampler(0)]]`
+with `[[sampler(31)]]` fails with the other message, "must be between 0 and
+15", which rules out the reading that the failing module kept the RSX
+bindings of 30 and 31.
+
+The rule is now one expression: `slot_has_sampler(slot) ? texture_sampler_index
+(slot) : slot`. A texture unit keeps its position inside the stage's range,
+which is A9, and a combined image sampler outside the units is an overlay
+sampler, whose index is its binding, because the overlay argument table takes
+exactly that binding as its own index (`MTLOverlays.cpp` binds the sampler
+state at the shader's binding and the table declares two sampler entries). No
+signature moved: the two callers of `spv_to_msl` already pass the slot they
+mean.
+
+The RSX programs are untouched by the second half of the rule, read from the
+declarations rather than assumed. The units are the only combined image
+samplers a stage declares between 12 and 27, so they take the unit branch. The
+stencil mirror at 30 and the depth input at 50 are separate samplerless
+textures (A9), which the cross-compiler reports as separate images, so the
+rule is not reached for them. The vertex texel buffers (`usamplerBuffer`,
+bindings 5 and 6) are SPIR-V images of dimension `Buffer`, and the vendored
+cross-compiler emits no sampler resource for those
+(`spirv_msl.cpp:15557`, the sampler is pushed only when the dimension is not
+`Buffer`), so the index the new rule assigns there is inert and the emitted
+MSL is unchanged.
+
+One hypothesis this register must not carry forward: the overlay snippets'
+`#ifdef VULKAN` branches are live in this backend, not dead. glslang defines
+`VULKAN` itself whenever it compiles GLSL for Vulkan, in the preamble it
+generates (`Versions.cpp:708-712`, `#define VULKAN <spvVersion.vulkanGlsl>`),
+so the backend must not define it, and an attempt to do so fails the vertex
+stage with "Macro redefined; different substitutions: VULKAN" instead of
+selecting anything (measured, run 3). The `%preprocessor` placeholder the
+overlay sources carry is the backend's own preamble seam, and the snippets'
+Vulkan branch is already the branch the argument table was built for.
+
 ## B — the surface and texture cache
 
 ### B1 — the depth-texture stencil mirror. Fixed. Duplicate of A3.
@@ -516,15 +616,13 @@ same predicate the upload uses, and it agrees with the host format table: a z16_
 surface is `Depth16Unorm`, whose plane is already the guest pack, while z16_float is
 `Depth32Float` and z24s8 is `Depth32Float_Stencil8`, whose planes are not.
 
-**What remains is the completion point.** The encode is a CPU pass, so it must run
-after the copy that fills the guest buffer has completed. The read-back path
-(`MTLSurfaceCache.cpp:203-213` → `MTLSurface::write_to_memory`) records that copy into
-the open compute encoder, and the transform then needs a synchronisation point after
-the frame slot commits — in Metal 4 the form is `signalEvent` plus
-`waitUntilSignaledValue` (HLD-03). That point is not written, because nothing reaches
-this path today and a synchronisation point is not something to add unprofiled. The
-stencil plane is still not written for a combined surface, so a stencil read-back of a
-combined surface is still lost.
+**Resolution.** Both sites now use the encode. `surface::write_to_memory` and
+`cached_texture_section::copy_texture` copy the host depth and stencil planes into shared
+staging buffers, call `command_recorder::flush_for_readback()` once, and then run
+`encode_depth_plane` into the guest-pitch row. The stencil plane is copied with
+`get_depth_plane_option(..., true)` for a combined format, so a z24s8 read-back keeps its
+stencil byte. The bit-exact unscaled path is bounded by the host extent and the guest
+row. TX12 is the texture-cache site and is fixed with the same code.
 
 ### B9 — `erase_bkgnd` was never initialised. Fixed.
 VK clears the surface and marks it ready when the read-buffers configuration is
@@ -538,7 +636,7 @@ background when `needs_cpu_upload()` holds and otherwise opens a clear-load pass
 over the surface (and over the resolve target when it is read), marks the surface
 ready, and the caller records the write with `on_write`.
 
-### B10 — `insert_texture_barrier` is empty. Fixed by the pass scheduler.
+### B10 — `insert_texture_barrier` is empty. Fixed by the pass scheduler, then by I4.
 VK emits an image barrier on the render target (`VKTextureCache.cpp:1368-1377` →
 `VKRenderTargets.cpp:882`) and GL a texture barrier
 (`GLTextureCache.h:875-877`); the base calls the hook whenever a sampled texture
@@ -551,9 +649,14 @@ attachment set as writes, keyed by `MTL::ResourceID`) and emits the ordering at
 the encoder boundary, before the sampling pass encodes its draws. An edge that
 cannot be emitted inside the open encoder is carried to the next one
 (`split_requested`/`emit_split_barriers`), which is the treatment a TBDR feedback
-loop needs. The hook is therefore left empty by design; VK's `strong_ordering`
-flag and its barrier-per-loop tracker are its own deduplication, which the
-per-frame record supplies here.
+loop needs. VK's `strong_ordering` flag and its barrier-per-loop tracker are its
+own deduplication, which the per-frame record supplies here.
+
+The scheduler's records only match when the sampled unit resolves to the same
+`MTL::ResourceID` as the attachment, which is not always the case, so I4 later
+gave the hook a real edge: it now flags the request the renderer turns into one
+queue-scope barrier for the next pass. The two mechanisms are complementary and
+the counter stays as the evidence channel.
 
 ### B11 — `DEPTH16_FLOAT` mapped to a unorm depth. Fixed.
 VK maps it to `VK_FORMAT_D32_SFLOAT` (`VKFormats.cpp:225`) and GL to
@@ -732,6 +835,45 @@ hot-path state.
 `SET_DITHER_ENABLE` has no Metal state, and VK drops it too; GL reproduces it
 (`GLDraw.cpp:81`). The deviation is accepted and recorded here.
 
+### C11 — the pipeline's topology class contradicted the point-size program. Fixed.
+The pipeline's class came from the draw's primitive family alone
+(`get_primitive_topology_class`). The RSX vertex program declares the point-size
+output in its output mask, and the MSL vertex shader then writes `[[point_size]]`
+(`MTLVertexProgram.cpp:408`), so a triangle draw of such a program asked the
+Metal compiler for a triangle-class pipeline over a point-size vertex function
+and the compiler rejected it with "Vertex shader writes point size but
+inputPrimitiveTopology is MTLPrimitiveTopologyClassTriangle". The verdict is
+measured on the target device through the backend's own build path
+(`MTL4::Compiler::newRenderPipelineState`, `/tmp/mtlpointsize`): a point-size
+vertex function is accepted with the `unspecified` and the `point` classes and
+rejected with the `line` and the `triangle` classes, each with its own message,
+while a vertex function that does not write the output is accepted with all
+four. The rejected build left the pipeline null, so the draw fell to
+`execute_nop_draw` and its geometry was dropped; run 4's log carries the
+rejection at `0:01:16.992121` and again at `0:01:42.916699`.
+
+The class is now decided by the draw family and the program together. A draw of
+the point family keeps the point class, which the point-size output belongs to.
+A draw of any other family whose program writes that output takes
+`MTLPrimitiveTopologyClassUnspecified`, the class that constrains nothing. The
+substitution preserves RSX behaviour exactly, because a non-point primitive
+ignores that output, so nothing downstream of the rasteriser depends on it.
+
+The placement of the rule is load-bearing. It sits in
+`capture_pipeline_properties`, not in `validate_pipeline_properties`, because
+the shared program cache calls the validate hook only for a pipeline it already
+holds (`MTLProgramPipeline.cpp:159`): a substitution applied there would never
+reach the build of a new pipeline, and a cache hit and a miss would disagree on
+the class. The capture runs on every draw, before the lookup. The class is part
+of the pipeline key (`MTLPipeline.h:102`; `operator==` includes
+`input_primitive_topology`), so the two forms are two entries and neither can
+serve the other.
+
+One neighbouring rule must not read the substituted value. The cull-both rule
+(E1) drops the rasteriser for a triangle-class draw only, because the RSX culls
+triangles only, so it reads the draw's family and never the class the point-size
+rule may have put in the key.
+
 ## D — synchronisation, DMA, images and presentation
 
 ### F1 — the present source is looked up with a display-buffer index as a guest address. Fixed.
@@ -780,7 +922,7 @@ resolve the render target and hand the single-sample image to the present
 frame presented nothing. The flip now takes a transfer access, which resolves the
 surface first, so the present always reads one sample per pixel.
 
-### F5 — the flip ignores the guest present state. Partial.
+### F5 — the flip ignores the guest present state. Fixed.
 `MTLGSRender.cpp:977` never read `info.skip_frame` (`VKPresent.cpp:495`), never
 read `display_buffers[info.buffer].width/height/pitch` (`VKPresent.cpp:513-515`),
 never consulted `avconfig` for the format, the gamma or the stereo mode
@@ -788,17 +930,31 @@ never consulted `avconfig` for the format, the gamma or the stereo mode
 (`VKPresent.cpp:560-580`). A skipped frame was still presented and the wrong
 extent could be used. The flip now drops a skipped frame and takes the extent
 from the display buffer, with the AV configuration as the fallback and the cap.
-The pitch, the format and the stereo eye are still not consumed, because the
-present resolves the source by address and the drawable takes the source size;
-the stereo second eye stays a deviation.
+
+**The remaining half is closed and re-checked against the landed output tier.**
+The earlier reading was that the present resolves its source by address and the
+drawable takes the source size, so the display buffer's pitch and format and the
+stereo second eye had nothing to land on. The tree now consumes all three: the
+flip reads the display buffer's pitch into the source lookup
+(`MTLGSRender.cpp:2664`, passed to `get_present_source`), resolves the source with
+the AV configuration's compatible GCM format (`av_format`,
+`get_compatible_gcm_format`), and resolves a second image for the stereo eye below
+the blanking interval and hands both to `present_source{ image, image2, ... }`
+(`:2733-2748`), which the output path composes with the stereo flag. The drawable
+is no longer the source size either (F9): it is the client area, so the pitch and
+the format cannot dictate it. Nothing in the preamble is left unread; the stereo
+second eye keeps one deviation, that it is composed only when the AV
+configuration reports stereo, which is VK's own condition
+(`VKPresent.cpp:560-580`).
 
 ### F6 — `flush` loses a barrier that requests a split. Fixed.
-`MTLPassScheduler.cpp:147-155` set `m_split` when `emit_barrier` returned false,
-but still ran `m_pending.clear()`, so the edge was discarded; `split_requested()`
-(`MTLPassScheduler.h:44`) had no caller. A barrier that cannot be emitted inside
+The pre-fix `flush` set `m_split` when `emit_barrier` returned false, but still ran
+`m_pending.clear()`, so the edge was discarded; `split_requested()`
+(`MTLPassScheduler.h:50`) had no caller. A barrier that cannot be emitted inside
 an encoder must survive as a cross-pass edge. `flush` now retains the specs it
-cannot emit, `begin_pass` no longer clears them, and `emit_split_barriers` emits
-them on the encoder the caller opens after the split.
+cannot emit (`MTLPassScheduler.cpp:89-104`), `begin_pass` no longer clears them, and
+`emit_split_barriers` emits them on the encoder the caller opens after the split
+(`MTLPassScheduler.cpp:106-122`).
 
 ### F7 — the barrier chokepoint cannot express a cross-encoder edge. Fixed.
 `MTLBarrier.cpp:19` only ever called `barrierAfterEncoderStages`, which orders two
@@ -841,15 +997,30 @@ guard is the same one GL uses: a semaphore wait drains the queue first, because 
 RSX thread can otherwise sleep on a label while the faulting thread waits for a
 flush only the RSX thread can run.
 
-### F9 — the drawable layer is configured incompletely and sized from the source. Partial.
+### F9 — the drawable layer is configured incompletely and sized from the source. Fixed.
 `MTLMetalLayer.mm:31-36` and `:44-54` never set `maximumDrawableCount`,
 `displaySyncEnabled`, `allowsNextDrawableTimeout` or `colorspace`, and
 `drawableSize` is set from the source resolution (HLD-06 §2.2). The drawable must
 track the client area scaled by the backing scale factor, and the timeout, vsync
 and colour-space properties govern the present. The layer now sets
 `maximumDrawableCount = 3` (one per ring slot), `displaySyncEnabled`,
-`allowsNextDrawableTimeout` and the sRGB colour space. The drawable size still
-follows the source, because a view-sized drawable needs the scale pass F10.
+`allowsNextDrawableTimeout` and the sRGB colour space. The drawable size follows
+the client area in device pixels (`gs_frame::client_width` multiplies by the
+device pixel ratio), which is the size the output path scales into, so this half
+is closed.
+
+**The present-mode half is closed too, with one framework limitation.**
+`presenter::update_vsync` re-reads `g_cfg.video.vsync` on every acquire and maps
+all three modes: `full` sets `displaySyncEnabled`, `off` clears it, and `adaptive`
+clears it and paces the present with `presentAfterMinimumDuration` at the display's
+refresh interval, which `metal_layer_refresh_interval` reads from
+`NSScreen.maximumFramesPerSecond`. The layer, the drawable pool and the sync
+setting are therefore all driven. The one thing Metal cannot express is Vulkan's
+mailbox mode: the framework has no queue-ahead present mode, so `adaptive` is a
+pacing approximation rather than an exact yield. That is a property of the
+framework, not a gap in the tree, and the run-4 telemetry shows the mapping in
+effect (`sync 0`, `present interval 0.0 ms` with VSync off, display latency 11-15
+ms at the 60 Hz panel rate).
 
 ### F10 — the present output pipeline. Fixed.
 The original text is stale: the output tier exists. `mtl::frame_output` owns the
@@ -889,6 +1060,101 @@ blocked on the RSX thread when the drawable pool was empty. VK bounds the
 equivalent acquire with a timeout (`VKPresent.cpp:595-596`). The layer now sets
 `allowsNextDrawableTimeout`, so a nil drawable is a dropped frame, which the
 presenter already handles.
+
+### F13 — the present source was resolved with the surface-colour format. Fixed.
+`get_present_source` holds a display buffer's format as `u32` and reinterpreted
+it as a surface-colour format (`static_cast<rsx::surface_color_format>`) before
+the call that sizes its block, so that call resolved to the surface-colour
+overload of `get_format_block_size_in_bytes` (`TextureUtils.cpp:1436-1461`). The
+display format is a GCM *texture* format, not a surface-colour format: the AV
+configuration reports it in the texture space (`rsx_utils.cpp:151`), the image
+lookup and the pixel format below it take it in that space, and the Vulkan
+present path passes the same value to the same function with no cast
+(`VKPresent.cpp:314`). `CELL_GCM_TEXTURE_A8R8G8B8` is `0x85`, which is not a
+surface-colour format, and that overload throws "Invalid color format 0x85"
+(`TextureUtils.cpp:1461`).
+
+The throw is fatal to the RSX thread. Run 4 died of it twice in one session, at
+`0:01:16.992871` and at `0:01:42.917262`, and each death followed the flip after
+a `CLEAR_SURFACE` command dump; the process then ran on with its RSX thread dead
+until the watchdog's cap. The cast is dropped, so the argument selects the
+texture overload, which is the space the value belongs to.
+
+### F14 — the backend presented to a layer the display does not composite. Fixed.
+`presenter::init` built its own `CAMetalLayer` and assigned it to the Qt view.
+A window carries a CAMetalLayer only when its surface type asks for one: Qt
+returns a Metal layer from `makeBackingLayer` for `QSurface::MetalSurface` and
+`QSurface::VulkanSurface` and a plain `CALayer` otherwise (Qt,
+`qnsview_drawing.mm:80-87` and `:109-121`). The surface type is `gs_frame`'s,
+and it was set for Vulkan alone (`gs_frame.cpp:96-100`), so the Metal renderer
+ran on a raster window. Its content layer was then a plain `CALayer`, Qt's
+`setLayer:` had already wrapped it in a container layer and made the view its
+delegate, and the layer the backend assigned was a second layer on a
+layer-backed view. The draws of that layer had no display behind them.
+
+The fix is the half the VK path already had. `gs_frame` sets the Metal-capable
+surface type for the Metal renderer too, and `attach_metal_layer` adopts the
+`CAMetalLayer` the view carries, below Qt's container layer when it is there,
+and builds one only for a view that has none. Only a layer the backend built is
+the backend's to release (`detach_metal_layer`). Qt keeps the plain
+`CAMetalLayer` flavour for a Vulkan surface, because a client that presents
+outside a Core Animation transaction cannot drive a `QMetalLayer`
+(`qnsview_drawing.mm:116-121`), and both backends are such a client.
+
+### F15 — an acquired drawable could be left without a present. Fixed.
+Two paths acquired a drawable and then dropped it. `presenter::drop()` cleared
+`m_drawable` when the output pass failed to open, while the queue still held
+that drawable from `set_present_drawable` and signalled it, so the drawable was
+signalled and never presented. `acquire` cleared the recorder's drawable and
+returned when the drawable carried no texture, with the same result. A metal
+layer returns a drawable to its pool only after the display has shown it, so
+each path stranded one of the three drawables the ring keeps.
+
+`drop()` is deleted. The failed-pass path logs the failure and presents the
+drawable empty, and `acquire` keeps the drawable of a textureless frame so
+`present` presents it. The contract is then one line: every acquired drawable is
+presented.
+
+The acquire takes its own reference to the drawable, and the acquire and the
+present run inside an `NS::AutoreleasePool`, because the RSX thread runs no pool
+of its own and the framework returns autoreleased objects on it (Apple,
+presenting metal drawables).
+
+### F16 — the layer residency set was read below its availability. Fixed.
+`metal_layer_residency_set` read `CAMetalLayer.residencySet`, which is macOS 26
+and later, with a 15.0 deployment target. The read is now behind
+`@available(macOS 26.0, *)`, so a 15.0 build cannot reach it.
+
+### F18 — the savedata message dialog crashes on macOS. Upstream, not this backend.
+Mega Man 9 (NPUB30036) reaches its autosave warning at 16.7 s of emulation and RPCS3 opens a message
+dialog. Dismissing that dialog reads null on the Qt main thread and freezes emulation:
+
+```
+·! 0:00:16.671878 cellSysutil: cellMsgDialogOpen2(type=0xa0, msgString=“This game saves data automatically ... indicates the game is being saved.”)
+·! 0:00:16.674709 Input: SetIntercepted: pads=1, keyboards=1, mice=1, src=open_msg_dialog
+·! 0:00:22.455184 Input: SetIntercepted: pads=0, keyboards=0, mice=0, src=operator()
+·F 0:00:22.456263 SYS:
+Segfault reading location 0000000000000000 at 00000001008bb1dc.
+Thread: Main Thread.
+```
+
+The faulting instruction loads a null member and calls through it (`ldr x0, [x19, #0x48]` /
+`ldr x8, [x0]`), in a file-local lambda of the Qt UI, at imageOffset `0x29b1dc` of the `rpcs3` image
+(crash report `rpcs3-2026-10-18-025735.ips`, slice UUID `1F5C1153-FA89-3902-B9DC-6858BB408FD2`, which
+matches the build). This is upstream issue **#15092, "macOS: Crash on game savedata dialogs"** (open;
+labels *Bug*, *OS: macOS*). That report names Mega Man 9, Mega Man 10, Sonic 4 Episode 1/2, Sonic The
+Fighters and Sonic Generations, gives the trigger as "when game prompts to create a save file or warn
+to not exit the game while is saving", and comes from RPCS3 0.0.30-16001 on macOS 14.3, two years
+before this backend existed. No file of the Metal 4 backend takes part: `msg_dialog_frame.cpp`
+carries no renderer reference.
+
+Which path this backend takes: `open_msg_dialog` uses the overlay dialog when
+`g_fxo->try_get<rsx::overlays::display_manager>()` succeeds (`cellMsgDialog.cpp:177`, `:133`), and
+`rsx::thread` first created that manager for `video_renderer::opengl` and `video_renderer::vulkan`
+alone (`RSXThread.cpp:858`). The Metal renderer was added to that condition, so this backend now
+carries an overlay tier, the dialog is drawn inside the game window, it opens and closes with the
+pad, and the crash does not reproduce. The Qt widgets (`cellMsgDialog.cpp:278`) stay the fallback for
+a renderer without an overlay tier, and the upstream crash stays open for that path. `[V]`
 
 ## E — the state-latching cluster, second reading
 
@@ -949,19 +1215,57 @@ Confirms C1 exactly: `logic_operation` is latched, keyed and then never consumed
 and `MTLBlendState.cpp:111` disables blending when the logic op wins, so the draw
 writes plainly. C1 now carries the MSL ROP emulation and is Fixed.
 
-### E7 — the depth-bounds test was absent. Fixed. (pass label F7)
+### E7 — the depth-bounds test has no usable native path. Partial. (pass label F7)
 The RSX has `depth_bounds_test_enabled`/`depth_bounds_min`/`depth_bounds_max`
-(`rsx_methods.h:428-441`) and VK applies them (`VKDraw.cpp:241-271`), but the
-cluster had no latch and never called `setDepthTestBounds`, which
-`MTL4::RenderCommandEncoder` does carry, so a depth-bounds title was
-under-culled. `capture_depth_bounds` now latches the registers, saturates the
-range into the depth format (`clamp_depth_bounds_value`) and, when the draw's
+(`rsx_methods.h:428-441`) and VK applies them (`VKDraw.cpp:241-271`). The latch
+this entry added stands and is right: `capture_depth_bounds` reads the three
+registers, saturates the range into the depth format
+(`clamp_depth_bounds_value`), and, when the draw's
 `RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE` is set, encodes it the same way the VK
-path does (`encode_emulated_depth`), then clamps to the Metal [0,1] viewport
-range. The disabled range collapses to `[0,1]`, which is the VK form after the
-same clamp. The flag is read at the call site, because
+path does (`encode_emulated_depth`), then clamps to the Metal `[0,1]` viewport
+range. The flag is read at the call site, because
 `requires_depth_range_emulation` and `current_fragment_program` are protected
 `rsx::thread` members and the latch is a free function.
+
+The apply does not stand. This entry read the presence of
+`MTL4::RenderCommandEncoder::setDepthTestBounds` as a native path and the
+cluster called it on every encoder state application, but the call reaches the
+driver's `-[AGXG17FamilyRenderContext_mtlnext setDepthTestMinBound:maxBound:]`
+and traps there. The first draw that a working pipeline carried died of it:
+`EXC_BREAKPOINT`, SIGTRAP, exit 133, faulting thread `rsx::thread`, frame 0 of
+the crash report of 2026-10-18 01:07:17, with `apply_encoder_state` ←
+`MTLGSRender::end()` ← `rsx::nv4097::set_begin_end` below it. No earlier run
+reached the encoder, so first light was the first exercise of the call. The
+argument is not the cause: `capture_depth_bounds` clamps both bounds into
+`[0,1]` after the format saturation and the emulated encode, so no value outside
+the range can reach the setter, and the disabled test passes `[0,1]`.
+
+The design had already ruled the native path out, and this entry contradicted it:
+`LLD-depth-rop` §3.4 states that `MTL::DepthStencilDescriptor` has no bounds test
+and no encoder setter adds one, maps the dial to a fragment-shader compare that
+`discard_fragment()`s outside `[min, max]` with the bounds fed as fragment
+constants (`HLD-05 §3.3`), and records the silent drop as the bring-up fallback,
+the fallback the VK path takes on a device without support
+(`VKPipelineCompiler.cpp:118-125`). The framework does carry the selector; this
+driver traps on it. The call is therefore dropped for bring-up, which is the
+design's fallback, and the latch stays for the emulation epilogue, which is what
+the register now waits on. Until that epilogue lands, a depth-bounds title is
+under-culled on Metal.
+
+**The epilogue's shape is known.** The fragment stage already receives per-draw
+push-constant blocks besides its constant file (`MTLArgumentBinds.h`: the flat
+fragment constants at [2], the fragment context at [3], the per-unit texture
+parameters at [4] and the substituted push constant at [29]), and
+`MTLFragmentProgram.cpp:541` ends every generated fragment with the shared ROP
+epilogue (`glsl::insert_fragment_epilogue`). The emulation is therefore a third
+piece of that epilogue: two fragment constants carrying the clamped bounds, written
+per draw only when `depth_bounds_test_enabled()` holds, and a
+`gl_FragCoord.z < min || gl_FragCoord.z > max` early `discard_fragment()`. The
+pipeline key needs the flag, because the epilogue changes the generated MSL, and the
+test must run after the depth write is decided, which means the depth write cannot
+stay early. It is not written, because no title on this machine enables the test
+(the latch reads the disabled default in every measured run) and an epilogue that
+disables early-z for every draw of a title would be a real cost taken blind.
 
 ### E8 — the sampler dropped the LOD bias and did not clamp the LOD range. Partial. (pass label F8)
 `capture_sampler` copied `min_lod`/`max_lod` straight from the registers
@@ -973,6 +1277,19 @@ bias must be injected in the fragment shader (research 04 R19, open question 23)
 which changes the fragment program's texture-state contract. Recorded as a
 limitation so the drop is explicit rather than silent. VK's 0.5 bias rounding
 for a nearest mip filter goes with it.
+
+**Why it is a shared-code change and not a Metal patch.** MSL takes a bias only as
+a lod option on the sample call itself (`texture.sample(sampler, coord, bias(b))`),
+so the value has to be an argument of the generated call, not a property of the
+sampler object. The sample calls come from the shared GLSL snippets, which emit
+`texture2D(sampler, coord)` for a plain RSX sample; the decompiler would have to
+emit the biased form, with the bias reaching it as a uniform from the per-unit
+texture-parameter block (`MTLArgumentBinds.h`, fragment_texture_params at [4]),
+which the sampler capture already fills. That is a change to `Emu/RSX/Program` and
+to every backend's snippet, so a Metal-only patch would duplicate the shared
+snippet, which the design rejects. VK expresses the same dial in the sampler and
+pays the 0.5 rounding for a nearest mip filter, which this backend would inherit
+with the change.
 
 ### E9 — A2C at one sample was claimed. Fixed. (pass label F9)
 `supports_hw_a2c_1spp = true` suppressed the shader emulation
@@ -1008,7 +1325,7 @@ C1/E6. `write_mask` at or above `attachment_count` is always zero and is now a
 constant term. No behaviour change; recorded so a later PSO-reuse audit does not
 read the key as all-live state.
 
-### E13 — the latch dataflow is not single-read and holds unconsumed state. Partial. (pass §3)
+### E13 — the latch dataflow is not single-read and holds unconsumed state. Fixed, one deferred item. (pass §3)
 Four items from the same pass.
 
 **The aliased stipple pattern, fixed.** `stipple_pattern` was a raw `const void*`
@@ -1024,7 +1341,11 @@ the dial harness: the real consumer reads the register file at the point of use,
 point size reaches the shader through `vertex_context::point_size`
 (`MTLGSRender.cpp:1007`). The header now marks them as captured for the harness rather
 than pruning them, because they are what pins the decode (the C5 and C6 precedent).
-Pruning them is a harness decision and stays open below.
+The decision the entry left open is made here: they are **kept**. They are the
+regression coverage for the decode, they cost a capture of five scalars per clause,
+and releasing them would remove the only reader that pins those decoder rows. A
+harness that no longer wants them can prune them with the row that asserts them, in
+one change.
 
 **The repeated traversal, already resolved.** The entry's first item no longer matches
 the tree. `capture_encoder_state` calls `capture_raster_state` and
@@ -1063,7 +1384,7 @@ tests' "hash tracks every field" cases caught the depth/stencil one.
 This pass read the backend against the capability struct the shared code consults, and
 against the two shipping backends.
 
-### G1 — the flat-shading path is disabled on Metal. Open.
+### G1 — the flat-shading path is disabled on Metal. Limitation, with the expression costed.
 
 RSX flat shading takes its value from the provoking vertex, which for the RSX is the
 last vertex of the primitive. Vulkan and OpenGL select that vertex with a
@@ -1074,11 +1395,39 @@ so `MTLDevice.cpp` leaves the capability false. The shared code then clears
 attribute is interpolated smoothly instead of taking one vertex's value, and the Metal
 vertex program's own flat path (`MTLVertexProgram.cpp:246`) is dead code.
 
-Metal has no native expression of the RSX last-vertex convention. Two candidates
-exist and neither is written or measured: an index rotation that moves the provoking
-vertex to the first slot, and an explicit replicate of the provoking attribute in the
-vertex program. Settle it with first light against a title that flat-shades, or record
-it as an accepted limitation.
+**The capability value is correct, and the evidence is external.** Metal's `flat`
+interpolation takes the **first** vertex of the primitive; the RSX takes the last.
+The metal-cpp headers of this SDK carry no provoking-vertex state at all
+(`Metal/MTLRenderPipeline.hpp`, `Metal4/MTLRenderCommandEncoder.hpp`: no
+`ProvokingVertex` symbol), so no assignment can express the RSX convention. Two
+independent statements agree: ANGLE's Metal backend records that "Metal uses first
+vertex as provoking vertex while OpenGL uses last vertex, thus it's very difficult to
+implement flat shading conforming to OpenGL" (angleproject issue 40096506), and
+MoltenVK does not expose `VK_EXT_provoking_vertex` at all (MoltenVK issue 2237), which
+is the same fact seen from the Vulkan side. Setting the capability true would
+therefore be wrong, not a fix.
+
+**The expressions, costed.** The emulation must move the RSX's last vertex to Metal's
+first slot, or carry its attribute forward, per primitive:
+
+- *An index rotation.* The indexed draw already copies the guest indices into the
+  index ring (`MTLGSRender.cpp`, `drawIndexedPrimitives` against
+  `frame.constants.index_ring()`), so a flat draw can rotate each primitive's triple
+  `(i0,i1,i2)` to `(i2,i0,i1)` inside that copy at no extra upload. An inline
+  (non-indexed) draw has no indices and would need the same rotation applied to the
+  vertex stream, which is a full per-vertex permutation. A triangle strip or fan
+  cannot be rotated in place at all: each of its triangles must become three list
+  vertices, which multiplies the vertex count and the index span.
+- *A provoking-attribute replicate.* The vertex program cannot know which vertex is
+  last; Metal has no geometry shader, and a mesh-shader path (`MTL4::MeshRenderPipeline`)
+  is a whole new pipeline class, not a state fix.
+
+Both are a real feature with a real cost, they change pixels by design, and no title
+on this machine flat-shades, so no measured run can decide between them. The backend
+therefore records the drop, which is exactly the fallback Vulkan takes on a device
+without the extension (`VKGSRender.cpp:752-754`, a warning and smooth shading). The
+first flat-shading title reopens it; the index rotation is then the cheaper expression
+for a triangle list, and the strip/fan conversion its cost.
 
 ### G2 — `supports_multidraw` is inert. Limitation.
 
@@ -1087,6 +1436,531 @@ assign it; a repository-wide search finds no reader. The field is a capability t
 shared code never consults, so it is inert in the same way as the E12 key fields. On
 Metal the `false` costs nothing, because the flag changes no code path, but the field
 should be either consumed or recorded as inert.
+
+### G3 — the boot preload showed no dialog. Fixed.
+The first observed run reported "I didn't see any shader precompilation stage": the
+warm start rebuilt the pipeline set with no progress shown. The cause is a parity
+miss, not a missing load. `MTLGSRender::on_init_thread` called
+`shaders->load(nullptr, ...)`, and the fallback the shared loader builds when the
+dialog argument is null is the no-op base class (`rsx_cache.h:288-296`), so the
+"Preloading cached shaders from disk.\nPlease wait..." dialog that Vulkan and OpenGL
+post never existed.
+
+Vulkan and OpenGL choose the dialog by the overlay manager
+(`VKGSRender.cpp:1370-1391`, `GLGSRender.cpp:441-460`): a real
+`rsx::shader_loading_dialog_native` when `m_overlay_manager` is set, otherwise the
+frame is hidden and the load runs with a null dialog. Metal now takes the same two
+paths. The native dialog draws through the renderer's own flip, which the Metal
+present path already serves for every overlay (`MTLGSRender.cpp`, the overlay tier of
+the output pass), and the progress updates reach it from the RSX thread, which is the
+thread the load runs on. One boot confirms the dialog and the warm load together.
+
+## H — the first-light bring-up
+
+The first frame the backend presented was black. This pass read the bring-up evidence
+against the code and recorded the three findings below. All three are fixed.
+
+### F17 — the commit options were reused between commits. Fixed.
+`command_recorder::commit_slot` built one `MTL4::CommitOptions` for the whole run and
+passed it to every `commit`. Metal keeps the options object until the commit's feedback
+is delivered; the code comment records the rule and the reference driver's behaviour
+(`MTLCommandRecorder.cpp:213-217`, Apple `MTL4CommitOptions` and
+`MTL4CommandQueue::commit`, and KosmicKrisp building one per submit in
+`kk_queue_commit`). A checkpoint that reused the instance delivered feedback for its
+first commit alone, so the second checkpoint stayed in flight, and the frame ring
+stopped once its three slots were in flight. This is the stall runs 11, 12 and 16
+measured. `commit_slot` now allocates one options object per commit and releases it
+after the call (`MTLCommandRecorder.cpp:211-225`).
+
+### F19 — the argument table is captured by the encoder, not by the table. Fixed.
+Metal 4 snapshots an argument table when the encoder binds it, and `open_pass` closes
+and recreates the encoder for every pass ("Metal 4:" the recorder opens one encoder per
+pass, `MTLCommandRecorder.cpp:174`). The binder writes only the slots whose value
+changed, so a slot written outside the current encoder was absent from the table that
+encoder used, and the first draw of a pass could run against a table that lacked what
+the shader reads. Every draw now re-binds both tables into the encoder it opens, and
+the return of the binder stays a write signal, not a bind signal
+(`MTLGSRender.cpp:1489-1497`). The measurement that closed the search: a full run
+reported a write for both stages on 3,001 of 3,001 binds, so the table content was
+never the cause of the black frame. The finding is kept because the defect is real.
+
+### F20 — the packed GCM formats were mapped to `BGRA8Unorm`. Fixed.
+On Apple silicon the shared uploader keeps a packed GCM format packed, and the BGRA8
+expansion below the guard is Intel-Mac only (`TextureUtils.cpp:950`); Vulkan carries
+the same guard and picks the native packed formats (`VKFormats.cpp:200-215`). The Metal
+format map sent all six packed formats to `BGRA8Unorm` anyway, so a packed upload was
+read as BGRA8 and the source row covered half the destination row. The map now returns
+the native packed formats with the measured channel order, and `A4R4G4B4` needs a
+`{Green, Blue, Alpha, Red}` rotation (`MTLFormats.cpp:47-52`, `:255-262`; the
+measurement is `HANDOFF.md` 4.7). A live run reports host format 41 for guest `0xb7`.
+
+## Live defects from the black-frame investigation
+
+The investigation that chased the black frame found these on the way. They are
+recorded because each is a real defect in the tree, independent of whether the
+black frame is theirs.
+
+### I1 — the upload blit held no write record, so its edge was never emitted. Fixed.
+`pass_scheduler::note_read` emits a read-after-write edge only when the resource
+has a live write record (`MTLPassScheduler.cpp:56-60`), and the CPU upload wrote a
+texture through a compute encoder without recording it. A unit that resolved from
+the CPU therefore had no `StageBlit → StageFragment` edge on the draw that read it.
+`load_texture_env` now records the write for a unit it just resolved from the CPU,
+in both stages (`MTLGSRender.cpp`, the two `note_write` calls after
+`resolve_texture_bind`). The record is conservative: a reused cache section also
+records a write, which costs a redundant edge but never misses a required one.
+
+### I2 — the shutdown drain had no bound. Fixed.
+`command_recorder::shutdown` waited on `ring_idle()` with no timeout, so a commit
+whose feedback never arrives held the window close for ever. Run 25 ended with
+exit code 143, which is this watchdog's TERM, not the game's own exit: the window
+close hung. The wait is now bounded at 5 s and reports the slots still in flight
+(`MTLCommandRecorder.cpp:49-70`).
+
+### I3 — the layer's residency set was dropped before the ring drained. Fixed.
+`on_exit` removed the presenter's residency set first and drained the ring last
+(`MTLGSRender.cpp:581-592`). A frame still in flight refers to the drawable's set,
+so dropping the set first can fault the GPU and lose the commit feedback the drain
+waits for. The drain now precedes the presenter's teardown.
+
+### I4 — `insert_texture_barrier` is a counter with no barrier. Fixed.
+`MTLTextureCache.h:511` incremented a diagnostic counter and emitted nothing, while
+the reference backends emit a barrier, because a pass that samples the surface it is
+writing needs one. B10 had left the hook empty on the reasoning that the F2 scheduler
+records the same pair; the stricter reading is the one that holds, because the
+scheduler keys its records by `MTL::ResourceID`, and the surface a unit samples is not
+always the attachment object the pass writes (B10's own note). The hook is now the
+channel that closes that gap.
+
+The cache cannot reach the scheduler: it resolves a descriptor while the previous
+pass's encoder is already closed, and it holds no frame state. The request therefore
+crosses the pass boundary as one flag on the cache
+(`texture_cache::consume_texture_barrier_request`), and the renderer turns it into an
+edge in `record_pass_hazards`, which is the one place that owns the encoding order.
+`pass_scheduler::request_texture_barrier` queues it in the carried list, because
+`begin_pass` clears the per-pass queue and the sampler resolves before the consuming
+pass opens. `emit_split_barriers` then emits it on the new encoder with the queue
+form: the producer is the fragment and tile stage of the pass that has flushed, and
+the consumer is the vertex and fragment stage of the pass that samples. That is the
+only form a render encoder cannot express itself (HLD-03 §2.1 item 5), and it is
+correct in both call orders, because the deferral makes the writer's encoder closed
+either way.
+
+The counter stays as the evidence channel: a title that reaches the hook now emits a
+real barrier and reports it. No measured run has reached it, so the fix costs nothing
+where it is not needed. A GPU-free row pins the contract
+(`test_rsx_metal4_state.cpp`, the single-read flag and the no-split invariant).
+
+### I5 — the blit-engine fast path is declined. Limitation, with the shape recorded.
+`MTLGSRender::scaled_image_from_memory` returns false (`:2410`), so every blit falls
+to the CPU transfer. The measurement (texture-resolution audit §3) shows no byte loss,
+because the CPU fallback does write guest memory, and no `scaled_image_from_memory`
+transfer occurs in the measured runs. It is a performance and capability gap, not the
+black frame.
+
+The shape is known and small, which is why this is a recorded drop rather than an open
+question. The shared cache already owns the whole path: `upload_scaled_image`
+(`Common/texture_cache.h:3349`) resolves the source, the destination and the region
+overlap, and calls exactly one backend primitive, a `blitter`
+(`VKHelpers.h:134`, `scale_image(cmd, src, dst, src_area, dst_area, interpolate,
+xfer_info)`). Vulkan's `texture_cache::blit` is a 17-line wrapper around it. Metal
+would add the `blitter_type` trait, a `blit` on the cache, and one `scale_image` that
+reuses the compute pass the present compose already uses for a scaled, filtered copy
+(`MTLPresent.cpp`, the compose pass with a linear or nearest sampler). It is not
+written, because no title on this machine uses a scaled blit, and the rule for this
+backend is that unmeasurable work does not land: a wrong scaled blit corrupts guest
+memory that today is correct. The first title whose transfer audit shows a
+non-identity blit reopens it.
+
+### I6 — the teardown abort is attributed and fixed. Fixed.
+A SIGABRT in the main thread, after "All threads have been stopped", appeared
+intermittently. The release binary is stripped, so the first reading named nothing.
+The run-4 crash report (`~/Library/Logs/DiagnosticReports/rpcs3-2026-10-19-151439.ips`,
+`bug_type 309`, `exception EXC_CRASH SIGABRT`, `termination code 6 SIGNAL "Abort
+trap: 6"`, `asi libsystem_c.dylib ["abort() called"]`) names every frame:
+
+```
+abort <- report_fatal_error <- thread_base::initialize()::$_0::__invoke   (the handler)
+      <- std::terminate <- unique_ptr<thread>::~unique_ptr
+      <- __cxa_finalize_ranges <- exit <- -[NSApplication terminate:] <- libqcocoa
+      <- gui_application::create_callbacks()::$_0 -> Emulator::Quit(bool)
+```
+
+The chain is the window's X: AppKit's `terminate:` runs `exit()`, which runs the
+static destructors and no Qt object destructor. The object that dies joinable is
+`midi_creator::m_midi_init_thread` (`rpcs3/rpcs3qt/midi_creator.cpp:15`), the async
+rtmidi warm-up. Its only join site was `~midi_creator`, and that destructor runs only
+when a `midi_creator` is destroyed: the `midi_creator m_midi_creator` member of
+`emu_settings` never is on this path, and the local `midi_creator mc {}` of
+`config_checker.cpp:299` is a different session's business. A joinable `std::thread`
+destroyed by the exit handler calls `std::terminate`, and the installed handler
+reports and aborts. The Metal backend takes no part; the defect is in the frontend and
+predates it.
+
+The fix makes the join independent of any destructor that `exit()` skips: a static
+guard object defined after the thread pointer in the same unit joins it at static
+destruction (`midi_creator::init_thread_guard`), and the three join sites share one
+`join_init_thread()`. The guard is destroyed before the pointer it owns and after the
+mutex, both defined before it in the same unit. The join is instant in every ordinary
+session, because the thread is a one-shot rtmidi create that has long finished; it can
+only wait where the alternative is the abort.
+
+### I7 — the flicker is not buffer misrouting. Open.
+Every present was paired with the flip that selected it: 32,829 pairs, the
+presented address equal to the flipped buffer in all 32,829, and a mismatch in
+none. The display does not present the wrong buffer. What remains is the content
+of the two buffers, which the host readback now measures.
+
+### Correction — the "CPU upload" reading was overstated.
+`upload_texture` is the resolution entry point, not the CPU path: it searches the
+surface store and the texture cache and only falls back to the CPU on a miss, so a
+line logged at that call is a re-resolution, not a CPU upload. The run-25 lookup
+settles the store side: `store lookup for 0xc1480000, bound 0, overlaps 1`, so the
+store does hold the scene surface and the search does find it. The black frame is
+therefore not a store miss, and the provenance of the bound image is the open
+question, which the fragment-unit line now answers.
+
+### I8 — every resource left residency one frame after its creation. Fixed.
+This is the black frame. `resource_manager::new_buffer` and `new_texture` register each
+sub-allocation with `residency_manager::on_bind`, which adds it to the set of the frame
+slot that is recording. `residency_manager::on_commit_complete` then removes and
+re-commits every allocation that slot tracked, when that slot comes round again. A
+resource was therefore resident for at most one frame. Every resource this backend uses is
+cache-owned and outlives its frame, so the vertex rings, the index ring, the stream views,
+the constants and the surfaces were non-resident for the whole run.
+
+A non-resident buffer read through an argument-table address returns zeros. The vertex
+context matrix became zero, every attribute descriptor became zero, every vertex collapsed
+to the origin, and no primitive covered a pixel. Metal reports nothing for this: the debug
+layer and shader validation accept the read in silence, so run 31's clean log is
+consistent with the failure. The render target kept the value that its first,
+still-resident frame wrote, which is why every presented image held one word.
+
+Measured with the run-31 shaders, state and bytes (`m4heap`): the same draw gives 230400
+px magenta and 230400 px green when the vertex buffers are in the residency set, and no
+coverage at all when they were registered at creation and then removed and re-committed,
+which is the sequence the backend ran.
+
+The fix follows HLD-02 §2.6 Tier 1, which puts the long-lived placement heaps in the
+persistent set: a heap outlives its sub-allocations, so heap residency covers each of them
+for its whole life. The per-frame sets had no member left and are gone
+(`MTLResourceManager.cpp`, `MTLCommandRecorder.cpp`). `resource_manager::check_residency`
+logs once if a sub-allocation's heap is not in the persistent set, which is the detection
+HLD-02 F1 asks for.
+
+### I9 — the transfer copy wrote without ordering the reads it overwrote. Fixed.
+The placement heaps are untracked on purpose, because the pass scheduler inserts the
+barriers (`MTLResourceManager.cpp:46`). Every copy that follows earlier work therefore
+has to name its own edge, and one site did not. `copy_transfer_regions_impl` is the
+texture cache's transfer: it opens a compute encoder and blits a resolved unit into a
+destination image that comes from the temporary pool, so an earlier draw of the same
+frame may still be sampling the very image the blit overwrites. Nothing ordered that
+pair, and a pooled temporary is reused precisely because a title resolves many units, so
+the path is reachable by any title with temporaries.
+
+The scheduler's own record of the pair is not where the edge belongs.
+`load_texture_env` notes the transfer write before the pass it belongs to opens
+(`MTLGSRender.cpp`, the two `note_write` calls after `resolve_texture_bind`, I1), and
+`begin_pass` clears the per-pass queue. The write half of that note is already encoded by
+then, so a barrier in the draw's pass would come after the copy it must precede: the
+clear drops the spec, and dropping it is right. What is not right is the copy having no
+edge at all. B3 fixed exactly this class for the surface write-back
+(`surface->read_barrier` first); the transfer now takes the same form every other copy in
+this backend takes, a queue-scope barrier before it writes:
+
+```
+emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+```
+
+The producer is every stage, which covers the read half whether the earlier sample was a
+vertex or a fragment read, and `StageAll` includes the blit stage, so the transfers order
+among themselves too. The measured runs never take this path (the transfer row is absent
+from run 4's report), so the change costs nothing there, and where the path is taken the
+ordering is required. `mirror_depth` (`MTLSurface.cpp:155`) and the host readback
+(`MTLGSRender.cpp:1147`) already emit the identical spec on a compute encoder.
+
+## The present-path investigation
+
+The instrumented runs of the present path found two defects. Both are fixed.
+
+### F21 — the Metal flip never ran the base flip. Fixed.
+`MTLGSRender::flip` ended with `GSRender::flip(info)` and never called
+`rsx::thread::flip(info)`. `GSRender::flip` only calls `m_frame->flip(m_context)`
+(`GSRender.cpp:55-61`), so the base bookkeeping never ran. The Vulkan and the
+OpenGL flips call both (`VKPresent.cpp:987`, `GLPresent.cpp:519`).
+
+The base flip clears `async_flip_requested`, clears the display interrupt, and
+stamps `last_host_flip_timestamp` (`RSXThread.cpp:2788-2816`). Without the clear,
+the overlay request stayed set for the rest of the run. The gate in
+`overlay::refresh` then passed on every call (`overlays.cpp:522-534`), so the
+overlay asked for a flip on every local task. The RSX thread drained the drawable
+ring and blocked in `nextDrawable`. A window of 150 frames measured 150 overlay
+flips, and one `present/acquire/next drawable` cost 4299 us on average.
+
+The flip now calls `rsx::thread::flip(info)` on the guard return and on the main
+return (`MTLGSRender.cpp`). The same window measures a gated overlay flip rate and
+one `present/acquire/next drawable` at 38 us on average. The run now paces to the
+guest, not to the local task rate.
+
+### F22 — the fault waited for an RSX flush that did not exist. Fixed.
+A guest fault deferred to the RSX thread and then waited for the flush
+(`fault/producer wait`). But `invalidate_address` unprotects the page in place for
+every deferred fault that keeps no section to flush
+(`texture_cache.h:1336-1351`), so the wait carried no work. It only delivered the
+sampler flags. The faulting thread blocked for about one frame: a window of 150
+frames measured 16886 us on average in the wait, and the guest thread lost 2.5 s
+of the 2.68 s window.
+
+The handler now waits only when `sections_to_flush` is not empty
+(`MTLGSRender.cpp`). The queue removes a request after the RSX thread services it
+and the owner stops waiting (`MTLGSRender.cpp`). The same window measures the
+fault at 22 us on average, and the frame rate rose from 56 fps to 72 fps.
+
+### F23 — the serializer configuration made the archive flush fail. Fixed.
+The pipeline data set serializer was created with
+`CaptureDescriptors | CaptureBinaries`. On this OS build that mask makes
+`serializeAsArchiveAndFlushToURL` return NO with a null error object, so the L3
+archive was never written and the log read "was not written: unknown". The header
+documents `CaptureBinaries` as an addition to `CaptureDescriptors`, which is what
+made the losing mask look correct.
+
+`CaptureBinaries` alone writes the archive. The mask, the two API properties the
+layer rests on (a flush is destructive; a warm boot re-captures what it looks up)
+and the evidence are in HLD-07 §4.2. A standalone metal-cpp program settled it:
+four runs per configuration, the combination failed in all four and
+`CaptureBinaries` alone wrote a 39,568-byte archive in all four. Both archive paths
+now log the error domain and code (`MTLDevice.cpp:19-31`), because a failed flush
+can carry no error object at all.
+
+### F24 — the RSX draw path omitted the clip-space Y flip. Fixed.
+The translated shaders emit Vulkan-convention clip space, whose NDC Y points down,
+and Metal's NDC points up. SPIRV-Cross does not add the flip: `Options::vertex.flip_vert_y`
+defaults to `false` (`spirv_glsl.hpp:183`) and `build_msl` leaves it there
+(`MTLShader.cpp:103-116`). KosmicKrisp negates the viewport height for every
+Vulkan viewport for this reason (`kk_cmd_draw.c:778-793`). The Metal 4 tree
+negated it only in the present passes (`m_vulkan_clip_space`, `MTLOverlays.cpp:381`),
+so the RSX draw path rendered with a native rectangle (`MTLRasterState.cpp`).
+
+A native rectangle stores every surface mirrored: `scale_offset_mat` maps the
+guest's top row to `ndc.y = -1`, and Metal puts `ndc.y = -1` at the target's last
+row. An uploaded texture keeps the guest row order (no cache flips rows), so a
+surface's `v = 0` held the guest's bottom while a texture's `v = 0` held its top.
+The present pass draws `pos(-1,-1)` with `uv(0,0)` and its height negation places
+`ndc.y = -1` at the drawable's top, so the drawable's top sampled `v = 0`. That
+single flip is right for an uploaded texture and wrong for a surface.
+
+The image evidence pairs a 3-D title with a 2-D title on one build: Ridge Racer 7
+presents from a surface on 1689 of 1690 flips (`present source from the surface`)
+and showed an inverted frame, while Mega Man 9, which presents from the texture
+cache, was upright. A vertical flip of the Ridge Racer 7 screenshot is perfectly
+readable, so the defect was one Y flip, not a rotation and not a colour fault.
+
+The draw path now carries the flip (`MTLRasterState.cpp`): the viewport rectangle is
+`{0, clip_height, clip_width, -clip_height}`, the scissor mirrors about `clip_height`,
+and the winding inverts because a Y mirror reverses triangle orientation. The
+render-to-texture path had the same fault: a sampled surface read the image
+upside-down, which a 2-D title does not exercise. The fix is verified on Ridge Racer 7
+and on Mega Man 9.
+
+## J — the parity sweep
+
+A tenth pass re-read the draw, index, sampler, copy and present paths that the first nine passes
+touched only in part. It found eight confirmed defects and two missing diagnostics. All ten are
+fixed in the same build as this register.
+
+| ID | Severity | Area | Status |
+|---|---|---|---|
+| J1 | High | indexed subrange address | Fixed |
+| J2 | High | ring growth to the block size | Fixed |
+| J3 | Medium | ring block alignment | Fixed |
+| J4 | Medium | 16-bit strip restart | Fixed |
+| J5 | Low | no-attribute clause drain | Fixed |
+| J6 | Medium | shader-decoded sampler filter | Fixed |
+| J7 | High | typeless texture copy | Fixed |
+| J8 | Medium | live resolution-scale change | Fixed |
+| J9 | Medium | native fp16 selection | Fixed |
+| J10 | Medium | skip-reason diagnostics | Fixed |
+
+### J1 — an index subrange put the byte offset in `baseVertex`
+
+The Metal 4 indexed call is `drawIndexedPrimitives(type, count, indexType, address, length,
+instanceCount, baseVertex, baseInstance)` (`MTL4RenderCommandEncoder.hpp:68`). It has no
+index-buffer offset argument. The subrange loop passed `index_offset * type_size` as the seventh
+argument, so Metal read it as a base vertex: subrange two drew vertex 4 instead of index 4.
+The loop now advances the GPU address and shrinks the declared length, with `baseVertex = 0`.
+The single-draw path was already correct.
+
+### J2 and J3 — both byte rings could overrun or misalign
+
+`stream_ring::alloc` and `byte_ring::alloc` compared `m_count + size` with `m_capacity`, then
+allocated `m_capacity` for the replacement. One block larger than the ring therefore kept the old
+capacity and the copy ran past the buffer end. `byte_ring` also advanced by the unaligned size.
+Both now use `allocate_ring_block`: the cursor starts on a four-byte boundary, the reservation
+asks for `max(capacity, aligned_size)`, and the next block starts at the aligned end. The helper is
+Metal-free and unit-tested (four cases).
+
+### J4 — Metal restarts every 16-bit strip at `0xFFFF`
+
+Metal has no primitive-restart toggle; a strip restarts at the largest index value. RSX with
+restart disabled treats `0xFFFF` as a vertex index, so a 16-bit strip cannot be passed through.
+The index visitor widens such an array to `u32`; `0xFFFFFFFF` is the only restart value there and
+no RSX title can address that vertex. Vulkan avoids the widening because it can disable restart.
+
+### J5 — a no-attribute draw did not drain its clause
+
+`GLDraw.cpp:755-766` runs the dependency loop and `draw_call.end()` before it returns. The Metal
+path returned with neither. It now calls `execute_nop_draw()` and `end()`, which is the same pair
+the other refusal paths use.
+
+### J6 — the sampler filtered the encoded value
+
+The fragment shader re-expands signed channels (SEXT), applies gamma and decodes the depth pack.
+Linear filtering before that work filters the stored, encoded value, not the value the guest
+defined. Vulkan forces nearest when `sext_conv_required` or a depth redirect is active
+(`VKDraw.cpp:419-437`). The Metal `sampler_state` now carries `force_nearest`, set from
+`texture.format_ex()` (SEXT or gamma) and the depth class; the builder overrides min, mag and mip
+to nearest. The field joins equality and the hash.
+
+### J7 — a typeless copy skipped and left a black temporary
+
+`copy_transfer_regions_impl` rejected every copy whose source and destination formats differed,
+so the destination temporary kept uninitialised contents. It now stages the raw texel bits through
+a shared buffer: texture-to-buffer, a blit-to-blit barrier, then buffer-to-texture. Compressed
+formats and unequal texel sizes still fail with a message because there is no bit-preserving route
+for them. This is the likely mechanism behind a black sampled render target; it is built and
+unit-tested, not yet confirmed on RR7.
+
+### J8 — a live resolution-scale change was not applied
+
+`resolution_scaling_config` is set at thread start. Vulkan re-reads the setting at every flip and
+clones the resident surfaces when it changes (`VKPresent.cpp:1000-1020`). Metal never re-read it,
+so a change at runtime left surfaces at the old salt. `flip` now compares and calls
+`sync_scaling_config` before the output pass.
+
+### J9 — the low-precision setting never reached the fragment decompiler
+
+The decompiler forced `has_native_half_support = false`, so the f16 register path was dead on a
+device that executes fp16 natively. It now follows `shader_precision == low`, as Vulkan does
+(`VKFragmentProgram.cpp:630-638`). The two depth emulation bits stay false because Metal has
+native depth compare and depth storage.
+
+### J10 — the skip log could not name its cause
+
+`should_skip_draw` has four independent predicates. The path logged a once-only line with no bits.
+It now reports all four for the first 64 refusals at probe level 2.
+
+## K — the shader-interpreter design audit
+
+The interpreter was not implemented when this pass ran, so it reviewed the design
+(`LLD-shader-interpreter.md`) against the current `MTL*` sources, the shared GLSL bodies and the
+Metal 4 contract. It is not an implementation finding and is not counted in the A-J summary. The
+full ledger is LLD §20; these are the source-confirmed blockers that would have produced a broken
+first implementation:
+
+- **K1** — the FS instruction block was placed at `set=1, binding=12`, which collides with the
+  first compact texture array in the same GLSL descriptor set. GLSL/SPIR-V require unique
+  `(set, binding)` pairs even though MSL's buffer and texture spaces are separate. The block moves
+  to `set=0, binding=12`.
+- **K2** — `IS_TEXTURE_RESIDENT` referenced `textures_resident`, but the block declares
+  `reserved1`. The design now emits an alias.
+- **K3** — the builder redefined `TEX_PARAM` differently and redefined `texture_base_index`;
+  `MTLFragmentDecompilerThread::insertConstants` already emits both (`MTLFragmentProgram.cpp:174-177,
+  328`). Only the fog/wpos macros are added, and `TEX_PARAM` is undefined first if it is touched.
+- **K4** — the compact-array guard removed the sampler array but left the `case` label reachable.
+  The guard must wrap the whole case and the switch needs a `default`.
+- **K5** — the shared body exports four `ocol` outputs unconditionally. The interpreter must trim
+  to `min(4, mrt_buffers_count)` and mask `write_mask` in `interpreter_only`, which has no real
+  program validation.
+- **K6** — one `argument_binder` caches per stage, not per table. Separate tables alone do not
+  isolate the interpreter; a second binder and stage-specific instruction fields are required.
+- **K7** — the byte ring aligns to 4, not 256, and resets every frame. The blocks must be aligned
+  and forced on the first interpreter draw of each frame.
+- **K8** — an async placeholder cannot be replaced by a later synchronous build. `can_interpret`
+  and `allow_async` must be decided before the first `get_graphics_pipeline` call.
+- **K9** — `MTLTraits::build_pipeline` already honours `compile_async`
+  (`MTLProgramPipeline.cpp:1057-1059`); the draw path passes `true` unconditionally. Synchronous
+  real builds and interpreter links must also share a compile mutex around the L18-sensitive
+  `newRenderPipelineState`.
+- **K10** — the rejection list omitted texture alpha kill, emulated depth compare, programmable
+  blending, logic op and shadow/redirected/multisampled textures. `ATTRIBUTE_INTERPOLATION` is a
+  normal triangle flag and must not be rejected.
+- **K11** — the design called `MTL4::RenderPipelineState` a type; the compiler returns
+  `MTL::RenderPipelineState*`. The descriptor is still `MTL4::RenderPipelineDescriptor`.
+- **K12** — the full 468-vector vertex constant file and the existing `compiled_fragment` null
+  guard are confirmed in current code, not open questions. The interpreter forces
+  `frame.compiled_vertex`/`compiled_fragment` to null and clears `transform_constants_valid` on a
+  kind change.
+- **K13** — prebuild uses `compile_msl_async` for libraries; the link worker only links pipelines.
+  The first-use wait can sit behind an in-flight guest link and is not bounded by priority.
+- **K14** — MSL 1D samplers, runtime sampler-array indexing and `[[user(locn16)]]` remain
+  unvalidated without a Metal CLI. The standalone probe is the gate.
+- **K15** — the interpreter binder omitted the push-constant substitute at buffer 28 and the
+  conditional stipple/instancing slots. The VS reads `draw_parameters_offset` from slot 28, so an
+  unbound slot makes every context lookup wrong. The table binds `binds.vertex_draw_params` there
+  and binds 8/9/10/11 when the draw uses them.
+- **K16** — the single-type cache key still carried the referenced mask, so the four prebuilt
+  variants would never be reused. The key clears the mask/dimensions for a single type and stores
+  only the type; the live mask is in the per-draw header and the binder.
+
+### K — implementation record (2026-10-21)
+
+The interpreter landed. The compiler and the tests confirmed five further corrections; the first
+four would have failed silently. The full record is LLD §21.
+
+- **K17** — the FS builder's `#define VULKAN` collided with glslang's own `VULKAN` define for the
+  Vulkan rule set (`'#define' : Macro redefined; different substitutions: VULKAN`). The interpreter
+  sources must not define it.
+- **K18** — the VS prologue omitted `_builtin_lit` (`no matching overloaded function found`) until
+  `properties.has_lit_op` is set; the shared body emulates LIT.
+- **K19** — forcing `in_register_mask` for wpos/fogc made the body read `fetch_fog_value()` /
+  `get_wpos()`, which reference the named varying `fog_c` the interpreter never declares. The FS
+  emits the `fog_*` / `wpos_*` context macros instead and does not set the register bits.
+- **K20** — `empty()` tested `referenced_mask == 0`, but `canonicalize()` clears the mask for the
+  single-type fast path, so a textured single-type program was treated as empty and lost
+  `COMPILER_OPT_ENABLE_TEXTURES`. `empty()` is now `!is_single() && referenced_mask == 0`.
+- **K21** — the first cut reused the regular argument tables. Beyond K6's isolation issue, a shared
+  table let an interpreter bind clear the regular 12..27 slots while the regular binder's cache
+  still held them, so an interleaved regular draw in the same frame read null/stale textures.
+  `frame_slot` now owns `interpreter_vertex_table` / `interpreter_fragment_table` as the design
+  required.
+
+Verification: five `MTLInterpreter.*` tests pass and the suite is green (504/504 enabled). The perf
+work (LLD §21.2, P1-P4) removed the per-draw `argument_binds` copy, the regular unit walks, the
+per-draw ucode re-hash and the fixed 16-unit single-type bind. Runtime gates R24/K14 and the §17
+questions are unchanged.
+
+## M — the diagnostic facility (2026-10-21)
+
+The 20:55 probe-2 run showed that the probe could measure only performance, not correctness: it had
+no interpreter-versus-recompiler counter, no host-format record, no per-draw program identity and no
+readback or depth record. The run evidence is L25–L33 in `LOG-FINDINGS.md`. This pass adds the
+missing families and splits the output.
+
+- **M1** — `MTL_PROBE_LATCH` registers a name once per call site, in a function-local `static`. A
+  latch whose name varies per call (a ternary, a computed string) silently registers only the branch
+  that ran first and then attributes every later event to it; the second name never appears in the
+  coverage table. **Fourteen sites in the tree used a ternary name**, so every split family in the
+  2026-10-21 probe-2 and probe-5 coverage tables is a branch total, not a branch count
+  (`LOG-FINDINGS.md`, "Correction — the split latches of this run are unreliable"). All fourteen are
+  now one macro per branch in an `if`/`else`, and the macro comment carries the rule. Any future
+  conditional latch must split the same way.
+- **M2** — the coverage table stores the key name by pointer. A family that builds its name at run
+  time must intern it. The families added here use fixed names, so they do not need the intern step;
+  a family that names a program or a format per event does, and that helper does not exist yet.
+- **M3** — the bulk probe text (the perf report, the coverage table and the level-3/5 verbose family)
+  now goes to `$TMPDIR/rpcs3-mtl-probe.log`, and a warning and an error stay in the shared log. The
+  `MTL` channel therefore no longer needs the level-3 trace raise, and that raise is removed. The
+  source of the split is one small `file_sink` in `MTLInstrumentation.h`, so it goes with the
+  facility.
+- **M4** — while a probe level is set, `sys_spu`, `sys_event`, `cellDmux` and `cellVdec` drop to
+  `error`, because they were 80 % and 13 % of a 397 k-line log (`NON-METAL-FINDINGS.md` N11). The
+  four-line block sits next to `probe::apply_log_level()` and is marked `TODO(revert)`. It is not
+  part of the backend and must not survive the commit.
+- **M5** — the run itself found three performance facts that the earlier probe could not separate
+  because the fixtures were missing: the L13 label drain is a once-a-frame full GPU wait (L29), the
+  semaphore wait is a spin at 12.6 % of wall (L30), and 10.1 % of flips compose with no display
+  buffer (L31). The first two need a native mechanism, not a threshold tweak; the third needs the
+  compose predicate.
 
 ## Parked for review
 
@@ -1098,8 +1972,10 @@ harness owns. They are parked, not closed.
 |---|---|
 | A9 | The indices, the fill slot, the units, the sampler table and the two samplerless declarations are all landed and all under their caps. The depth-mirror form is measured (a samplerless `read()`, `read()` never `sample()`, indices 30/50 kept) and the sampler-count question is answered: the argument-buffer escape hatch compiled with no ceiling found up to 8000 entries. What remains is the in-tree GLSL-to-MSL hop, which no test reaches, so first light is the first verification. |
 | B16 | Only the completion point: the encode is written and tested, and the predicate is settled (`depth_format_needs_decode`). What is unfinished is where the CPU pass runs, which needs a synchronisation point after the frame slot commits, and the stencil plane of a combined read-back. |
-| E13 | Which of the harness-only latch fields the harness will release. The per-clause re-issue is deferred with its shape recorded in the entry. |
-| F5 / F9 | The present output mode landed with F10, so neither partial half waits on it any more: F5 still does not consume the display-buffer pitch and format or the stereo second eye, and F9 still sizes the drawable from the source rather than the view. Both need a re-check against the landed output tier. |
-| G1 | Which expression is the cheaper — an index rotation or a provoking-attribute replicate — and does first light show a title that flat-shades at all? |
+| E7 | Whether to write the fragment-shader depth-bounds epilogue or to keep the drop. The question LLD-depth-rop §6 Q3 left open is the input: does a live title enable the test at all? The native path is closed by the driver trap. |
+| E8 | The sampler LOD bias needs a biased sample in the generated MSL, which is a change to the shared decompiler's snippet contract, not a Metal-side patch. The question is whether the per-unit texture-parameter block can carry the bias without a second snippet for Metal. |
+| G1 | The capability value is settled by evidence: Metal's provoking vertex is the first, the RSX's is the last. What is parked is the emulation — an index rotation for a triangle list, and a strip or fan conversion that multiplies its vertices — until a title flat-shades. |
+| I5 | Whether any title uses a scaled blit at all. The CPU fallback is correct and no measured transfer is non-identity, so the GPU path (the shared `upload_scaled_image` plus one `blitter`) waits for a title whose audit shows one. |
+| I7 | The content of the two present buffers. The routing is proven (32,829 pairs, no mismatch) and the host readback is wired, so this needs the flicker to reproduce on a title; none on this machine has since the pairing was proven. |
 
 <!-- doc-end -->
