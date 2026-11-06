@@ -11,6 +11,11 @@
 
 #include <unordered_map>
 
+namespace rsx
+{
+	struct rsx_state;
+}
+
 namespace mtl
 {
 	// The latched sampler state (LLD-texture §3.2).  This is the key of the
@@ -49,12 +54,13 @@ namespace mtl
 		bool force_nearest = false;
 	};
 
-	// Read one fragment texture unit (rsx::method_registers.fragment_textures[unit]).
-	sampler_state capture_fragment_sampler(u8 unit);
+	// Read one fragment texture unit.  The texture descriptors are undecoded inputs,
+	// so the caller passes the context's register state explicitly.
+	sampler_state capture_fragment_sampler(const rsx::rsx_state& regs, u8 unit);
 
-	// Read one vertex texture unit (rsx::method_registers.vertex_textures[unit]).
-	// A vertex texture has no anisotropy and no comparison.
-	sampler_state capture_vertex_sampler(u8 unit);
+	// Read one vertex texture unit.  A vertex texture has no anisotropy and no
+	// comparison.
+	sampler_state capture_vertex_sampler(const rsx::rsx_state& regs, u8 unit);
 
 	// The sampler of a redirected depth unit's stencil half.  It is separate from
 	// the unit's sampler because that sampler may be a comparison sampler, which

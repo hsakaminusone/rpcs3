@@ -6,6 +6,11 @@
 
 #include "Emu/RSX/gcm_enums.h"
 
+namespace rsx
+{
+	struct context;
+}
+
 namespace mtl
 {
 	// The draw cluster value state (LLD-draw §2.2).  The ranges, the inline array and
@@ -25,7 +30,7 @@ namespace mtl
 		u32 restart_index = 0;
 	};
 
-	draw_state capture_draw_state();
+	draw_state capture_draw_state(const rsx::context& ctx);
 
 	// SET_BEGIN_END -> MTL::PrimitiveType (LLD-draw §3.5).  A non-native type expands
 	// into a native topology in the shared write_index_array_data_to_buffer

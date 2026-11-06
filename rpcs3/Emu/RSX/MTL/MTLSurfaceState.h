@@ -6,6 +6,11 @@
 
 #include <array>
 
+namespace rsx
+{
+	struct context;
+}
+
 namespace mtl
 {
 	// One RSX surface identity (LLD-surface §3.1/§3.2): a guest address and a guest
@@ -32,23 +37,15 @@ namespace mtl
 		u32 color_target_mask = 0;
 		std::array<surface_attachment, 4> color{};
 		surface_attachment zeta{};
-		bool depth_enabled = false;
 
-		u16 clip_x = 0;
-		u16 clip_y = 0;
 		u16 clip_width = 0;
 		u16 clip_height = 0;
 
-		// The clear region is the scissor, not SET_CLEAR_RECT_* (CONFLICTS.md C1;
-		// VKGSRender.cpp:1441, GLGSRender.cpp:668).
-		u16 clear_x = 0;
-		u16 clear_y = 0;
-		u16 clear_width = 0;
-		u16 clear_height = 0;
-
+		// The clear values are assigned by the backend's clear() from the decoded
+		// draw_state.clear; the region is draw_state.scissor.
 		MTL::ClearColor clear_color{};
 		// The colour channels the clear actually writes for this format, and whether
-		// one MTLLoadActionClear can express them (MTLFormats.h resolve_surface_clear).
+		// one MTLLoadActionClear can express them (MTLFormats.h to_color_write_mask).
 		u32 clear_colormask = 0;
 		bool clear_color_fast = false;
 		f32 clear_depth = 1.0f;
@@ -71,16 +68,11 @@ namespace mtl
 		// uses it to correct or to drop a depth surface (RSXThread.cpp:1644).
 		u32 minimum_color_pitch() const;
 		u32 minimum_zeta_pitch() const;
-
-		// True when the clear covers the whole attachment.  Only then may the clear
-		// become MTLLoadActionClear (LLD-surface §3.5, invariant 4).
-		bool clear_covers_attachment() const;
 	};
 
-	// Read the live cluster registers (rsx::method_registers).  The caller sets
-	// depth_enabled afterwards, because the depth-surface survival decision belongs
-	// to the layout step, not to this latch.
-	surface_state capture_surface_state();
+	// Read the core-decoded framebuffer layout.  The window offset and the actual
+	// pitch are already applied there, so no register arithmetic happens here.
+	surface_state capture_surface_state(const rsx::context& ctx);
 
 	// Set the format, the extent and the sample count on a texture descriptor
 	// (LLD-surface §3.1).  The caller sets the storage mode and the usage; HLD-02

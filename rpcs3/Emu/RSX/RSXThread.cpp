@@ -752,6 +752,12 @@ namespace rsx
 			m_renderer->on_init();
 			create_backend_resources();
 
+			// The logical id is final only after on_init has created the device.
+			// A backend that opens its device there would otherwise keep the
+			// pre-init "NULL" id, and the display engine would replace it again
+			// on the first flip, once per frame.
+			m_renderer_info = m_renderer->logical_id();
+
 			if (m_ctx->in_begin_end)
 			{
 				// on_init should have prepared the backend resources
@@ -1019,9 +1025,11 @@ namespace rsx
 			m_renderer = std::move(renderer);
 		}
 
-		m_renderer_info = m_renderer->logical_id();
 		m_renderer->on_init();
 		create_backend_resources();
+
+		// See on_task: the id is final only after the device exists.
+		m_renderer_info = m_renderer->logical_id();
 
 		// The new backend has seen nothing yet
 		for_each_context([](context* ctx)
@@ -1857,7 +1865,7 @@ namespace rsx
 
 			info.history_count = count;
 
-			on_fifo_desync(info);
+			RSX(m_ctx)->renderer()->on_fifo_desync(info);
 		}
 
 		if (recovered_fifo_cmds_history.size() == 20u)

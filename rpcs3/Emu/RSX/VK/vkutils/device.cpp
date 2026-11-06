@@ -404,8 +404,6 @@ namespace vk
 				return driver_vendor::NVK;
 			case VK_DRIVER_ID_MESA_V3DV:
 				return driver_vendor::V3DV;
-			case VK_DRIVER_ID_MOLTENVK:
-				return driver_vendor::MVK;
 			case VK_DRIVER_ID_MESA_HONEYKRISP:
 				return driver_vendor::HONEYKRISP;
 			case VK_DRIVER_ID_MESA_KOSMICKRISP:

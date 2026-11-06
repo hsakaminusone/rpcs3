@@ -55,7 +55,7 @@ namespace rsx
 				// a release the GPU has not reached yet.  The backend waits only for a
 				// label it actually has in flight at this address; other backends
 				// write labels host-side and return false.
-				const bool waited = RSX(ctx)->sync_label(addr);
+				const bool waited = RSX(ctx)->renderer()->sync_label(addr);
 
 				if (!waited)
 				{

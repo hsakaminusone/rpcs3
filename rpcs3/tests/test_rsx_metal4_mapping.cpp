@@ -22,6 +22,7 @@
 
 #include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/gcm_enums.h"
+#include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/rsx_methods.h"
 
 #include <array>
@@ -29,16 +30,32 @@
 
 namespace
 {
-	// The emulator's power-on register state (rsx_methods.cpp:797).  A zeroed file
-	// is not legal, because a getter that maps a word to a GCM enum verifies.
-	void reset_registers()
+	// The backend feeds on the decoded draw state.  This fixture owns the context
+	// (and with it the register file) so a test can fill the decoded struct the
+	// core would have produced.
+	struct mapping_context
 	{
-		rsx::method_registers.reset();
+		rsx::context ctx{0, nullptr};
+
+		void reset()
+		{
+			// The emulator's power-on register state (rsx_methods.cpp:797).  A
+			// zeroed file is not legal, because a getter that maps a word to a GCM
+			// enum verifies.
+			ctx.register_state->init();
+			ctx.draw_state = {};
+		}
+	};
+
+	mapping_context& mapping()
+	{
+		static mapping_context context;
+		return context;
 	}
 
-	void set_register(u32 index, u32 value)
+	void reset_registers()
 	{
-		rsx::method_registers.registers[index] = value;
+		mapping().reset();
 	}
 
 	// One row of an RSX enum to Metal enum table.
@@ -870,11 +887,12 @@ TEST(MTLMapRaster, TheLatchedRegistersProduceTheDerivedCullMode)
 				SCOPED_TRACE(std::to_string(enabled) + "," + std::to_string(static_cast<u32>(face)) + "," + std::to_string(static_cast<u32>(winding)));
 
 				reset_registers();
-				set_register(NV4097_SET_CULL_FACE_ENABLE, enabled);
-				set_register(NV4097_SET_CULL_FACE, static_cast<u32>(face));
-				set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(winding));
+				rsx::raster_state& raster = mapping().ctx.draw_state.raster;
+				raster.cull_face_enabled = enabled != 0;
+				raster.cull_face_mode = face;
+				raster.front_face_mode = winding;
 
-				const mtl::raster_state state = mtl::capture_raster_state();
+				const mtl::raster_state state = mtl::capture_raster_state(mapping().ctx);
 				EXPECT_EQ(state.cull_enabled, enabled != 0);
 				EXPECT_EQ(state.cull_face, face);
 				EXPECT_EQ(state.front_face, winding);

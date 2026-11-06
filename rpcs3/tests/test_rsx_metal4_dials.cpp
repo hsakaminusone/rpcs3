@@ -17,6 +17,7 @@
 // never regresses, and it prints what is still missing.
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/Program/RSXFragmentProgram.h"
 #include "Emu/RSX/Program/RSXVertexProgram.h"
@@ -128,23 +129,79 @@ namespace
 		return result;
 	}
 
-	// --------------------------------------------------------- the register file
+	// --------------------------------------------------------- the backend input
 
-	// The direct write path (rsx_methods.cpp:145-171).  The register index is the
-	// word, so the `NV4097_*` constants are already divided by four.
+	// The port contract splits every draw dial in two: the core decodes the
+	// register into `draw_state`, and the backend translates the decoded struct.
+	// The backend reads the raw register file only for the handful of fields the
+	// core does not decode (point size, clip plane mask, stipple pattern, alpha
+	// test, shade mode, the vertex bases and the index array address).
+	//
+	// A dial test therefore writes the decoded field.  The register helpers below
+	// remain only for the raw-only fields, and they write this context's own
+	// register file, never a process-global one.
+	struct dial_context
+	{
+		rsx::context ctx{0, nullptr};
+
+		void reset()
+		{
+			// The emulator's power-on register state (rsx_methods.cpp:797).  An
+			// all-zero file is not legal: a getter that maps a word to a GCM enum
+			// verifies, and FRONT_FACE zero is one such word.
+			ctx.register_state->init();
+			ctx.draw_state = {};
+		}
+
+		void set_register(u32 index, u32 value)
+		{
+			ctx.register_state->registers[index] = value;
+		}
+
+		rsx::raster_state& raster() { return ctx.draw_state.raster; }
+		rsx::depth_stencil_state& depth_stencil() { return ctx.draw_state.depth_stencil; }
+		rsx::blend_state& blend() { return ctx.draw_state.blend; }
+		rsx::multisample_state& multisample() { return ctx.draw_state.multisample; }
+		rsx::viewport_state& viewport() { return ctx.draw_state.viewport; }
+		rsx::input_assembly_state& input_assembly() { return ctx.draw_state.input_assembly; }
+		rsx::stipple_state& stipple() { return ctx.draw_state.stipple; }
+		rsx::fragment_env_state& fragment_env() { return ctx.draw_state.fragment_env; }
+
+		mtl::depth_stencil_state depth_stencil_host()
+		{
+			return mtl::capture_depth_stencil_state(ctx.draw_state.depth_stencil);
+		}
+
+		mtl::raster_state raster_host()
+		{
+			return mtl::capture_raster_state(ctx);
+		}
+
+		mtl::blend_state blend_host()
+		{
+			return mtl::capture_blend_state(ctx);
+		}
+
+		mtl::draw_state draw_host()
+		{
+			return mtl::capture_draw_state(ctx);
+		}
+	};
+
+	dial_context& dials()
+	{
+		static dial_context context;
+		return context;
+	}
+
 	void reset_registers()
 	{
-		// The emulator's own power-on state (rsx_methods.cpp:797).  An all-zero
-		// register file is not a legal RSX state: a getter that maps a word to a
-		// GCM enum goes through `gcm_enum_cast`, which returns an `expected`, and
-		// the conversion to the enum verifies (gcm_enums.h:1188).  `FRONT_FACE`
-		// zero is one such word, so a zeroed fixture aborts on a valid dial.
-		rsx::method_registers.reset();
+		dials().reset();
 	}
 
 	void set_register(u32 index, u32 value)
 	{
-		rsx::method_registers.registers[index] = value;
+		dials().set_register(index, value);
 	}
 
 	// ------------------------------------------------------------ the registry
@@ -399,214 +456,216 @@ TEST(MTLDialMapper, PrimitiveTypeCollapsesToNativeTopologies)
 MTL_DIAL_TEST(depth_rop, NV4097_SET_DEPTH_TEST_ENABLE)
 {
 	// Metal has no "depth test off": the reshape is compare Always plus no write
-	// (CONFLICTS.md C2).
-	set_register(NV4097_SET_DEPTH_FUNC, static_cast<u32>(rsx::comparison_function::never));
-	set_register(NV4097_SET_DEPTH_MASK, 1);
-	set_register(NV4097_SET_DEPTH_TEST_ENABLE, 0);
+	// (CONFLICTS.md C2).  The test writes the decoded state the core produces.
+	dials().depth_stencil().depth_func = rsx::comparison_function::never;
+	dials().depth_stencil().depth_write_enabled = true;
+	dials().depth_stencil().depth_test_enabled = false;
 
-	const mtl::depth_stencil_state disabled = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state disabled = dials().depth_stencil_host();
 	EXPECT_EQ(disabled.depth_compare, rsx::comparison_function::always);
 	EXPECT_FALSE(disabled.depth_write);
 
-	set_register(NV4097_SET_DEPTH_TEST_ENABLE, 1);
+	dials().depth_stencil().depth_test_enabled = true;
 
-	const mtl::depth_stencil_state enabled = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state enabled = dials().depth_stencil_host();
 	EXPECT_EQ(enabled.depth_compare, rsx::comparison_function::never);
 	EXPECT_TRUE(enabled.depth_write);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_DEPTH_FUNC)
 {
-	set_register(NV4097_SET_DEPTH_TEST_ENABLE, 1);
-	set_register(NV4097_SET_DEPTH_FUNC, static_cast<u32>(rsx::comparison_function::greater_or_equal));
+	dials().depth_stencil().depth_test_enabled = true;
+	dials().depth_stencil().depth_func = rsx::comparison_function::greater_or_equal;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().depth_compare, rsx::comparison_function::greater_or_equal);
+	EXPECT_EQ(dials().depth_stencil_host().depth_compare, rsx::comparison_function::greater_or_equal);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_DEPTH_MASK)
 {
-	set_register(NV4097_SET_DEPTH_TEST_ENABLE, 1);
+	dials().depth_stencil().depth_test_enabled = true;
 
-	set_register(NV4097_SET_DEPTH_MASK, 1);
-	EXPECT_TRUE(mtl::capture_depth_stencil_state().depth_write);
+	dials().depth_stencil().depth_write_enabled = true;
+	EXPECT_TRUE(dials().depth_stencil_host().depth_write);
 
-	set_register(NV4097_SET_DEPTH_MASK, 0);
-	EXPECT_FALSE(mtl::capture_depth_stencil_state().depth_write);
+	dials().depth_stencil().depth_write_enabled = false;
+	EXPECT_FALSE(dials().depth_stencil_host().depth_write);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_TEST_ENABLE)
 {
-	set_register(NV4097_SET_STENCIL_FUNC, static_cast<u32>(rsx::comparison_function::never));
+	dials().depth_stencil().front.func = rsx::comparison_function::never;
 
-	const mtl::depth_stencil_state disabled = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state disabled = dials().depth_stencil_host();
 	EXPECT_EQ(disabled.front.compare, rsx::comparison_function::always);
 	EXPECT_EQ(disabled.back.compare, rsx::comparison_function::always);
 
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
+	dials().depth_stencil().stencil_test_enabled = true;
 
-	const mtl::depth_stencil_state enabled = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state enabled = dials().depth_stencil_host();
 	EXPECT_EQ(enabled.front.compare, rsx::comparison_function::never);
 	EXPECT_EQ(enabled.back.compare, rsx::comparison_function::never);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_FUNC)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_FUNC, static_cast<u32>(rsx::comparison_function::less_or_equal));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.func = rsx::comparison_function::less_or_equal;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.compare, rsx::comparison_function::less_or_equal);
+	EXPECT_EQ(dials().depth_stencil_host().front.compare, rsx::comparison_function::less_or_equal);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_FUNC_REF)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_FUNC_REF, 0x5a);
-	set_register(NV4097_SET_BACK_STENCIL_FUNC_REF, 0xc3);
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.func_ref = 0x5a;
+	dials().depth_stencil().back.func_ref = 0xc3;
 
-	EXPECT_EQ(mtl::capture_stencil_references().front, 0x5a);
+	const mtl::stencil_references refs = mtl::capture_stencil_references(dials().depth_stencil());
+	EXPECT_EQ(refs.front, 0x5a);
 	// With the two-sided test off, the back face takes the front reference.
-	EXPECT_EQ(mtl::capture_stencil_references().back, 0x5a);
+	EXPECT_EQ(refs.back, 0x5a);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_FUNC_MASK)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_FUNC_MASK, 0x3c);
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.func_mask = 0x3c;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.read_mask, 0x3c);
+	EXPECT_EQ(dials().depth_stencil_host().front.read_mask, 0x3c);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_MASK)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_MASK, 0xa5);
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.write_mask = 0xa5;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.write_mask, 0xa5);
+	EXPECT_EQ(dials().depth_stencil_host().front.write_mask, 0xa5);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_OP_FAIL)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_OP_FAIL, static_cast<u32>(rsx::stencil_op::replace));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.op_fail = rsx::stencil_op::replace;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.fail, rsx::stencil_op::replace);
+	EXPECT_EQ(dials().depth_stencil_host().front.fail, rsx::stencil_op::replace);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_OP_ZFAIL)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_OP_ZFAIL, static_cast<u32>(rsx::stencil_op::invert));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.op_zfail = rsx::stencil_op::invert;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.zfail, rsx::stencil_op::invert);
+	EXPECT_EQ(dials().depth_stencil_host().front.zfail, rsx::stencil_op::invert);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_STENCIL_OP_ZPASS)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_OP_ZPASS, static_cast<u32>(rsx::stencil_op::decr_wrap));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.op_zpass = rsx::stencil_op::decr_wrap;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().front.zpass, rsx::stencil_op::decr_wrap);
+	EXPECT_EQ(dials().depth_stencil_host().front.zpass, rsx::stencil_op::decr_wrap);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE)
 {
 	// Metal always carries both faces; the one-sided case mirrors the front
 	// (LLD-depth-rop §2.3).
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_STENCIL_FUNC, static_cast<u32>(rsx::comparison_function::less));
-	set_register(NV4097_SET_BACK_STENCIL_FUNC, static_cast<u32>(rsx::comparison_function::greater));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().front.func = rsx::comparison_function::less;
+	dials().depth_stencil().back.func = rsx::comparison_function::greater;
 
-	const mtl::depth_stencil_state mirrored = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state mirrored = dials().depth_stencil_host();
 	EXPECT_EQ(mirrored.back.compare, rsx::comparison_function::less);
 
-	set_register(NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, 1);
+	dials().depth_stencil().two_sided_stencil_test_enabled = true;
 
-	const mtl::depth_stencil_state sided = mtl::capture_depth_stencil_state();
+	const mtl::depth_stencil_state sided = dials().depth_stencil_host();
 	EXPECT_EQ(sided.front.compare, rsx::comparison_function::less);
 	EXPECT_EQ(sided.back.compare, rsx::comparison_function::greater);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_BACK_STENCIL_FUNC)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_BACK_STENCIL_FUNC, static_cast<u32>(rsx::comparison_function::not_equal));
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().two_sided_stencil_test_enabled = true;
+	dials().depth_stencil().back.func = rsx::comparison_function::not_equal;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().back.compare, rsx::comparison_function::not_equal);
+	EXPECT_EQ(dials().depth_stencil_host().back.compare, rsx::comparison_function::not_equal);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_BACK_STENCIL_MASK)
 {
-	set_register(NV4097_SET_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_BACK_STENCIL_MASK, 0x0f);
+	dials().depth_stencil().stencil_test_enabled = true;
+	dials().depth_stencil().two_sided_stencil_test_enabled = true;
+	dials().depth_stencil().back.write_mask = 0x0f;
 
-	EXPECT_EQ(mtl::capture_depth_stencil_state().back.write_mask, 0x0f);
+	EXPECT_EQ(dials().depth_stencil_host().back.write_mask, 0x0f);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_BACK_STENCIL_FUNC_REF)
 {
 	// The back reference is live only under a two-sided stencil test; otherwise
 	// the front reference serves both faces (GLDraw.cpp:148-156).
-	set_register(NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, 1);
-	set_register(NV4097_SET_BACK_STENCIL_FUNC_REF, 0xc3);
+	dials().depth_stencil().two_sided_stencil_test_enabled = true;
+	dials().depth_stencil().front.func_ref = 0x5a;
+	dials().depth_stencil().back.func_ref = 0xc3;
 
-	EXPECT_EQ(mtl::capture_stencil_references().back, 0xc3);
+	const mtl::stencil_references refs = mtl::capture_stencil_references(dials().depth_stencil());
+	EXPECT_EQ(refs.back, 0xc3);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_ZMIN_MAX_CONTROL)
 {
 	// SET_ZMIN_MAX_CONTROL carries clip (b0) and clamp (b4) independently, and
 	// Metal carries one bit (LLD-depth-rop §3.3).
-	set_register(NV4097_SET_ZMIN_MAX_CONTROL, 1);
-	EXPECT_EQ(mtl::capture_depth_clip_mode(), MTL::DepthClipModeClip);
+	dials().depth_stencil().depth_clip_enabled = true;
+	EXPECT_EQ(mtl::capture_depth_clip_mode(dials().depth_stencil()), MTL::DepthClipModeClip);
 
-	set_register(NV4097_SET_ZMIN_MAX_CONTROL, 1 << 4);
-	EXPECT_EQ(mtl::capture_depth_clip_mode(), MTL::DepthClipModeClamp);
+	dials().depth_stencil().depth_clip_enabled = false;
+	dials().depth_stencil().depth_clamp_enabled = true;
+	EXPECT_EQ(mtl::capture_depth_clip_mode(dials().depth_stencil()), MTL::DepthClipModeClamp);
 }
 
 MTL_DIAL_TEST(depth_rop, NV4097_SET_ANTI_ALIASING_CONTROL)
 {
 	// Alpha-to-coverage and alpha-to-one are descriptor state on Metal 4, so they
 	// leave the encoder and enter the pipeline key (CONFLICTS.md C7).
-	// Bit 0 is the MSAA enable, bit 4 alpha-to-coverage and bit 8 alpha-to-one
-	// (rsx_decode.h:4010-4028).
-	set_register(NV4097_SET_ANTI_ALIASING_CONTROL, 1 << 4);
+	dials().multisample().alpha_to_coverage_enabled = true;
 
-	const mtl::anti_aliasing_state coverage = mtl::capture_anti_aliasing_state();
+	const mtl::anti_aliasing_state coverage = mtl::capture_anti_aliasing_state(dials().multisample());
 	EXPECT_TRUE(coverage.alpha_to_coverage);
 	EXPECT_FALSE(coverage.alpha_to_one);
 
-	set_register(NV4097_SET_ANTI_ALIASING_CONTROL, (1 << 4) | (1 << 8));
+	dials().multisample().alpha_to_one_enabled = true;
 
-	const mtl::anti_aliasing_state both = mtl::capture_anti_aliasing_state();
+	const mtl::anti_aliasing_state both = mtl::capture_anti_aliasing_state(dials().multisample());
 	EXPECT_TRUE(both.alpha_to_coverage);
 	EXPECT_TRUE(both.alpha_to_one);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_CULL_FACE_ENABLE)
 {
-	set_register(NV4097_SET_CULL_FACE, static_cast<u32>(rsx::cull_face::back));
+	dials().raster().cull_face_mode = rsx::cull_face::back;
 
-	set_register(NV4097_SET_CULL_FACE_ENABLE, 0);
-	EXPECT_EQ(mtl::capture_cull_mode(mtl::capture_raster_state()), MTL::CullModeNone);
+	dials().raster().cull_face_enabled = false;
+	EXPECT_EQ(mtl::capture_cull_mode(dials().raster_host()), MTL::CullModeNone);
 
-	set_register(NV4097_SET_CULL_FACE_ENABLE, 1);
-	EXPECT_EQ(mtl::capture_cull_mode(mtl::capture_raster_state()), MTL::CullModeBack);
+	dials().raster().cull_face_enabled = true;
+	EXPECT_EQ(mtl::capture_cull_mode(dials().raster_host()), MTL::CullModeBack);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_CULL_FACE)
 {
-	set_register(NV4097_SET_CULL_FACE_ENABLE, 1);
+	dials().raster().cull_face_enabled = true;
 
-	set_register(NV4097_SET_CULL_FACE, static_cast<u32>(rsx::cull_face::front));
-	EXPECT_EQ(mtl::capture_cull_mode(mtl::capture_raster_state()), MTL::CullModeFront);
+	dials().raster().cull_face_mode = rsx::cull_face::front;
+	EXPECT_EQ(mtl::capture_cull_mode(dials().raster_host()), MTL::CullModeFront);
 
 	// Metal has no cull-both mode, so the pipeline key drops the rasterisation
 	// (LLD-raster Q6).
-	set_register(NV4097_SET_CULL_FACE, static_cast<u32>(rsx::cull_face::front_and_back));
+	dials().raster().cull_face_mode = rsx::cull_face::front_and_back;
 
-	const mtl::raster_state both = mtl::capture_raster_state();
+	const mtl::raster_state both = dials().raster_host();
 	EXPECT_TRUE(mtl::culls_both_faces(both));
 	EXPECT_EQ(mtl::capture_cull_mode(both), MTL::CullModeNone);
 }
@@ -616,166 +675,168 @@ MTL_DIAL_TEST(raster, NV4097_SET_FRONT_FACE)
 	// The negated viewport height carries the Y mirror on its own, so the guest
 	// winding maps straight across (MTLRasterState.cpp:66-79; device-confirmed,
 	// L116).
-	set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(rsx::front_face::cw));
-	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingClockwise);
+	dials().raster().front_face_mode = rsx::front_face::cw;
+	EXPECT_EQ(mtl::capture_front_face(dials().raster_host()), MTL::WindingClockwise);
 
-	set_register(NV4097_SET_FRONT_FACE, static_cast<u32>(rsx::front_face::ccw));
-	EXPECT_EQ(mtl::capture_front_face(mtl::capture_raster_state()), MTL::WindingCounterClockwise);
+	dials().raster().front_face_mode = rsx::front_face::ccw;
+	EXPECT_EQ(mtl::capture_front_face(dials().raster_host()), MTL::WindingCounterClockwise);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_FRONT_POLYGON_MODE)
 {
-	set_register(NV4097_SET_FRONT_POLYGON_MODE, static_cast<u32>(rsx::polygon_mode::line));
+	dials().raster().polygon_mode_front = rsx::polygon_mode::line;
 
-	EXPECT_EQ(mtl::capture_fill_mode(mtl::capture_raster_state()), MTL::TriangleFillModeLines);
+	EXPECT_EQ(mtl::capture_fill_mode(dials().raster_host()), MTL::TriangleFillModeLines);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_BACK_POLYGON_MODE)
 {
 	// Metal has one fill mode per encoder, so the pair collapses to the face that
 	// survives culling.
-	set_register(NV4097_SET_FRONT_POLYGON_MODE, static_cast<u32>(rsx::polygon_mode::fill));
-	set_register(NV4097_SET_BACK_POLYGON_MODE, static_cast<u32>(rsx::polygon_mode::line));
-	set_register(NV4097_SET_CULL_FACE, static_cast<u32>(rsx::cull_face::front));
-	set_register(NV4097_SET_CULL_FACE_ENABLE, 1);
+	dials().raster().polygon_mode_front = rsx::polygon_mode::fill;
+	dials().raster().polygon_mode_back = rsx::polygon_mode::line;
+	dials().raster().cull_face_mode = rsx::cull_face::front;
+	dials().raster().cull_face_enabled = true;
 
-	EXPECT_EQ(mtl::capture_fill_mode(mtl::capture_raster_state()), MTL::TriangleFillModeLines);
+	EXPECT_EQ(mtl::capture_fill_mode(dials().raster_host()), MTL::TriangleFillModeLines);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLY_OFFSET_FILL_ENABLE)
 {
-	set_register(NV4097_SET_POLY_OFFSET_FILL_ENABLE, 0);
+	dials().raster().poly_offset_fill_enabled = false;
 
 	f32 bias = 0.0f;
 	f32 slope_scale = 0.0f;
-	EXPECT_FALSE(mtl::capture_depth_bias(mtl::capture_raster_state(), bias, slope_scale));
+	EXPECT_FALSE(mtl::capture_depth_bias(dials().raster_host(), bias, slope_scale));
 
-	set_register(NV4097_SET_POLY_OFFSET_FILL_ENABLE, 1);
-	EXPECT_TRUE(mtl::capture_depth_bias(mtl::capture_raster_state(), bias, slope_scale));
+	dials().raster().poly_offset_fill_enabled = true;
+	EXPECT_TRUE(mtl::capture_depth_bias(dials().raster_host(), bias, slope_scale));
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR)
 {
-	set_register(NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR, std::bit_cast<u32>(1.5f));
+	dials().raster().poly_offset_scale = 1.5f;
 
 	f32 bias = 0.0f;
 	f32 slope_scale = 0.0f;
-	mtl::capture_depth_bias(mtl::capture_raster_state(), bias, slope_scale);
+	mtl::capture_depth_bias(dials().raster_host(), bias, slope_scale);
 
 	EXPECT_FLOAT_EQ(slope_scale, 1.5f);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_OFFSET_BIAS)
 {
-	set_register(NV4097_SET_POLYGON_OFFSET_BIAS, std::bit_cast<u32>(-0.25f));
+	dials().raster().poly_offset_bias = -0.25f;
 
 	f32 bias = 0.0f;
 	f32 slope_scale = 0.0f;
-	mtl::capture_depth_bias(mtl::capture_raster_state(), bias, slope_scale);
+	mtl::capture_depth_bias(dials().raster_host(), bias, slope_scale);
 
 	EXPECT_FLOAT_EQ(bias, -0.25f);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_CLIP_MIN)
 {
-	// The viewport depth range is clamped to [0,1], so an extended range is the
-	// vertex shader's (LLD-raster invariant 4).
-	set_register(NV4097_SET_CLIP_MIN, std::bit_cast<u32>(0.25f));
-	set_register(NV4097_SET_CLIP_MAX, std::bit_cast<u32>(0.75f));
+	// The clip range belongs to the decoded viewport group, not the raster group;
+	// the backend reads the viewport depth range.
+	dials().viewport().z_clip_min = 0.25f;
+	dials().viewport().z_clip_max = 0.75f;
 
 	f64 znear = 0.0;
 	f64 zfar = 0.0;
-	EXPECT_TRUE(mtl::capture_clip_range(mtl::capture_raster_state(), znear, zfar));
+	EXPECT_TRUE(mtl::capture_clip_range(dials().raster_host(), znear, zfar));
 	EXPECT_DOUBLE_EQ(znear, 0.25);
 	EXPECT_DOUBLE_EQ(zfar, 0.75);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_CLIP_MAX)
 {
-	set_register(NV4097_SET_CLIP_MIN, std::bit_cast<u32>(-0.5f));
-	set_register(NV4097_SET_CLIP_MAX, std::bit_cast<u32>(0.5f));
+	dials().viewport().z_clip_min = -0.5f;
+	dials().viewport().z_clip_max = 0.5f;
 
 	f64 znear = 0.0;
 	f64 zfar = 0.0;
-	EXPECT_FALSE(mtl::capture_clip_range(mtl::capture_raster_state(), znear, zfar));
+	EXPECT_FALSE(mtl::capture_clip_range(dials().raster_host(), znear, zfar));
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POINT_SIZE)
 {
+	// The core does not decode the point size; the backend reads the register.
 	set_register(NV4097_SET_POINT_SIZE, std::bit_cast<u32>(2.5f));
 
-	EXPECT_FLOAT_EQ(mtl::capture_raster_state().point_size, 2.5f);
+	EXPECT_FLOAT_EQ(dials().raster_host().point_size, 2.5f);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_LINE_WIDTH)
 {
-	// The RSX width is fixed point: 8 is one pixel (rsx_decode.h:3261).
-	set_register(NV4097_SET_LINE_WIDTH, 8);
+	// The core decodes the fixed-point width to pixels (8 is one pixel).
+	dials().raster().line_width = 1.0f;
 
-	EXPECT_FLOAT_EQ(mtl::capture_raster_state().line_width, 1.0f);
+	EXPECT_FLOAT_EQ(dials().raster_host().line_width, 1.0f);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_LINE_SMOOTH_ENABLE)
 {
-	set_register(NV4097_SET_LINE_SMOOTH_ENABLE, 1);
+	dials().raster().line_smooth_enabled = true;
 
-	EXPECT_TRUE(mtl::capture_raster_state().line_smooth);
+	EXPECT_TRUE(dials().raster_host().line_smooth);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_USER_CLIP_PLANE_CONTROL)
 {
+	// The core does not decode the user clip mask; the backend reads the register.
 	set_register(NV4097_SET_USER_CLIP_PLANE_CONTROL, 0x0000'0033);
 
-	EXPECT_EQ(mtl::capture_raster_state().user_clip_control, 0x0000'0033u);
+	EXPECT_EQ(dials().raster_host().user_clip_control, 0x0000'0033u);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_STIPPLE)
 {
-	set_register(NV4097_SET_POLYGON_STIPPLE, 1);
+	dials().stipple().enabled = true;
 
-	EXPECT_TRUE(mtl::capture_raster_state().stipple_enabled);
+	EXPECT_TRUE(dials().raster_host().stipple_enabled);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POLYGON_STIPPLE_PATTERN)
 {
-	// The latch copies the 32-word pattern instead of holding a guest pointer into
-	// register space, so a consumer that holds the latch across a register write
-	// cannot read retired data (E13).  The row asserts the copy.
-	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN, 0x0000'0001);
-	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN + 1, 0xffff'0000);
+	// The backend copies the decoded pattern into the latch instead of holding a
+	// pointer into register space (E13).
+	dials().stipple().enabled = true;
+	dials().stipple().pattern[0] = 0x0000'0001;
+	dials().stipple().pattern[1] = 0xffff'0000;
 
-	const auto pattern = mtl::capture_raster_state().stipple_pattern;
+	const auto pattern = dials().raster_host().stipple_pattern;
 	EXPECT_EQ(pattern[0], 0x0000'0001u);
 	EXPECT_EQ(pattern[1], 0xffff'0000u);
 
-	// A later write to the register file must not change a latch already taken.
-	set_register(NV4097_SET_POLYGON_STIPPLE_PATTERN, 0x0000'0002);
+	// A later write to the decoded state must not change a latch already taken.
+	dials().stipple().pattern[0] = 0x0000'0002;
 	EXPECT_EQ(pattern[0], 0x0000'0001u);
 }
 
 MTL_DIAL_TEST(raster, NV4097_SET_POINT_SPRITE_CONTROL)
 {
+	// The core does not decode point sprites; the backend reads the register.
 	set_register(NV4097_SET_POINT_SPRITE_CONTROL, 1);
 
-	EXPECT_TRUE(mtl::capture_raster_state().point_sprite_enabled);
+	EXPECT_TRUE(dials().raster_host().point_sprite_enabled);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_BLEND_ENABLE)
 {
-	set_register(NV4097_SET_BLEND_ENABLE, 1);
+	dials().blend().enable_mask = 1;
 
-	EXPECT_EQ(mtl::capture_blend_state().enable_mask, 1u);
-	EXPECT_TRUE(mtl::capture_blend_state().blend_enabled(0));
+	EXPECT_EQ(dials().blend_host().enable_mask, 1u);
+	EXPECT_TRUE(dials().blend_host().blend_enabled(0));
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_BLEND_ENABLE_MRT)
 {
-	// The MRT register holds the per-target bits; the base register holds target 0
-	// (rsx_methods.h:493-497).
-	set_register(NV4097_SET_BLEND_ENABLE, 0);
-	set_register(NV4097_SET_BLEND_ENABLE_MRT, 0b1010);
+	// The mask is the effective per-target enable after the core folds the base
+	// register and the MRT register together.
+	dials().blend().enable_mask = 0b1010;
 
-	const mtl::blend_state state = mtl::capture_blend_state();
+	const mtl::blend_state state = dials().blend_host();
 	EXPECT_EQ(state.enable_mask, 0b1010u);
 	EXPECT_FALSE(state.blend_enabled(0));
 	EXPECT_TRUE(state.blend_enabled(1));
@@ -783,103 +844,106 @@ MTL_DIAL_TEST(blend, NV4097_SET_BLEND_ENABLE_MRT)
 
 MTL_DIAL_TEST(blend, NV4097_SET_BLEND_FUNC_SFACTOR)
 {
-	set_register(NV4097_SET_BLEND_FUNC_SFACTOR, static_cast<u32>(rsx::blend_factor::src_alpha));
+	dials().blend().sfactor_rgb = rsx::blend_factor::src_alpha;
+	dials().blend().sfactor_a = rsx::blend_factor::src_alpha;
 
-	const mtl::blend_state state = mtl::capture_blend_state();
+	const mtl::blend_state state = dials().blend_host();
 	EXPECT_EQ(state.source_rgb, rsx::blend_factor::src_alpha);
 	EXPECT_EQ(mtl::get_blend_factor(state.source_rgb), MTL::BlendFactorSourceAlpha);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_BLEND_FUNC_DFACTOR)
 {
-	set_register(NV4097_SET_BLEND_FUNC_DFACTOR, static_cast<u32>(rsx::blend_factor::one_minus_src_alpha));
+	dials().blend().dfactor_rgb = rsx::blend_factor::one_minus_src_alpha;
+	dials().blend().dfactor_a = rsx::blend_factor::one_minus_src_alpha;
 
-	EXPECT_EQ(mtl::capture_blend_state().destination_rgb, rsx::blend_factor::one_minus_src_alpha);
+	EXPECT_EQ(dials().blend_host().destination_rgb, rsx::blend_factor::one_minus_src_alpha);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_BLEND_EQUATION)
 {
-	// The word holds the RGB equation in the low half and the alpha equation in
-	// the high half (rsx_decode.h:2898), and both halves are decoded as enums.
-	const u32 equation = static_cast<u32>(rsx::blend_equation::reverse_subtract);
-	set_register(NV4097_SET_BLEND_EQUATION, equation | (equation << 16));
+	dials().blend().equation_rgb = rsx::blend_equation::reverse_subtract;
+	dials().blend().equation_a = rsx::blend_equation::reverse_subtract;
 
-	EXPECT_EQ(mtl::capture_blend_state().equation_rgb, rsx::blend_equation::reverse_subtract);
+	EXPECT_EQ(dials().blend_host().equation_rgb, rsx::blend_equation::reverse_subtract);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_ALPHA_TEST_ENABLE)
 {
+	// The core does not decode the alpha test enable; the backend reads the register.
 	set_register(NV4097_SET_ALPHA_TEST_ENABLE, 1);
 
-	EXPECT_TRUE(mtl::capture_blend_state().alpha_test_enabled);
+	EXPECT_TRUE(dials().blend_host().alpha_test_enabled);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_ALPHA_FUNC)
 {
-	set_register(NV4097_SET_ALPHA_FUNC, static_cast<u32>(rsx::comparison_function::greater));
+	dials().fragment_env().alpha_func = rsx::comparison_function::greater;
 
-	EXPECT_EQ(mtl::capture_blend_state().alpha_func, rsx::comparison_function::greater);
+	EXPECT_EQ(dials().blend_host().alpha_func, rsx::comparison_function::greater);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_ALPHA_REF)
 {
-	// The default surface format is 8-bit, so the reference is a unorm8
-	// (rsx_methods.h:749-762).
+	// The core does not decode the reference; the default surface format is 8-bit,
+	// so the backend reads it as a unorm8.
 	set_register(NV4097_SET_ALPHA_REF, 0x80);
 
-	EXPECT_FLOAT_EQ(mtl::capture_blend_state().alpha_ref, 128.0f / 255.0f);
+	EXPECT_FLOAT_EQ(dials().blend_host().alpha_ref, 128.0f / 255.0f);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_LOGIC_OP_ENABLE)
 {
-	set_register(NV4097_SET_LOGIC_OP_ENABLE, 1);
+	dials().blend().logic_op_enabled = true;
 
-	EXPECT_TRUE(mtl::capture_blend_state().logic_op_enabled);
+	EXPECT_TRUE(dials().blend_host().logic_op_enabled);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_LOGIC_OP)
 {
-	set_register(NV4097_SET_LOGIC_OP, static_cast<u32>(rsx::logic_op::logic_xor));
+	dials().blend().logic_op_enabled = true;
+	dials().blend().logic_operation = rsx::logic_op::logic_xor;
 
-	EXPECT_EQ(mtl::capture_blend_state().logic_operation, rsx::logic_op::logic_xor);
+	EXPECT_EQ(dials().blend_host().logic_operation, rsx::logic_op::logic_xor);
 }
 
 MTL_DIAL_TEST(blend, NV4097_SET_SHADE_MODE)
 {
+	// The core does not decode the shade mode; the backend reads the register.
 	set_register(NV4097_SET_SHADE_MODE, static_cast<u32>(rsx::shading_mode::flat));
 
-	EXPECT_EQ(mtl::capture_blend_state().shade_mode, rsx::shading_mode::flat);
+	EXPECT_EQ(dials().blend_host().shade_mode, rsx::shading_mode::flat);
 }
 
 MTL_DIAL_TEST(draw, NV4097_SET_VERTEX_DATA_BASE_OFFSET)
 {
+	// The draw clause barriers rewrite the bases, so they stay raw inputs.
 	set_register(NV4097_SET_VERTEX_DATA_BASE_OFFSET, 0x1234'0000);
 
-	EXPECT_EQ(mtl::capture_draw_state().base_offset, 0x1234'0000u);
+	EXPECT_EQ(dials().draw_host().base_offset, 0x1234'0000u);
 }
 
 MTL_DIAL_TEST(draw, NV4097_SET_VERTEX_DATA_BASE_INDEX)
 {
 	set_register(NV4097_SET_VERTEX_DATA_BASE_INDEX, 0x0001'0000);
 
-	EXPECT_EQ(mtl::capture_draw_state().base_index, 0x0001'0000u);
+	EXPECT_EQ(dials().draw_host().base_index, 0x0001'0000u);
 }
 
 MTL_DIAL_TEST(draw, NV4097_SET_INDEX_ARRAY_ADDRESS)
 {
 	set_register(NV4097_SET_INDEX_ARRAY_ADDRESS, 0x00ab'cdef);
 
-	EXPECT_EQ(mtl::capture_draw_state().index_address, 0x00ab'cdefu);
+	EXPECT_EQ(dials().draw_host().index_address, 0x00ab'cdefu);
 }
 
 MTL_DIAL_TEST(draw, NV4097_SET_INDEX_ARRAY_DMA)
 {
-	// One register carries the location (b0-3) and the index type (b4-11)
-	// (rsx_decode.h:3437-3450).
-	set_register(NV4097_SET_INDEX_ARRAY_DMA,
-		(static_cast<u32>(rsx::index_array_type::u32) << 4) | 3);
+	// The location is raw; the index type is decoded into the input-assembly group.
+	set_register(NV4097_SET_INDEX_ARRAY_DMA, 3);
+	dials().input_assembly().index_type = rsx::index_array_type::u32;
 
-	const mtl::draw_state state = mtl::capture_draw_state();
+	const mtl::draw_state state = dials().draw_host();
 	EXPECT_EQ(state.index_location, 3u);
 	EXPECT_EQ(state.index_type, rsx::index_array_type::u32);
 	EXPECT_EQ(mtl::get_index_type(state.index_type), MTL::IndexTypeUInt32);
@@ -887,25 +951,20 @@ MTL_DIAL_TEST(draw, NV4097_SET_INDEX_ARRAY_DMA)
 
 MTL_DIAL_TEST(draw, NV4097_SET_RESTART_INDEX)
 {
-	set_register(NV4097_SET_RESTART_INDEX, 0xffff'ffff);
+	dials().input_assembly().restart_index = 0xffff'ffff;
 
-	EXPECT_EQ(mtl::capture_draw_state().restart_index, 0xffff'ffffu);
+	EXPECT_EQ(dials().draw_host().restart_index, 0xffff'ffffu);
 }
 
 MTL_DIAL_TEST(draw, NV4097_SET_RESTART_INDEX_ENABLE)
 {
-	// The enable is derived: a 16-bit index array cannot carry a restart index
-	// above 0xffff (rsx_methods.h:311-326).
-	set_register(NV4097_SET_INDEX_ARRAY_DMA, static_cast<u32>(rsx::index_array_type::u16) << 4);
-	set_register(NV4097_SET_RESTART_INDEX, 0x0001'0000);
+	// The core derives the flag from the index type and the restart index; the
+	// backend translates the decoded flag unchanged.
+	dials().input_assembly().restart_index_enabled = false;
+	EXPECT_FALSE(dials().draw_host().restart_enabled);
 
-	EXPECT_FALSE(mtl::capture_draw_state().restart_enabled);
-
-	set_register(NV4097_SET_RESTART_INDEX_ENABLE, 1);
-	EXPECT_FALSE(mtl::capture_draw_state().restart_enabled);
-
-	set_register(NV4097_SET_RESTART_INDEX, 0x00ff);
-	EXPECT_TRUE(mtl::capture_draw_state().restart_enabled);
+	dials().input_assembly().restart_index_enabled = true;
+	EXPECT_TRUE(dials().draw_host().restart_enabled);
 }
 
 // =============================================================================

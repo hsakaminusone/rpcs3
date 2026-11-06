@@ -177,9 +177,9 @@ namespace mtl
 		}
 	}
 
-	sampler_state capture_fragment_sampler(u8 unit)
+	sampler_state capture_fragment_sampler(const rsx::rsx_state& regs, u8 unit)
 	{
-		const auto& texture = rsx::method_registers.fragment_textures[unit];
+		const auto& texture = regs.fragment_textures[unit];
 		sampler_state state = capture_sampler(texture);
 
 		// The SNORM expansion is part of the RSX border colour
@@ -201,11 +201,11 @@ namespace mtl
 		return state;
 	}
 
-	sampler_state capture_vertex_sampler(u8 unit)
+	sampler_state capture_vertex_sampler(const rsx::rsx_state& regs, u8 unit)
 	{
 		// A vertex texture has no zfunc or signed-channel register, so it is never
 		// a comparison sampler and its border colour carries no expansion.
-		const auto& texture = rsx::method_registers.vertex_textures[unit];
+		const auto& texture = regs.vertex_textures[unit];
 		sampler_state state = capture_sampler(texture);
 
 		// A vertex fetch has no derivatives, so Vulkan and OpenGL force nearest and
