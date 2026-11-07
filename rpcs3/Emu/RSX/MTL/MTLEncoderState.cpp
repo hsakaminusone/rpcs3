@@ -2,21 +2,23 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Core/RSXContext.h"
+
 namespace mtl
 {
-	encoder_state capture_encoder_state(bool emulate_depth_range)
+	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range)
 	{
 		// One latch per cluster; the helpers consume it instead of re-reading the
 		// register file.
-		const raster_state raster = capture_raster_state();
-		const surface_state surface = capture_surface_state();
+		const raster_state raster = capture_raster_state(ctx);
+		const surface_state surface = capture_surface_state(ctx);
 
 		encoder_state state;
 		state.cull_mode = capture_cull_mode(raster);
 		state.winding = capture_front_face(raster);
 		state.fill_mode = capture_fill_mode(raster);
 
-		state.depth_clip_mode = capture_depth_clip_mode();
+		state.depth_clip_mode = capture_depth_clip_mode(ctx.draw_state.depth_stencil);
 
 		// The helper writes both out-params; keep the defaults when the offset is
 		// off (LLD-raster §3.4, invariant 6).
@@ -28,11 +30,11 @@ namespace mtl
 			state.depth_slope_scale = depth_slope_scale;
 		}
 
-		const stencil_references references = capture_stencil_references();
+		const stencil_references references = capture_stencil_references(ctx.draw_state.depth_stencil);
 		state.stencil_front = references.front;
 		state.stencil_back = references.back;
 
-		const depth_bounds bounds = capture_depth_bounds(emulate_depth_range);
+		const depth_bounds bounds = capture_depth_bounds(ctx.draw_state.depth_stencil, emulate_depth_range);
 		state.depth_bounds_min = bounds.min;
 		state.depth_bounds_max = bounds.max;
 
@@ -40,12 +42,14 @@ namespace mtl
 		// defaults (0.0, 1.0) survive the false case.
 		state.has_clip_range = capture_clip_range(raster, state.znear, state.zfar);
 
-		state.blend_color = capture_blend_color();
+		// The decoded constant is only valid while blending is enabled; the value is
+		// unused otherwise and already defaults to zero.
+		state.blend_color = ctx.draw_state.blend.constant_color;
 
 		state.clip_width = surface.clip_width;
 		state.clip_height = surface.clip_height;
 
-		state.depth_stencil = capture_depth_stencil_state();
+		state.depth_stencil = capture_depth_stencil_state(ctx.draw_state.depth_stencil);
 
 		return state;
 	}

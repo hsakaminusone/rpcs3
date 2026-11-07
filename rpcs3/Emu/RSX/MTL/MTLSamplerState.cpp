@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 
 namespace mtl
 {
@@ -145,6 +146,21 @@ namespace mtl
 
 	namespace
 	{
+		// TODO(excise): level 5; MTL_PROBE_FORCE_LOD0 pins every sampler to level
+		// zero, with no bias and no filtering.  A one-texel replacement texture
+		// removes UV and LOD together, so it cannot tell a wrong mip level from a
+		// wrong coordinate.  This switch changes only sampler state: the shader
+		// programs and the pipeline archive are untouched.
+		bool diagnostic_force_lod0()
+		{
+			static const bool enabled = [] {
+				const char* value = std::getenv("MTL_PROBE_FORCE_LOD0");
+				return value && *value && *value != '0';
+			}();
+
+			return enabled;
+		}
+
 		// The fields shared by the two texture classes.  The comparison sampler is
 		// selected by the sampled format: the RSX compares a fetched depth against
 		// the reference instead of filtering it (VKDraw.cpp:404-410).
@@ -173,13 +189,24 @@ namespace mtl
 			const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 			state.depth_compare = (format >= CELL_GCM_TEXTURE_DEPTH24_D8 && format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT);
 
+			// TODO(excise): level 5; pin the sample to level zero.  A splotch that
+			// vanishes here was a mip/LOD/filter fault; one that survives is after
+			// the sample.
+			if (diagnostic_force_lod0())
+			{
+				state.min_lod = 0.0f;
+				state.max_lod = 0.0f;
+				state.lod_bias = 0.0f;
+				state.force_nearest = true;
+			}
+
 			return state;
 		}
 	}
 
-	sampler_state capture_fragment_sampler(u8 unit)
+	sampler_state capture_fragment_sampler(const rsx::rsx_state& regs, u8 unit)
 	{
-		const auto& texture = rsx::method_registers.fragment_textures[unit];
+		const auto& texture = regs.fragment_textures[unit];
 		sampler_state state = capture_sampler(texture);
 
 		// The SNORM expansion is part of the RSX border colour
@@ -201,11 +228,11 @@ namespace mtl
 		return state;
 	}
 
-	sampler_state capture_vertex_sampler(u8 unit)
+	sampler_state capture_vertex_sampler(const rsx::rsx_state& regs, u8 unit)
 	{
 		// A vertex texture has no zfunc or signed-channel register, so it is never
 		// a comparison sampler and its border colour carries no expansion.
-		const auto& texture = rsx::method_registers.vertex_textures[unit];
+		const auto& texture = regs.vertex_textures[unit];
 		sampler_state state = capture_sampler(texture);
 
 		// A vertex fetch has no derivatives, so Vulkan and OpenGL force nearest and

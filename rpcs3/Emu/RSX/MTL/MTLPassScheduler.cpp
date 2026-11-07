@@ -5,6 +5,14 @@
 
 namespace mtl
 {
+	namespace
+	{
+		// The granularity of the read index.  The exact range test below makes the
+		// block only a candidate filter, so a coarse block keeps the index small
+		// without ever turning a non-overlapping pair into an edge.
+		constexpr u32 hazard_block_shift = 16;
+	}
+
 	MTL::Stages access_stages(rsx::surface_access access, bool vertex_stage)
 	{
 		if (access == rsx::surface_access::shader_write || access == rsx::surface_access::shader_read)
@@ -30,6 +38,9 @@ namespace mtl
 	void pass_scheduler::begin_frame()
 	{
 		m_records.clear();
+		m_by_resource.clear();
+		m_write_records.clear();
+		m_read_blocks.clear();
 		m_pending.clear();
 		m_carried.clear();
 		m_pass = 0;
@@ -38,45 +49,198 @@ namespace mtl
 
 	void pass_scheduler::begin_pass()
 	{
-		// The per-pass edges and the split request belong to the pass.  The record
-		// stays, and so does a carried edge: the caller emits it on the encoder this
+		// The per-pass edges and the split request belong to the pass.  The records
+		// stay, and so does a carried edge: the caller emits it on the encoder this
 		// pass opens.
 		m_pending.clear();
 		m_pass++;
 		m_split = false;
 	}
 
-	void pass_scheduler::note_read(MTL::ResourceID resource, MTL::Stages stages)
+	pass_scheduler::record* pass_scheduler::fetch(u64 resource)
+	{
+		record*& entry = m_by_resource[resource];
+
+		if (!entry)
+		{
+			entry = &m_records.emplace_back();
+		}
+
+		return entry;
+	}
+
+	bool pass_scheduler::overlaps(const record& entry, const utils::address_range32& range)
+	{
+		return entry.range.valid() && range.valid() && entry.range.overlaps(range);
+	}
+
+	void pass_scheduler::index_read(record& entry)
+	{
+		if (!entry.range.valid())
+		{
+			return;
+		}
+
+		// The same unit is noted on every draw of the frame.  The record only needs
+		// one index entry per footprint, so the repeat path stays a comparison.
+		if (entry.read_indexed && entry.read_indexed_range == entry.range)
+		{
+			return;
+		}
+
+		entry.read_indexed = true;
+		entry.read_indexed_range = entry.range;
+
+		const u32 first = entry.range.start >> hazard_block_shift;
+		const u32 last = entry.range.end >> hazard_block_shift;
+
+		for (u32 block = first; block <= last; ++block)
+		{
+			m_read_blocks[block].push_back(&entry);
+		}
+	}
+
+	void pass_scheduler::note_read(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages)
 	{
 		// RAW: a completed write must reach this read.  A writer in an earlier encoder
 		// takes the queue form.  A writer in the open pass is the TBDR feedback case,
 		// which one encoder cannot order, so the edge carries to the encoder that
 		// follows this one (HLD-03 §2.4, §2.1 item 5).
-		record& entry = m_records[resource._impl];
+		record& entry = *fetch(resource._impl);
 
-		if (entry.write_stages)
+		if (range.valid())
 		{
-			m_pending.push_back(barrier_spec{ entry.write_stages, stages, MTL4::VisibilityOptionDevice, entry.write_pass != m_pass });
-			entry.write_stages = 0;
+			entry.range = range;
+		}
+
+		// The producers of this read split by pass: the queue form orders an earlier
+		// pass, while a writer in this pass may still need the split path.  Merging
+		// them into one queue-scope edge would skip that split.
+		MTL::Stages same_pass = 0;
+		MTL::Stages earlier_pass = 0;
+
+		for (record* candidate : m_write_records)
+		{
+			if (!candidate->write_stages)
+			{
+				continue;
+			}
+
+			// A different Metal object over the same guest bytes is the aliasing case
+			// this scheduler exists to catch; the same object matches by identity even
+			// when the two notes carry different footprints.
+			if (candidate != &entry && !overlaps(*candidate, range))
+			{
+				continue;
+			}
+
+			if (candidate->write_pass == m_pass)
+			{
+				same_pass |= candidate->write_stages;
+			}
+			else
+			{
+				earlier_pass |= candidate->write_stages;
+			}
+
+			candidate->write_stages = 0;
+		}
+
+		if (same_pass)
+		{
+			m_pending.push_back(barrier_spec{ same_pass, stages, MTL4::VisibilityOptionDevice, false });
+		}
+
+		if (earlier_pass)
+		{
+			m_pending.push_back(barrier_spec{ earlier_pass, stages, MTL4::VisibilityOptionDevice, true });
 		}
 
 		entry.read_stages = stages;
 		entry.read_pass = m_pass;
+		index_read(entry);
 	}
 
-	void pass_scheduler::note_write(MTL::ResourceID resource, MTL::Stages stages)
+	void pass_scheduler::note_write(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages)
 	{
 		// WAR: a completed read must reach this write.
-		record& entry = m_records[resource._impl];
+		record& entry = *fetch(resource._impl);
 
-		if (entry.read_stages)
+		if (range.valid())
 		{
-			m_pending.push_back(barrier_spec{ entry.read_stages, stages, MTL4::VisibilityOptionDevice, entry.read_pass != m_pass });
-			entry.read_stages = 0;
+			entry.range = range;
+		}
+
+		MTL::Stages same_pass = 0;
+		MTL::Stages earlier_pass = 0;
+
+		const auto consume = [&](record& candidate)
+		{
+			if (!candidate.read_stages)
+			{
+				return;
+			}
+
+			if (candidate.read_pass == m_pass)
+			{
+				same_pass |= candidate.read_stages;
+			}
+			else
+			{
+				earlier_pass |= candidate.read_stages;
+			}
+
+			candidate.read_stages = 0;
+		};
+
+		// The same object is always a hazard, even when the two notes carry different
+		// footprints, so it never depends on the range index.
+		consume(entry);
+
+		if (range.valid())
+		{
+			const u32 first = range.start >> hazard_block_shift;
+			const u32 last = range.end >> hazard_block_shift;
+
+			for (u32 block = first; block <= last; ++block)
+			{
+				const auto it = m_read_blocks.find(block);
+
+				if (it == m_read_blocks.end())
+				{
+					continue;
+				}
+
+				for (record* candidate : it->second)
+				{
+					if (candidate == &entry || !candidate->read_stages || !overlaps(*candidate, range))
+					{
+						continue;
+					}
+
+					consume(*candidate);
+				}
+			}
+		}
+
+		if (same_pass)
+		{
+			m_pending.push_back(barrier_spec{ same_pass, stages, MTL4::VisibilityOptionDevice, false });
+		}
+
+		if (earlier_pass)
+		{
+			m_pending.push_back(barrier_spec{ earlier_pass, stages, MTL4::VisibilityOptionDevice, true });
 		}
 
 		entry.write_stages = stages;
 		entry.write_pass = m_pass;
+
+		if (!entry.write_listed)
+		{
+			entry.write_listed = true;
+			m_write_records.push_back(&entry);
+		}
 	}
 
 	void pass_scheduler::flush(MTL4::CommandEncoder* encoder)

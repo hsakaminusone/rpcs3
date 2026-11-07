@@ -222,4 +222,46 @@ namespace rsx::FIFO
 		streams.on_jump(stream_a, stream_b + 0x2000);
 		EXPECT_EQ(streams.frontier(stream_b + 0x2000, stream_a + 0x100), stream_a + 0x1000);
 	}
+
+	TEST(FifoStreams, NestedCallKeepsTheChunkItReturnsInto)
+	{
+		// Ridge Racer 7 enters the NV406E_SEMAPHORE_ACQUIRE trampoline from a
+		// command chunk, the trampoline jumps into the next chunk, and that
+		// chunk carries a CALL of its own (L149). Hardware answers the inner
+		// CALL by overwriting its single return-address register, so the outer
+		// frame is dead: the parser never returns to the chunk it called from.
+		stream_tracker streams;
+		streams.reset(boot);
+		streams.note_put(stream_a + 0x1000, boot);
+		streams.on_jump(stream_a, stream_a + 0x1000);
+		streams.note_put(stream_b + 0x1000, stream_a);
+		streams.on_jump(stream_b, stream_b + 0x1000);
+
+		const u32 stream_c = 0x2000000;
+		const u32 stream_d = 0x3000000;
+		const u32 stream_e = 0x900000;
+		const u32 stream_f = 0x4a0000;
+
+		streams.note_put(stream_c + 0x1000, stream_b);
+		streams.on_jump(stream_c, stream_c + 0x1000);
+		// The fifth stream recycles the boot stream, so D takes its slot.
+		streams.note_put(stream_d + 0x1000, stream_c + 0x1000);
+		streams.on_jump(stream_d, stream_d + 0x1000);
+
+		// D calls the static semaphore trampoline, which jumps into static code
+		// below every command stream.
+		const u32 put_e = stream_e + 0x1000;
+		streams.on_call(0x1544, stream_d + 0x100);
+		streams.on_jump(stream_e, put_e);
+		// The chunk D jumped into carries a CALL of its own.
+		streams.on_call(0xca8180, stream_e + 0x40);
+		streams.on_return();
+
+		// F recycles the lowest non-current stream. The parser is inside E, so
+		// E must survive; recycling it would orphan the frontier the parser is
+		// standing on.
+		streams.note_put(stream_f + 0x1000, put_e);
+		streams.on_jump(stream_f, stream_f + 0x1000);
+		EXPECT_TRUE(streams.is_known(stream_e + 0x40));
+	}
 }

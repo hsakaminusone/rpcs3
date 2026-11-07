@@ -27,6 +27,70 @@ namespace rsx
 	class display_output;
 	class RSXDMAWriter;
 
+	// TODO(excise): level 1; the data of a FIFO desync, and a short history of
+	// the commands the host dispatched. Both exist for one diagnostic: the
+	// desync capture shows a data word where a command header belongs, and the
+	// question is which command's argument block was mis-counted
+	// (RR7-FREEZE-FORENSICS.md §8.1, L52). The shared code gathers the data and
+	// hands it to the backend through on_fifo_desync, so the printing and the
+	// cost of the history belong to the backend, not to the FIFO path. Removing
+	// the diagnostic removes the struct, the history, the hook and every call
+	// site.
+	struct dispatch_entry
+	{
+		u32 reg = 0;
+		u32 value = 0;
+		// TODO(excise): level 1; the command word the argument was decoded from.
+		// A desync capture compares it with the ring at the same position, which
+		// separates a mis-parsed stream from a stale FIFO cache snapshot.
+		u32 cmd = 0;
+		u32 position = 0;
+	};
+
+	// The ring is 256 entries so that a capture can reach from the error back to
+	// the jump target: the error is a fixed distance after the target in three of
+	// the four captures (0x39c bytes, L58), and the commands in between are what
+	// the host has to show.
+	static constexpr u32 dispatch_history_size = 256;
+
+	// TODO(excise): level 1; what the shared code knows about a desync when it
+	// recovers. The backend prints it; removing it removes this struct and the
+	// fill block in recover_fifo.
+	struct fifo_desync_info
+	{
+		u32 get = 0;
+		u32 put = 0;
+		u32 get_guest = 0;
+		u32 restore_point = 0;
+		u32 code_start = 0;
+		u32 ret_addr = 0;
+		u32 last_command = 0;
+		u32 last_label_address = 0;
+		u32 last_label_value = 0;
+		bool last_command_method_known = false;
+		bool label_in_ring = false;
+		u32 label_offset = 0;
+		u32 words[8] = {};
+		bool words_valid = false;
+		// TODO(excise): level 1; the words leading up to the failing one, index 0
+		// at GET itself and index 255 sixty-four words earlier. The command whose
+		// argument count ran long has its header in this window, which is what
+		// separates a host mis-count from a guest that wrote a malformed stream.
+		u32 words_before[256] = {};
+		bool words_before_valid = false;
+		// TODO(excise): level 1; the FIFO cache snapshot and the position the host
+		// expected the next command at. The host parses out of the cache copy, so
+		// when the cached bytes differ from the ring at the same offset the host
+		// was reading a stale snapshot; the ring alone cannot show that.
+		u32 cache_addr = 0;
+		u32 cache_size = 0;
+		u32 next_cmd_entry = 0;
+		u32 cache_words[16] = {};
+		bool cache_words_valid[16] = {};
+		dispatch_entry history[dispatch_history_size]{};
+		u32 history_count = 0;
+	};
+
 	struct backend_configuration
 	{
 		bool supports_multidraw;                 // Draw call batching
@@ -134,11 +198,20 @@ namespace rsx
 		virtual bool release_GCM_label(u32 /*type*/, u32 /*address*/, u32 /*value*/) { return false; }
 		virtual void on_semaphore_acquire_wait() {}
 
+		// A semaphore acquire reads guest memory on the CPU, so a release this
+		// backend still has in flight at `address` must complete first.
+		virtual bool sync_label(u32 /*address*/) { return false; }
+
 		// Host part of a sync hint. The core forwards the hint to ZCULL first.
 		virtual void on_sync_hint(FIFO::interrupt_hint /*hint*/, reports::sync_hint_payload_t /*payload*/) {}
 
 		// Backend housekeeping at the start of a local task invocation. Returns false to skip the rest of the task, e.g. when re-entered while the backend is flushing.
 		virtual bool on_local_task(FIFO::state /*state*/) { return true; }
+
+		// Backend housekeeping for the FIFO desync capture. The shared code gathers
+		// the data; a backend that does not care ignores it.
+		// TODO(excise): level 1; the hook goes with the capture.
+		virtual void on_fifo_desync(const fifo_desync_info& /*info*/) {}
 
 		// Backend-specific control requests. Returns false if the request code is not handled.
 		virtual bool on_renderctl(u32 /*request_code*/, void* /*args*/) { return false; }

@@ -692,13 +692,16 @@ namespace rsx
 
 		void stream_tracker::on_call(u32 target, u32 pos)
 		{
-			if (!m_in_call)
-			{
-				u32 current;
+			u32 current;
 
-				m_saved = find(pos, current) ? current : m_current;
-				m_in_call = true;
-			}
+			// Hardware overwrites its single return-address register on every
+			// CALL, so a nested call loses the outer caller's frame for good.
+			// Keep the same model: the newest call owns the saved stream, or
+			// on_return would restore a stream the parser is no longer in and
+			// add() could recycle the stream it actually occupies while the
+			// producer still writes it (L149).
+			m_saved = find(pos, current) ? current : m_current;
+			m_in_call = true;
 
 			u32 index;
 
@@ -1750,15 +1753,13 @@ namespace rsx
 			}
 			if ((cmd & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
 			{
-				if (fifo_ret_addr != RSX_CALL_STACK_EMPTY)
-				{
-					// Only one layer is allowed in the call stack.
-					rsx_log.error("FIFO: CALL found inside a subroutine (last cmd = 0x%x)", get_fifo_cmd());
-					recover_fifo();
-					return;
-				}
-
 				const u32 offs = cmd & RSX_METHOD_CALL_OFFSET_MASK;
+				// Hardware has one return-address register, and every CALL
+				// overwrites it: the outer caller's frame is lost, which is what
+				// the guest's trampoline path relies on (the command chunk it
+				// walks ends with a JUMP, not a RET, so the outer return is
+				// never used). A nested CALL is therefore legal, not a fault
+				// (L149).
 				fifo_ret_addr = fifo_ctrl->get_pos() + 4;
 				fifo_ctrl->diag_jump(offs); // TODO(excise): level 1
 				fifo_ctrl->on_call(offs);

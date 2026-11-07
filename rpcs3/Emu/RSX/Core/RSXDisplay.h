@@ -8,6 +8,8 @@
 template <typename T>
 class named_thread;
 
+enum class thread_state : u32;
+
 namespace rsx
 {
 	enum class surface_antialiasing : u8;

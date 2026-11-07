@@ -11,6 +11,7 @@
 #include "../Program/GLSLCommon.h"
 #include "../Program/SPIRVCommon.h"
 #include "../Program/ShaderInterpreter.h"
+#include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/rsx_methods.h"
 
 #include "Emu/system_config.h"
@@ -626,7 +627,8 @@ namespace mtl
 		// instruction blocks are frame data and live in constants_heap.
 	}
 
-	bool interpreter_cache::build_request(const RSXVertexProgram& vertex,
+	bool interpreter_cache::build_request(const rsx::context& ctx,
+		const RSXVertexProgram& vertex,
 		const RSXFragmentProgram& fragment,
 		const program_hash_util::vertex_program_utils::vertex_program_metadata& vertex_metadata,
 		const program_hash_util::fragment_program_utils::fragment_program_metadata& fragment_metadata,
@@ -678,9 +680,9 @@ namespace mtl
 
 		u64 options = 0;
 
-		if (rsx::method_registers.alpha_test_enabled())
+		if (ctx.register_state->alpha_test_enabled())
 		{
-			switch (rsx::method_registers.alpha_func())
+			switch (ctx.draw_state.fragment_env.alpha_func)
 			{
 			case rsx::comparison_function::always:
 				break;
@@ -715,7 +717,7 @@ namespace mtl
 		if (fragment.ctrl & RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP) options |= COMPILER_OPT_ENABLE_ROP_REMAP;
 		if (fragment_metadata.has_branch_instructions) options |= COMPILER_OPT_ENABLE_FLOW_CTRL;
 		if (fragment_metadata.has_pack_instructions) options |= COMPILER_OPT_ENABLE_PACKING;
-		if (rsx::method_registers.polygon_stipple_enabled()) options |= COMPILER_OPT_ENABLE_STIPPLING;
+		if (ctx.draw_state.stipple.enabled) options |= COMPILER_OPT_ENABLE_STIPPLING;
 		if (vertex.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS) options |= COMPILER_OPT_ENABLE_INSTANCING;
 
 		interpreter_texture_mapping mapping = interpreter_texture_mapping::from_mask(

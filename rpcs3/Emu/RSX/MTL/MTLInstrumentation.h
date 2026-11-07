@@ -31,6 +31,11 @@
  * capture window after that many seconds, and MTL_PROBE_FRAME_COUNT (default 1)
  * is its length in frames.  The window is how a run reaches the draw state of a
  * specific menu, video or race without keeping a bounded prefix of the whole run.
+ * The same count sets how many frames after the key press keep their CPU rings,
+ * so a race scene is dumped as a whole instead of one frame at a time.
+ * MTL_PROBE_AUTO_CAPTURE=0 suppresses the automatic scene detectors, so F12 is
+ * the only trigger; the detectors would otherwise spend the wide window (and the
+ * disk) on the scene change before the press.
  *
  * Two compile switches remove the facility.  MTL_DEBUG_LOGS=0 removes the text
  * family.  MTL_PERF_ENABLED=0 removes the numeric family.  MTL_DIAGNOSTICS=0 forces
@@ -211,9 +216,11 @@ namespace mtl::probe
 
 	// The optional deep-capture trigger.  MTL_PROBE_AT_SEC starts one capture
 	// window after that many seconds, and MTL_PROBE_FRAME_COUNT is how many
-	// consecutive frames the window covers (default one).  An unset or negative
-	// value leaves the window off.  The start is the first probe call, so the
-	// threshold is relative to the backend coming up, not to process creation.
+	// consecutive frames the window covers (default one).  The same count is the
+	// forward half of the ring dump, so a wide window keeps every frame's rings,
+	// not only the six after the press.  An unset or negative value leaves the
+	// window off.  The start is the first probe call, so the threshold is relative
+	// to the backend coming up, not to process creation.
 	inline f64 elapsed_seconds()
 	{
 		static const auto start = std::chrono::steady_clock::now();
@@ -338,6 +345,18 @@ namespace mtl::probe
 		}();
 
 		return cached;
+	}
+
+	// TODO(excise): level 5; the forward half of a ring capture.  The history
+	// before the key press is always written; this is how many frames after it
+	// are kept.  It follows the capture window, so MTL_PROBE_FRAME_COUNT=150
+	// captures a scene rather than one frame, with a floor of the six-frame burst
+	// a single-frame defect needs.  The trigger frame is written as p1, so the
+	// active window that starts on the next frame needs one more.
+	inline u64 dump_frame_count()
+	{
+		const u64 window = capture_frame_count();
+		return window + 1 < 6 ? 6 : window + 1;
 	}
 
 	// TODO(excise): level 5; a patch probe reads back after every draw, and a

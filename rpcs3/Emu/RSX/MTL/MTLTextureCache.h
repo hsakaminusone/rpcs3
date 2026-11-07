@@ -52,6 +52,38 @@ namespace mtl
 
 	texture_extent normalize_texture_extent(MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps);
 
+	// One mip level of a host texture, sized the way a Metal copy call expects:
+	// width/height/depth are texels, row_bytes/rows are the storage extent.  A DXT
+	// level is stored in whole four-by-four blocks, so a level smaller than one
+	// block still occupies one block and a non-multiple-of-four extent rounds up.
+	// The shared layout builder rounds the same way
+	// (TextureUtils.cpp:get_subresources_layout_impl<4>).
+	struct texture_level_extent
+	{
+		u32 width = 1;
+		u32 height = 1;
+		u32 depth = 1;
+		u32 row_bytes = 0;
+		u32 rows = 0;
+	};
+
+	texture_level_extent get_texture_level_extent(MTL::TextureType type, u32 width, u32 height, u32 depth, u32 level, u32 block_size, bool compressed);
+
+	// The sub-rectangle a CPU readback copies out of one texture, and the byte
+	// offset of the same rectangle in the guest-pitch staging buffer.  A guest
+	// offset is byte-addressed; for a compressed format it divides into blocks,
+	// so the texel origin Metal takes is the block origin times the block edge.
+	struct texture_readback_region
+	{
+		u32 x = 0;
+		u32 y = 0;
+		u32 width = 0;
+		u32 height = 0;
+		u32 byte_offset = 0;
+	};
+
+	texture_readback_region get_texture_readback_region(u32 width, u32 height, u32 pitch, u32 block_size, bool compressed, u32 byte_offset, u32 tail);
+
 	class cached_texture_section : public rsx::cached_texture_section<mtl::cached_texture_section, mtl::texture_cache_traits>
 	{
 		using baseclass = rsx::cached_texture_section<mtl::cached_texture_section, mtl::texture_cache_traits>;
@@ -324,7 +356,7 @@ namespace mtl
 		// (VKTextureCache.cpp:1096-1112).  Metal has neither, so the levels that no
 		// upload covers are cleared here.  The clear is a blit of a zeroed buffer
 		// over the level, because Metal 4 has no texture clear.
-		void clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u16 width, u16 height, u16 depth, u8 first_level, u8 level_count) const;
+		void clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count) const;
 
 		void initialize_subresource_from_memory(command_recorder& cmd, texture* dst, const deferred_subresource& desc, rsx::texture_dimension_extended type) const
 		{
@@ -483,14 +515,24 @@ namespace mtl
 				// Vulkan reference discards the image on a type or depth mismatch
 				// (VKTextureCache.cpp:1076-1080); this test is the same idea with
 				// the extent, the format and the mip chain added.
+				// The host allocation is created from the normalised extent, so the
+				// reuse test compares against that extent rather than the raw guest
+				// fields.  A 3-D section keeps its depth, a cube face is square, a
+				// zero field becomes one texel, and the mip chain is capped.  A raw
+				// comparison against the guest mip count rebuilt a legal capped
+				// chain every time, and ignoring depth reused a volume of another
+				// size.
 				const MTL::PixelFormat wanted_format = get_texture_format(gcm_format, m_supports_bc);
+				const MTL::TextureType wanted_type = get_texture_type(type);
+				const texture_extent wanted_extent = normalize_texture_extent(wanted_type, width, height, depth, static_cast<u8>(mipmaps));
 				const bool fits =
 					image &&
 					cached.get_image_type() == type &&
 					image->pixel_format() == wanted_format &&
-					image->width() == width &&
-					image->height() == height &&
-					image->value()->mipmapLevelCount() == mipmaps;
+					image->width() == wanted_extent.width &&
+					image->height() == wanted_extent.height &&
+					static_cast<u32>(image->value()->depth()) == wanted_extent.depth &&
+					image->value()->mipmapLevelCount() == wanted_extent.mipmaps;
 
 				if (!fits)
 				{
@@ -524,7 +566,7 @@ namespace mtl
 					{
 						// TODO(excise): level 2; a reused image that no upload covers.
 						MTL_PROBE_LATCH(2, "texture/reuse cleared");
-						clear_texture(cmd, image, gcm_format, width, height, depth, 0, mipmaps);
+						clear_texture(cmd, image, gcm_format, 0, mipmaps);
 					}
 				}
 			}
@@ -615,7 +657,7 @@ namespace mtl
 			{
 				// TODO(excise): level 2; an upload that leaves a level unwritten.
 				MTL_PROBE_LATCH(2, "texture/upload cleared levels");
-				clear_texture(cmd, section->get_raw_texture(), gcm_format, width, height, depth, 0, mipmaps);
+				clear_texture(cmd, section->get_raw_texture(), gcm_format, 0, mipmaps);
 			}
 
 			upload_texture_data(cmd, section->get_raw_texture(), gcm_format, input_swizzled, subresource_layout);

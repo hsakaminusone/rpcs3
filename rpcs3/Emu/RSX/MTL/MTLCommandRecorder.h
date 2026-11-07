@@ -42,6 +42,8 @@ namespace mtl
 		// slot can still run, because the GPU reads the staged words at execution
 		// time, not at encode time (HLD-04 §4 invariant 2).
 		u32 label_staging_offset = 0;
+		// True when the slot's command buffer has been begun since its last end.
+		bool buffer_open = false;
 		// The addresses whose label writes are in this slot's command buffer (or
 		// its last commit, until that commit reports back).  A guest acquire on one
 		// of them must wait for this slot before it reads the old guest word.

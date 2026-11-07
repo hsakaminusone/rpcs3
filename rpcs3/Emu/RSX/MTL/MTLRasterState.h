@@ -5,8 +5,17 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/gcm_enums.h"
+#include "Utilities/geometry.h"
 
 #include <array>
+
+namespace rsx
+{
+	struct context;
+	struct framebuffer_layout;
+	struct scissor_state;
+	struct surface_scaling_config_t;
+}
 
 namespace mtl
 {
@@ -64,7 +73,7 @@ namespace mtl
 		u16 point_sprite_mask = 0;
 	};
 
-	raster_state capture_raster_state();
+	raster_state capture_raster_state(const rsx::context& ctx);
 
 	// SET_CULL_FACE / SET_CULL_FACE_ENABLE -> MTL::CullMode (LLD-raster §3.3).
 	// Metal has no cull-both mode, so front_and_back culls nothing here and
@@ -100,10 +109,17 @@ namespace mtl
 	// and 2).
 	MTL::Viewport build_viewport(u16 clip_width, u16 clip_height, f64 znear, f64 zfar);
 
+	// Scale the core-resolved guest scissor to attachment pixels.  The origin uses
+	// the unclamped scale and the far edge the clamped one, exactly as Vulkan's
+	// set_scissor does (VKGSRender.cpp:1342-1358).
+	areau scaled_scissor(const rsx::scissor_state& region, const rsx::framebuffer_layout& layout,
+		const rsx::surface_scaling_config_t& scaling);
+
 	// The MTLScissorRect from the resolved region (LLD-raster §3.1).  The region
-	// comes from rsx::thread::get_scissor, which owns the viewport-rect intersection,
-	// the window clamp and the invalid case.  It is in guest window coordinates, so
-	// the viewport flip moves it to the mirrored target row.
+	// comes from the core's graph_engine::resolve_scissor, which owns the
+	// viewport-rect intersection, the window clamp and the invalid case.  It is in
+	// guest window coordinates, so the viewport flip moves it to the mirrored target
+	// row.
 	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u16 clip_height);
 }
 

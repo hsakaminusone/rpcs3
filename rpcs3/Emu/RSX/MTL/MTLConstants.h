@@ -406,8 +406,15 @@ namespace mtl
 		u32 hash_xform = 0;
 		u32 hash_fragment_constants = 0;
 		u32 hash_sampler = 0;
+		// The Metal objects the argument table held at encode time.  A recorded
+		// guest address says what the guest asked for; these say what the GPU was
+		// actually handed.  Two draws with identical guest state and identical
+		// hashes can still bind different images, so this is the one field that
+		// separates a binding fault from a read hazard.
+		u64 texture_id[16] = {};
+		u64 sampler_id[16] = {};
 	};
-	static_assert(sizeof(draw_record) == 1200, "the capture analysis decodes this layout by offset");
+	static_assert(sizeof(draw_record) == 1456, "the capture analysis decodes this layout by offset");
 
 	// TODO(excise): level 5; one frame's CPU rings, copied out while the frame is
 	// still current.  A frame's rings are reset at the next begin_frame, and the
@@ -627,6 +634,7 @@ namespace mtl
 		std::array<frame_snapshot, history_depth> m_history;
 		u32 m_history_pos = 0;
 		u32 m_dump_burst = 0;
+		u32 m_dump_total = 0;
 		u32 m_dump_index = 0;
 	};
 }

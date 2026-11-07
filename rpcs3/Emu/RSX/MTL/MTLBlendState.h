@@ -6,7 +6,10 @@
 
 #include "Emu/RSX/gcm_enums.h"
 
-#include <array>
+namespace rsx
+{
+	struct context;
+}
 
 namespace mtl
 {
@@ -43,12 +46,9 @@ namespace mtl
 		bool blend_enabled(u32 index) const;
 	};
 
-	blend_state capture_blend_state();
-
-	// The constant blend colour, encoder dynamic state (LLD-blend §3.4).  It reads
-	// SET_BLEND_COLOR and SET_BLEND_COLOR2 through the shared helper, which selects
-	// the 8-bit or the fp16 path from the surface format (rsx_utils.cpp:82-103).
-	std::array<f32, 4> capture_blend_color();
+	// Reads the decoded blend cluster; the alpha-test enable, alpha reference and
+	// shade mode are raw because the core does not decode them.
+	blend_state capture_blend_state(const rsx::context& ctx);
 
 	// SET_BLEND_FUNC_SFACTOR / SET_BLEND_FUNC_DFACTOR -> MTL::BlendFactor
 	// (LLD-blend §3.2).  All fifteen RSX factors map directly.
