@@ -24,22 +24,6 @@ namespace mtl
 	// get_compatible_surface_format; color_utils.hpp:300).
 	std::array<MTL::TextureSwizzle, 4> get_surface_component_layout(rsx::surface_color_format format);
 
-	// The colour a clear loads for this surface format, and the channels it writes.
-	// The clear registers hold an A8R8G8B8 word that the hardware copies into the
-	// surface, so a packed or reordered format needs a transform before the value
-	// reaches Metal (VKGSRender.cpp:1526-1578; GLGSRender.cpp:742-791).
-	struct resolved_clear
-	{
-		MTL::ClearColor color{};
-		// The effective RSX_GCM_CLEAR_* colour bits, or zero for a NOP.
-		u32 mask = 0;
-		// True when a single MTLLoadActionClear expresses every channel the format
-		// stores.  A false value needs the masked fill.
-		bool fast = false;
-	};
-
-	resolved_clear resolve_surface_clear(rsx::surface_color_format format, u8 r, u8 g, u8 b, u8 a, u32 mask);
-
 	// The Metal write mask of the RSX_GCM_CLEAR_* colour bits.
 	MTL::ColorWriteMask to_color_write_mask(u32 clear_mask);
 

@@ -10,6 +10,13 @@
 #include "Emu/RSX/MTL/MTLRasterState.h"
 #include "Emu/RSX/MTL/MTLSamplerState.h"
 #include "Emu/RSX/MTL/MTLTextureCache.h"
+#include "Emu/RSX/MTL/MTLDrawState.h"
+#include "Emu/RSX/MTL/MTLEncoderState.h"
+#include "Emu/RSX/MTL/MTLZCULL.h"
+#include "Emu/RSX/Core/RSXContext.h"
+#include "Emu/RSX/Core/RSXRendererFactory.h"
+#include "Emu/RSX/Core/RSXVertexTypes.h"
+#include "Emu/RSX/MTL/MTLGSRender.h"
 
 // The Metal 4 backend state contract, GPU-free.
 //
@@ -34,21 +41,10 @@
 #include <limits>
 #include <string>
 #include <tuple>
+#include <type_traits>
 
 namespace
 {
-	// The emulator's own power-on register state (rsx_methods.cpp:797).  A zeroed
-	// file is not legal, because a getter that maps a word to a GCM enum verifies.
-	void reset_registers()
-	{
-		rsx::method_registers.reset();
-	}
-
-	void set_register(u32 index, u32 value)
-	{
-		rsx::method_registers.registers[index] = value;
-	}
-
 	// The seven surface-access classes (TextureUtils.h:49-66).
 	constexpr u32 access_domain[] = {
 		rsx::surface_access::shader_read,
@@ -264,15 +260,15 @@ TEST(MTLPassSchedulerLifetime, SplitIsNeverRequestedWithoutAnEncoder)
 				EXPECT_FALSE(scheduler.split_requested());
 
 				scheduler.begin_pass();
-				scheduler.note_write(MTL::ResourceID{ static_cast<u64>(resource) }, write_stages);
-				scheduler.note_read(MTL::ResourceID{ static_cast<u64>(resource) }, read_stages);
+				scheduler.note_write(MTL::ResourceID{ static_cast<u64>(resource) }, {}, write_stages);
+				scheduler.note_read(MTL::ResourceID{ static_cast<u64>(resource) }, {}, read_stages);
 				EXPECT_FALSE(scheduler.split_requested());
 
 				// The reverse order and a second pass; a same-pass read/write pair
 				// is the TBDR feedback case that would split on a real encoder.
 				scheduler.begin_pass();
-				scheduler.note_read(MTL::ResourceID{ static_cast<u64>(resource) }, read_stages);
-				scheduler.note_write(MTL::ResourceID{ static_cast<u64>(resource) }, write_stages);
+				scheduler.note_read(MTL::ResourceID{ static_cast<u64>(resource) }, {}, read_stages);
+				scheduler.note_write(MTL::ResourceID{ static_cast<u64>(resource) }, {}, write_stages);
 				scheduler.flush(nullptr);
 
 				EXPECT_FALSE(scheduler.split_requested());
@@ -290,8 +286,8 @@ TEST(MTLPassSchedulerLifetime, FrameBoundaryRetiresEveryRecord)
 	scheduler.begin_frame();
 	for (u32 i = 0; i < 256; ++i)
 	{
-		scheduler.note_write(MTL::ResourceID{ i }, MTL::StageVertex);
-		scheduler.note_read(MTL::ResourceID{ i }, MTL::StageFragment);
+		scheduler.note_write(MTL::ResourceID{ i }, {}, MTL::StageVertex);
+		scheduler.note_read(MTL::ResourceID{ i }, {}, MTL::StageFragment);
 	}
 
 	scheduler.begin_frame();
@@ -315,6 +311,138 @@ TEST(MTLPassSchedulerLifetime, EmptyFlushIsSilent)
 	scheduler.begin_pass();
 	scheduler.flush(nullptr);
 	EXPECT_FALSE(scheduler.split_requested());
+}
+
+// =============================================================================
+// 4b. Guest-range hazard identity (MTLPassScheduler.h:19-42;
+//     MTLPassScheduler.cpp:88-218)
+//
+// RSX aliases arbitrary guest memory: a render target and the texture that
+// samples the same bytes are two MTLTextures with two different
+// gpuResourceIDs.  A record keyed by the Metal object alone misses the edge, so
+// the scheduler keys by the guest range as well and these tests pin both the
+// alias edge and the precision that keeps it from becoming a global barrier.
+// =============================================================================
+
+TEST(MTLPassSchedulerAliasing, DistinctObjectsOverOneRangeFormARawEdge)
+{
+	// The 0x50110000 case: a 1280x720 surface is written, then a separately cached
+	// 512x512 texture at the same base is sampled.  The two resource ids differ.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 0x40 },
+		utils::address_range32::start_length(0x50110000, 0x600000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 0x19e },
+		utils::address_range32::start_length(0x50110000, 0x100000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 1u);
+}
+
+TEST(MTLPassSchedulerAliasing, ARangeInsideAnotherRangeAliasesIt)
+{
+	// The sampler footprint does not have to start at the surface base; the read
+	// only has to touch one written byte.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 1 },
+		utils::address_range32::start_length(0x50110000, 0x600000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 2 },
+		utils::address_range32::start_length(0x50300000, 0x100000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 1u);
+}
+
+TEST(MTLPassSchedulerAliasing, AdjacentRangesDoNotAlias)
+{
+	// address_range is inclusive: [0x50110000, 0x50110fff] and
+	// [0x50111000, 0x50111fff] are side by side, not overlapping.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 1 },
+		utils::address_range32::start_length(0x50110000, 0x1000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 2 },
+		utils::address_range32::start_length(0x50111000, 0x1000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 0u);
+}
+
+TEST(MTLPassSchedulerAliasing, SameObjectMatchesWithoutARange)
+{
+	// A temporary image has no guest bytes, so its record can only match by id.
+	// That is the old behavior and it must survive the range path.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 7 }, {}, MTL::StageTile);
+
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 7 },
+		utils::address_range32::start_length(0x100000, 0x1000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 1u);
+}
+
+TEST(MTLPassSchedulerAliasing, WriteAfterReadOverOneRangeFormsAWAREdge)
+{
+	// The reverse pair: a sampled texture aliases memory that becomes a render
+	// target later in the frame.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 0x19e },
+		utils::address_range32::start_length(0x50110000, 0x100000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 0x40 },
+		utils::address_range32::start_length(0x50110000, 0x600000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 1u);
+}
+
+TEST(MTLPassSchedulerAliasing, BlockCandidatesStillNeedAnExactOverlap)
+{
+	// Both ranges live in the same 64 KiB read-index block, so the write finds the
+	// read as a candidate.  The exact range test must reject it: a block is a
+	// filter, never an edge.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 0x19e },
+		utils::address_range32::start_length(0x50110000, 0x1000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 0x40 },
+		utils::address_range32::start_length(0x50112000, 0x1000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 0u);
+}
+
+TEST(MTLPassSchedulerAliasing, AnEdgeIsConsumedOnce)
+{
+	// Two reads behind the same write need one edge, because the first edge
+	// already makes the write visible to every later access.
+	mtl::pass_scheduler scheduler;
+	scheduler.begin_frame();
+	scheduler.begin_pass();
+	scheduler.note_write(MTL::ResourceID{ 1 },
+		utils::address_range32::start_length(0x50110000, 0x600000), MTL::StageFragment);
+
+	scheduler.begin_pass();
+	scheduler.note_read(MTL::ResourceID{ 2 },
+		utils::address_range32::start_length(0x50110000, 0x100000), MTL::StageFragment);
+	scheduler.note_read(MTL::ResourceID{ 3 },
+		utils::address_range32::start_length(0x50120000, 0x100000), MTL::StageFragment);
+
+	EXPECT_EQ(scheduler.queued_edges(), 1u);
 }
 
 TEST(MTLPassSchedulerLifetime, CyclicReferenceQueuesOneTextureBarrier)
@@ -741,15 +869,18 @@ TEST(MTLDepthBounds, DisabledRangeIsOpen)
 	EXPECT_FLOAT_EQ(defaults.min, 0.0f);
 	EXPECT_FLOAT_EQ(defaults.max, 1.0f);
 
-	// The power-on state has the bounds test disabled (rsx_methods.cpp:353), so the
-	// capture must collapse to [0,1] under both emulation settings.
-	reset_registers();
+	// The disabled bounds are an open range.  The decoded min/max are stale in
+	// that state and the capture must not read them.
+	rsx::depth_stencil_state decoded;
+	decoded.depth_bounds_test_enabled = false;
+	decoded.depth_bounds_min = 0.9f;
+	decoded.depth_bounds_max = 0.1f;
 
-	const mtl::depth_bounds plain = mtl::capture_depth_bounds(false);
+	const mtl::depth_bounds plain = mtl::capture_depth_bounds(decoded, false);
 	EXPECT_FLOAT_EQ(plain.min, 0.0f);
 	EXPECT_FLOAT_EQ(plain.max, 1.0f);
 
-	const mtl::depth_bounds emulated = mtl::capture_depth_bounds(true);
+	const mtl::depth_bounds emulated = mtl::capture_depth_bounds(decoded, true);
 	EXPECT_FLOAT_EQ(emulated.min, 0.0f);
 	EXPECT_FLOAT_EQ(emulated.max, 1.0f);
 }
@@ -828,20 +959,28 @@ TEST(MTLDepthBounds, EmulatedDepthIsMonotonic)
 
 TEST(MTLDepthBounds, CaptureAppliesTheClampAndTheEncoding)
 {
-	reset_registers();
-	set_register(NV4097_SET_DEPTH_BOUNDS_TEST_ENABLE, 1);
-	set_register(NV4097_SET_DEPTH_BOUNDS_MIN, std::bit_cast<u32>(0.25f));
-	set_register(NV4097_SET_DEPTH_BOUNDS_MAX, std::bit_cast<u32>(0.75f));
+	// The core saturated the bounds into the bound depth format's range before
+	// the backend sees them; the backend clamps to Metal's [0,1] and, when the
+	// shader emulates the depth range, halves the bit pattern.
+	rsx::depth_stencil_state decoded;
+	decoded.depth_bounds_test_enabled = true;
+	decoded.depth_bounds_min = 0.25f;
+	decoded.depth_bounds_max = 0.75f;
 
-	const auto format = rsx::method_registers.surface_depth_fmt();
+	const mtl::depth_bounds plain = mtl::capture_depth_bounds(decoded, false);
+	EXPECT_FLOAT_EQ(plain.min, 0.25f);
+	EXPECT_FLOAT_EQ(plain.max, 0.75f);
 
-	const mtl::depth_bounds plain = mtl::capture_depth_bounds(false);
-	EXPECT_FLOAT_EQ(plain.min, std::clamp(rsx::clamp_depth_bounds_value(format, 0.25f), 0.0f, 1.0f));
-	EXPECT_FLOAT_EQ(plain.max, std::clamp(rsx::clamp_depth_bounds_value(format, 0.75f), 0.0f, 1.0f));
+	const mtl::depth_bounds emulated = mtl::capture_depth_bounds(decoded, true);
+	EXPECT_FLOAT_EQ(emulated.min, rsx::encode_emulated_depth(0.25f));
+	EXPECT_FLOAT_EQ(emulated.max, rsx::encode_emulated_depth(0.75f));
 
-	const mtl::depth_bounds emulated = mtl::capture_depth_bounds(true);
-	EXPECT_FLOAT_EQ(emulated.min, std::clamp(rsx::encode_emulated_depth(rsx::clamp_depth_bounds_value(format, 0.25f)), 0.0f, 1.0f));
-	EXPECT_FLOAT_EQ(emulated.max, std::clamp(rsx::encode_emulated_depth(rsx::clamp_depth_bounds_value(format, 0.75f)), 0.0f, 1.0f));
+	// Values outside the Metal range still clamp before reaching the encoder.
+	decoded.depth_bounds_min = -0.5f;
+	decoded.depth_bounds_max = 1.5f;
+	const mtl::depth_bounds clamped = mtl::capture_depth_bounds(decoded, false);
+	EXPECT_FLOAT_EQ(clamped.min, 0.0f);
+	EXPECT_FLOAT_EQ(clamped.max, 1.0f);
 }
 
 // =============================================================================
@@ -2088,81 +2227,13 @@ TEST(MTLFormatsSurfaceLayout, PackedFormatsKeepTheGuestOrder)
 }
 
 // =============================================================================
-// Format-aware clear colour and write mask
-//      (MTLFormats.cpp resolve_surface_clear; DEVIATIONS-SURFACE.md S3, S4)
+// The clear write mask
 // =============================================================================
 
-TEST(MTLFormatsClear, FloatSurfacesTakeNoColourClear)
-{
-	// A float surface has no hardware colour clear, so Vulkan and OpenGL drop the
-	// colour aspect (VKGSRender.cpp:1528-1535).
-	for (const rsx::surface_color_format format : {
-		rsx::surface_color_format::x32,
-		rsx::surface_color_format::w16z16y16x16,
-		rsx::surface_color_format::w32z32y32x32 })
-	{
-		const mtl::resolved_clear clear = mtl::resolve_surface_clear(format, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-
-		SCOPED_TRACE(static_cast<u32>(format));
-		EXPECT_EQ(clear.mask, 0u);
-		EXPECT_FALSE(clear.fast);
-	}
-}
-
-TEST(MTLFormatsClear, TheClearWordFollowsTheSurfaceStorage)
-{
-	// The clear registers are one A8R8G8B8 word, so a reordered format swaps the
-	// bytes before the value reaches Metal.  A packed format renormalises them.
-	{
-		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_RED_BIT));
-		EXPECT_TRUE(clear.fast);
-		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
-		EXPECT_FLOAT_EQ(clear.color.blue, 0x11 / 255.0);
-	}
-
-	{
-		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::g8b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RG_MASK));
-		EXPECT_TRUE(clear.fast);
-		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
-	}
-
-	{
-		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::a8b8g8r8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RGBA_MASK));
-		EXPECT_TRUE(clear.fast);
-		EXPECT_FLOAT_EQ(clear.color.red, 0x33 / 255.0);
-		EXPECT_FLOAT_EQ(clear.color.blue, 0x11 / 255.0);
-	}
-
-	{
-		// B5G6R5: the 16-bit guest word is the two middle bytes of the clear colour.
-		const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::r5g6b5, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-		const u16 raw = 0x2233;
-		EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_COLOR_RGBA_MASK));
-		EXPECT_TRUE(clear.fast);
-		EXPECT_FLOAT_EQ(clear.color.red, rsx::renormalize_color8(raw >> 11, 0x1f) / 255.0);
-		EXPECT_FLOAT_EQ(clear.color.green, rsx::renormalize_color8(raw >> 5, 0x3f) / 255.0);
-		EXPECT_FLOAT_EQ(clear.color.blue, rsx::renormalize_color8(raw, 0x1f) / 255.0);
-	}
-}
-
-TEST(MTLFormatsClear, AChannelTheFormatDoesNotStoreIsNoOp)
-{
-	// b8 stores the blue byte alone, so a red-only clear writes nothing.
-	const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_RED_BIT);
-	EXPECT_EQ(clear.mask, 0u);
-	EXPECT_FALSE(clear.fast);
-}
-
-TEST(MTLFormatsClear, APartialMaskIsNotAFastClear)
-{
-	const mtl::resolved_clear clear = mtl::resolve_surface_clear(rsx::surface_color_format::a8r8g8b8, 0x11, 0x22, 0x33, 0x44, RSX_GCM_CLEAR_RED_BIT);
-	EXPECT_EQ(clear.mask, static_cast<u32>(RSX_GCM_CLEAR_RED_BIT));
-	EXPECT_FALSE(clear.fast);
-}
-
+// The format-aware clear colour and the RSX clear-mask remap used to live here
+// as `mtl::resolve_surface_clear`.  The port deleted it because the core's
+// `decode_clear_state` already produces the same `clear_state` for every
+// backend; MTL now only translates the decoded mask, which is what remains.
 TEST(MTLFormatsClear, TheRSXMaskMapsToTheMetalWriteMask)
 {
 	EXPECT_EQ(mtl::to_color_write_mask(0), MTL::ColorWriteMaskNone);
@@ -2260,6 +2331,87 @@ TEST(MTLTextureExtent, OnlyAVolumeKeepsADepth)
 	EXPECT_EQ(volume.mipmaps, 4);
 }
 
+TEST(MTLTextureLevelExtent, ACompressedLevelIsWholeBlocksAndNeverVanishes)
+{
+	// C1: a six-texel level holds two blocks in x, and every level below one block
+	// still occupies one block.  The old sizing floored both counts to zero and
+	// skipped the level, leaving it undefined in a private texture.
+	const mtl::texture_level_extent level0 = mtl::get_texture_level_extent(MTL::TextureType2D, 6, 6, 1, 0, 8, true);
+	EXPECT_EQ(level0.width, 6u);
+	EXPECT_EQ(level0.height, 6u);
+	EXPECT_EQ(level0.row_bytes, 16u);
+	EXPECT_EQ(level0.rows, 2u);
+
+	const mtl::texture_level_extent level1 = mtl::get_texture_level_extent(MTL::TextureType2D, 6, 6, 1, 1, 8, true);
+	EXPECT_EQ(level1.width, 3u);
+	EXPECT_EQ(level1.height, 3u);
+	EXPECT_EQ(level1.row_bytes, 8u);
+	EXPECT_EQ(level1.rows, 1u);
+
+	const mtl::texture_level_extent level2 = mtl::get_texture_level_extent(MTL::TextureType2D, 6, 6, 1, 2, 8, true);
+	EXPECT_EQ(level2.width, 1u);
+	EXPECT_EQ(level2.height, 1u);
+	EXPECT_EQ(level2.row_bytes, 8u);
+	EXPECT_EQ(level2.rows, 1u);
+}
+
+TEST(MTLTextureLevelExtent, AVolumeLevelShrinksInDepth)
+{
+	// C1: a 3-D mip halves in depth.  The clear path used the base depth for every
+	// level, so the copy's last slices overran the level.
+	const mtl::texture_level_extent level0 = mtl::get_texture_level_extent(MTL::TextureType3D, 8, 4, 4, 0, 4, false);
+	EXPECT_EQ(level0.width, 8u);
+	EXPECT_EQ(level0.height, 4u);
+	EXPECT_EQ(level0.depth, 4u);
+	EXPECT_EQ(level0.row_bytes, 32u);
+	EXPECT_EQ(level0.rows, 4u);
+
+	const mtl::texture_level_extent level1 = mtl::get_texture_level_extent(MTL::TextureType3D, 8, 4, 4, 1, 4, false);
+	EXPECT_EQ(level1.width, 4u);
+	EXPECT_EQ(level1.height, 2u);
+	EXPECT_EQ(level1.depth, 2u);
+
+	const mtl::texture_level_extent level2 = mtl::get_texture_level_extent(MTL::TextureType3D, 8, 4, 4, 2, 4, false);
+	EXPECT_EQ(level2.width, 2u);
+	EXPECT_EQ(level2.height, 1u);
+	EXPECT_EQ(level2.depth, 1u);
+}
+
+TEST(MTLTextureReadbackRegion, ACompressedOffsetUsesTheBlockOrigin)
+{
+	// C2: a guest byte offset divides into a block row and a block index.  Metal's
+	// origin is a texel, so both scale by four; the staging offset stays the raw
+	// guest byte offset.
+	const mtl::texture_readback_region region = mtl::get_texture_readback_region(64, 32, 128, 8, true, 136, 0);
+	EXPECT_EQ(region.x, 4u);
+	EXPECT_EQ(region.y, 4u);
+	EXPECT_EQ(region.width, 60u);
+	EXPECT_EQ(region.height, 28u);
+	EXPECT_EQ(region.byte_offset, 136u);
+}
+
+TEST(MTLTextureReadbackRegion, AnUncompressedOffsetUsesTheTexelOrigin)
+{
+	const mtl::texture_readback_region region = mtl::get_texture_readback_region(64, 32, 256, 4, false, 260, 0);
+	EXPECT_EQ(region.x, 1u);
+	EXPECT_EQ(region.y, 1u);
+	EXPECT_EQ(region.width, 63u);
+	EXPECT_EQ(region.height, 31u);
+	EXPECT_EQ(region.byte_offset, 260u);
+}
+
+TEST(MTLTextureReadbackRegion, TheTailRoundsToWholeBlockRows)
+{
+	const mtl::texture_readback_region compressed = mtl::get_texture_readback_region(64, 32, 128, 8, true, 0, 256);
+	EXPECT_EQ(compressed.x, 0u);
+	EXPECT_EQ(compressed.y, 0u);
+	EXPECT_EQ(compressed.width, 64u);
+	EXPECT_EQ(compressed.height, 24u);
+
+	const mtl::texture_readback_region uncompressed = mtl::get_texture_readback_region(64, 32, 256, 4, false, 0, 512);
+	EXPECT_EQ(uncompressed.height, 30u);
+}
+
 TEST(MTLPipelineJobs, EqualKeysShareOneJobAndFailedKeysStayFailed)
 {
 	mtl::pipeline_jobs jobs;
@@ -2295,6 +2447,356 @@ TEST(MTLPipelineJobs, EqualKeysShareOneJobAndFailedKeysStayFailed)
 	EXPECT_TRUE(jobs.permanently_failed(vertex.id, fragment.id, other));
 	EXPECT_TRUE(jobs.permanently_failed(second_vertex.id, fragment.id, properties));
 	EXPECT_TRUE(jobs.shutdown());
+}
+
+// =============================================================================
+// The port contract
+// =============================================================================
+//
+// The backend consumes the core's decoded state.  A field the core decodes must
+// come from draw_state/fb/program even when the register file disagrees; only
+// the fields the core does not decode may be read from register_state.  These
+// tests pin that split, so a future capture_* change cannot silently start
+// re-decoding a register the core already owns.
+
+namespace
+{
+	// The decoded state and the register file can be made to disagree on purpose.
+	struct contract_context
+	{
+		rsx::context ctx{0, nullptr};
+
+		contract_context()
+		{
+			ctx.register_state->init();
+			ctx.draw_state = {};
+			ctx.fb = {};
+		}
+	};
+}
+
+TEST(MTLContract, TheMetalClassIsARenderBackend)
+{
+	// The port replaced the GSRender/thread spine with the shared backend
+	// interface.  These are compile-time facts: a regression is a build failure,
+	// not a runtime surprise.
+	static_assert(std::is_base_of_v<rsx::render_backend, mtl::MTLGSRender>);
+	static_assert(std::is_final_v<mtl::MTLGSRender>);
+	static_assert(std::is_base_of_v<rsx::reports::occlusion_query_provider, mtl::zcull>);
+
+	// The factory only advertises Metal when the backend is part of the build.
+	EXPECT_EQ(rsx::resolve_render_backend_type(video_renderer::metal), video_renderer::metal);
+}
+
+TEST(MTLContract, MarkAllDirtyCoversEveryConsumerMask)
+{
+	rsx::context ctx{0, nullptr};
+
+	// The constructor already marked everything, so start from a clean slate and
+	// prove the call, not the constructor.
+	ctx.draw_state.dirty.clear();
+	ctx.draw_state.pending.clear();
+	ctx.graphics_state.clear();
+	ctx.textures.fragment_textures_dirty = 0;
+	ctx.textures.vertex_textures_dirty = 0;
+
+	ctx.mark_all_dirty();
+
+	EXPECT_TRUE(ctx.draw_state.dirty.test(rsx::draw_state_t::group::all));
+	EXPECT_TRUE(ctx.draw_state.pending.test(rsx::draw_state_t::group::all));
+	EXPECT_TRUE(ctx.graphics_state.test(rsx::pipeline_state::all_dirty));
+	EXPECT_EQ(ctx.textures.fragment_textures_dirty, (1u << rsx::limits::fragment_textures_count) - 1);
+	EXPECT_EQ(ctx.textures.vertex_textures_dirty, (1u << rsx::limits::vertex_textures_count) - 1);
+}
+
+TEST(MTLContract, RasterStateFollowsDecodedFieldsNotRegisters)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	// Raw registers say the opposite of the decoded state for every field the
+	// core owns.
+	ctx.register_state->registers[NV4097_SET_CULL_FACE_ENABLE] = 1;
+	ctx.register_state->registers[NV4097_SET_CULL_FACE] = static_cast<u32>(rsx::cull_face::back);
+	ctx.register_state->registers[NV4097_SET_FRONT_FACE] = static_cast<u32>(rsx::front_face::cw);
+	ctx.register_state->registers[NV4097_SET_LINE_SMOOTH_ENABLE] = 1;
+	ctx.register_state->registers[NV4097_SET_LINE_WIDTH] = 64;
+	ctx.register_state->registers[NV4097_SET_CLIP_MIN] = std::bit_cast<u32>(0.1f);
+	ctx.register_state->registers[NV4097_SET_CLIP_MAX] = std::bit_cast<u32>(0.2f);
+
+	ctx.draw_state.raster.cull_face_enabled = false;
+	ctx.draw_state.raster.cull_face_mode = rsx::cull_face::front;
+	ctx.draw_state.raster.front_face_mode = rsx::front_face::ccw;
+	ctx.draw_state.raster.line_smooth_enabled = false;
+	ctx.draw_state.raster.line_width = 3.0f;
+	ctx.draw_state.viewport.z_clip_min = 0.25f;
+	ctx.draw_state.viewport.z_clip_max = 0.75f;
+
+	// The two fields the core does not decode keep coming from the register file.
+	ctx.register_state->registers[NV4097_SET_POINT_SIZE] = std::bit_cast<u32>(9.0f);
+	ctx.register_state->registers[NV4097_SET_USER_CLIP_PLANE_CONTROL] = 0x33;
+
+	const mtl::raster_state state = mtl::capture_raster_state(ctx);
+
+	EXPECT_FALSE(state.cull_enabled);
+	EXPECT_EQ(state.cull_face, rsx::cull_face::front);
+	EXPECT_EQ(state.front_face, rsx::front_face::ccw);
+	EXPECT_FALSE(state.line_smooth);
+	EXPECT_FLOAT_EQ(state.line_width, 3.0f);
+	EXPECT_FLOAT_EQ(state.point_size, 9.0f);
+	EXPECT_EQ(state.user_clip_control, 0x33u);
+
+	f64 znear = 0.0;
+	f64 zfar = 0.0;
+	ASSERT_TRUE(mtl::capture_clip_range(state, znear, zfar));
+	EXPECT_DOUBLE_EQ(znear, 0.25);
+	EXPECT_DOUBLE_EQ(zfar, 0.75);
+}
+
+TEST(MTLContract, StipplePatternFollowsDecodedStateNotRegisters)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	// A conflicting register pattern must never be read: the core copies the
+	// pattern into the decoded group and the backend latches that copy.
+	ctx.register_state->registers[NV4097_SET_POLYGON_STIPPLE_PATTERN] = 0xdead'beef;
+	ctx.draw_state.stipple.enabled = true;
+	ctx.draw_state.stipple.pattern[0] = 0x0000'0001;
+	ctx.draw_state.stipple.pattern[31] = 0xffff'0000;
+
+	const mtl::raster_state enabled = mtl::capture_raster_state(ctx);
+	EXPECT_TRUE(enabled.stipple_enabled);
+	EXPECT_EQ(enabled.stipple_pattern[0], 0x0000'0001u);
+	EXPECT_EQ(enabled.stipple_pattern[31], 0xffff'0000u);
+
+	// Disabled means the pattern is stale and must not be copied at all.
+	ctx.draw_state.stipple.enabled = false;
+	const mtl::raster_state disabled = mtl::capture_raster_state(ctx);
+	EXPECT_FALSE(disabled.stipple_enabled);
+	EXPECT_EQ(disabled.stipple_pattern[0], 0u);
+	EXPECT_EQ(disabled.stipple_pattern[31], 0u);
+}
+
+TEST(MTLContract, BlendStateFollowsDecodedFieldsNotRegisters)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	ctx.register_state->registers[NV4097_SET_BLEND_ENABLE] = 0;
+	ctx.register_state->registers[NV4097_SET_BLEND_FUNC_SFACTOR] = static_cast<u32>(rsx::blend_factor::zero);
+	ctx.register_state->registers[NV4097_SET_BLEND_FUNC_DFACTOR] = static_cast<u32>(rsx::blend_factor::one);
+	ctx.register_state->registers[NV4097_SET_ALPHA_FUNC] = static_cast<u32>(rsx::comparison_function::never);
+
+	ctx.draw_state.blend.enable_mask = 0b01;
+	ctx.draw_state.blend.sfactor_rgb = rsx::blend_factor::src_alpha;
+	ctx.draw_state.blend.sfactor_a = rsx::blend_factor::src_alpha;
+	ctx.draw_state.blend.dfactor_rgb = rsx::blend_factor::one_minus_src_alpha;
+	ctx.draw_state.blend.dfactor_a = rsx::blend_factor::one_minus_src_alpha;
+	ctx.draw_state.blend.equation_rgb = rsx::blend_equation::reverse_subtract;
+	ctx.draw_state.blend.equation_a = rsx::blend_equation::reverse_subtract;
+
+	// The logic operation is only live while the logic op is enabled; a stale
+	// decoded value must not leak out otherwise.
+	ctx.draw_state.blend.logic_op_enabled = false;
+	ctx.draw_state.blend.logic_operation = rsx::logic_op::logic_xor;
+
+	// The alpha function is decoded; the enable and the reference are raw.
+	ctx.draw_state.fragment_env.alpha_func = rsx::comparison_function::greater;
+	ctx.register_state->registers[NV4097_SET_ALPHA_TEST_ENABLE] = 1;
+	ctx.register_state->registers[NV4097_SET_ALPHA_REF] = 0x80;
+
+	const mtl::blend_state state = mtl::capture_blend_state(ctx);
+
+	EXPECT_EQ(state.enable_mask, 0b01u);
+	EXPECT_EQ(state.source_rgb, rsx::blend_factor::src_alpha);
+	EXPECT_EQ(state.destination_rgb, rsx::blend_factor::one_minus_src_alpha);
+	EXPECT_EQ(state.equation_rgb, rsx::blend_equation::reverse_subtract);
+	EXPECT_EQ(state.equation_a, rsx::blend_equation::reverse_subtract);
+	EXPECT_FALSE(state.logic_op_enabled);
+	EXPECT_TRUE(state.alpha_test_enabled);
+	EXPECT_EQ(state.alpha_func, rsx::comparison_function::greater);
+	EXPECT_FLOAT_EQ(state.alpha_ref, 128.0f / 255.0f);
+
+	ctx.draw_state.blend.logic_op_enabled = true;
+	EXPECT_EQ(mtl::capture_blend_state(ctx).logic_operation, rsx::logic_op::logic_xor);
+}
+
+TEST(MTLContract, DrawStateKeepsRawOnlyInputs)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	// The vertex bases and the index array are rewritten between subdraws, so
+	// they stay raw inputs even though the rest of the group is decoded.
+	ctx.register_state->registers[NV4097_SET_VERTEX_DATA_BASE_OFFSET] = 0x1234'0000;
+	ctx.register_state->registers[NV4097_SET_VERTEX_DATA_BASE_INDEX] = 0x0001'0000;
+	ctx.register_state->registers[NV4097_SET_INDEX_ARRAY_ADDRESS] = 0x00ab'cdef;
+	ctx.register_state->registers[NV4097_SET_INDEX_ARRAY_DMA] = 3;
+
+	// The type and the restart are decoded; conflicting register values must lose.
+	ctx.register_state->registers[NV4097_SET_RESTART_INDEX] = 0xffff'ffff;
+	ctx.register_state->registers[NV4097_SET_RESTART_INDEX_ENABLE] = 0;
+	ctx.draw_state.input_assembly.index_type = rsx::index_array_type::u32;
+	ctx.draw_state.input_assembly.restart_index_enabled = true;
+	ctx.draw_state.input_assembly.restart_index = 0x0000'1234;
+
+	const mtl::draw_state state = mtl::capture_draw_state(ctx);
+
+	EXPECT_EQ(state.base_offset, 0x1234'0000u);
+	EXPECT_EQ(state.base_index, 0x0001'0000u);
+	EXPECT_EQ(state.index_address, 0x00ab'cdefu);
+	EXPECT_EQ(state.index_location, 3u);
+	EXPECT_EQ(state.index_type, rsx::index_array_type::u32);
+	EXPECT_TRUE(state.restart_enabled);
+	EXPECT_EQ(state.restart_index, 0x0000'1234u);
+}
+
+TEST(MTLContract, SurfaceStateFollowsDecodedLayoutNotRegisters)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	// Conflicting surface registers: the backend must read the resolved layout.
+	ctx.register_state->registers[NV4097_SET_SURFACE_COLOR_AOFFSET] = 0xdead'0000;
+	ctx.register_state->registers[NV4097_SET_SURFACE_PITCH_A] = 0xffff;
+
+	ctx.fb.layout.width = 640;
+	ctx.fb.layout.height = 480;
+	ctx.fb.layout.color_addresses = { 0x1111'0000, 0x2222'0000, 0, 0 };
+	ctx.fb.layout.color_pitch = { 0x1000, 0x1000, 0, 0 };
+	ctx.fb.layout.actual_color_pitch = { 2560, 2560, 0, 0 };
+	ctx.fb.layout.zeta_address = 0x3333'0000;
+	ctx.fb.layout.zeta_pitch = 0x800;
+	ctx.fb.layout.actual_zeta_pitch = 1280;
+	ctx.fb.layout.target = rsx::surface_target::surfaces_a_b;
+	ctx.fb.layout.color_format = rsx::surface_color_format::a8r8g8b8;
+	ctx.fb.layout.depth_format = rsx::surface_depth_format2::z24s8_uint;
+	ctx.fb.layout.aa_mode = rsx::surface_antialiasing::center_1_sample;
+	ctx.fb.layout.raster_type = rsx::surface_raster_type::linear;
+
+	const mtl::surface_state state = mtl::capture_surface_state(ctx);
+
+	EXPECT_EQ(state.clip_width, 640);
+	EXPECT_EQ(state.clip_height, 480);
+	EXPECT_EQ(state.color_target, rsx::surface_target::surfaces_a_b);
+	EXPECT_EQ(state.color_target_mask, 0b11u);
+	EXPECT_EQ(state.color[0].address, 0x1111'0000u);
+	EXPECT_EQ(state.color[0].pitch, 2560u);
+	EXPECT_EQ(state.color[1].address, 0x2222'0000u);
+	EXPECT_EQ(state.color[1].pitch, 2560u);
+	EXPECT_EQ(state.zeta.address, 0x3333'0000u);
+	EXPECT_EQ(state.zeta.pitch, 1280u);
+	EXPECT_EQ(state.color_format, rsx::surface_color_format::a8r8g8b8);
+	EXPECT_EQ(state.depth_format, rsx::surface_depth_format2::z24s8_uint);
+}
+
+TEST(MTLContract, EncoderStateComposesTheDecodedClusters)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	ctx.fb.layout.width = 1280;
+	ctx.fb.layout.height = 720;
+
+	ctx.draw_state.raster.cull_face_enabled = true;
+	ctx.draw_state.raster.cull_face_mode = rsx::cull_face::front;
+	ctx.draw_state.raster.front_face_mode = rsx::front_face::cw;
+	ctx.draw_state.raster.polygon_mode_front = rsx::polygon_mode::fill;
+	ctx.draw_state.raster.polygon_mode_back = rsx::polygon_mode::line;
+	ctx.draw_state.raster.poly_offset_fill_enabled = true;
+	ctx.draw_state.raster.poly_offset_bias = -0.5f;
+	ctx.draw_state.raster.poly_offset_scale = 2.0f;
+
+	ctx.draw_state.viewport.z_clip_min = 0.25f;
+	ctx.draw_state.viewport.z_clip_max = 0.75f;
+
+	ctx.draw_state.depth_stencil.depth_bounds_test_enabled = true;
+	ctx.draw_state.depth_stencil.depth_bounds_min = 0.1f;
+	ctx.draw_state.depth_stencil.depth_bounds_max = 0.9f;
+	ctx.draw_state.depth_stencil.stencil_test_enabled = true;
+	ctx.draw_state.depth_stencil.two_sided_stencil_test_enabled = true;
+	ctx.draw_state.depth_stencil.front.func_ref = 0x12;
+	ctx.draw_state.depth_stencil.back.func_ref = 0x34;
+
+	ctx.draw_state.blend.constant_color = { 0.1f, 0.2f, 0.3f, 0.4f };
+
+	// A conflicting raw blend colour must not win over the decoded constant.
+	ctx.register_state->registers[NV4097_SET_BLEND_COLOR] = 0xffff'ffff;
+
+	const mtl::encoder_state state = mtl::capture_encoder_state(ctx, false);
+
+	EXPECT_EQ(state.cull_mode, MTL::CullModeFront);
+	EXPECT_EQ(state.winding, MTL::WindingClockwise);
+	EXPECT_EQ(state.fill_mode, MTL::TriangleFillModeLines);
+	EXPECT_FLOAT_EQ(state.depth_bias, -0.5f);
+	EXPECT_FLOAT_EQ(state.depth_slope_scale, 2.0f);
+	EXPECT_TRUE(state.has_clip_range);
+	EXPECT_DOUBLE_EQ(state.znear, 0.25);
+	EXPECT_DOUBLE_EQ(state.zfar, 0.75);
+	EXPECT_FLOAT_EQ(state.depth_bounds_min, 0.1f);
+	EXPECT_FLOAT_EQ(state.depth_bounds_max, 0.9f);
+	EXPECT_EQ(state.stencil_front, 0x12);
+	EXPECT_EQ(state.stencil_back, 0x34);
+	EXPECT_EQ(state.clip_width, 1280);
+	EXPECT_EQ(state.clip_height, 720);
+	EXPECT_EQ(state.blend_color[0], 0.1f);
+	EXPECT_EQ(state.blend_color[1], 0.2f);
+	EXPECT_EQ(state.blend_color[2], 0.3f);
+	EXPECT_EQ(state.blend_color[3], 0.4f);
+}
+
+TEST(MTLContract, ScaledScissorUsesTheResolvedRegionAndTheScaleConfig)
+{
+	rsx::framebuffer_layout layout{};
+	layout.width = 1280;
+	layout.height = 720;
+
+	const rsx::scissor_state region{ 100, 200, 300, 400 };
+
+	rsx::surface_scaling_config_t doubled;
+	doubled.scale_percent = 200;
+	doubled.min_scalable_dimension = 0;
+
+	const areau scaled = mtl::scaled_scissor(region, layout, doubled);
+	EXPECT_EQ(scaled.x1, 200u);
+	EXPECT_EQ(scaled.y1, 400u);
+	EXPECT_EQ(scaled.x2, 600u);
+	EXPECT_EQ(scaled.y2, 800u);
+
+	// Below the minimum scalable dimension the guest region passes through.
+	rsx::surface_scaling_config_t untouched;
+	untouched.scale_percent = 200;
+	untouched.min_scalable_dimension = 2000;
+
+	const areau identity = mtl::scaled_scissor(region, layout, untouched);
+	EXPECT_EQ(identity.x1, region.x1);
+	EXPECT_EQ(identity.y1, region.y1);
+	EXPECT_EQ(identity.x2, region.x2);
+	EXPECT_EQ(identity.y2, region.y2);
+}
+
+TEST(MTLContract, VertexLayoutMustCarryTheBoundContext)
+{
+	// interleaved_range_info::calculate_required_range reads the register file
+	// through its own ctx.  An unbound block has ctx == nullptr and the first
+	// REGS(ctx) dereferences address 0x8 (register_state is at offset 8), which
+	// is the first-draw crash Mega Man 9 produced.  The backend binds the layout
+	// in on_bind_context; this test pins the value the call depends on.
+	contract_context fixture;
+	rsx::vertex_input_layout layout;
+
+	rsx::interleaved_range_info* block = layout.alloc_interleaved_block();
+	ASSERT_NE(block, nullptr);
+	EXPECT_EQ(block->ctx, nullptr);
+
+	layout.set_context(&fixture.ctx);
+	EXPECT_EQ(block->ctx, &fixture.ctx);
+
+	// The register read now succeeds.  With no attributes and a non-indexed
+	// clause the range is the one-vertex degenerate range.
+	block->attribute_stride = 16;
+	EXPECT_EQ(block->calculate_required_range(0, 4), std::make_pair(0u, 1u));
 }
 
 #endif // RSX_ENABLE_METAL4

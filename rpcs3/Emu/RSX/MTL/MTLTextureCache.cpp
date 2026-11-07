@@ -34,6 +34,71 @@ namespace mtl
 		return extent;
 	}
 
+	texture_level_extent get_texture_level_extent(MTL::TextureType type, u32 width, u32 height, u32 depth, u32 level, u32 block_size, bool compressed)
+	{
+		// A mip level halves in each direction down to one texel, and a 3-D level
+		// also halves in depth.  The clear path used the base depth for every level
+		// and overran the last slices of a volume.
+		const u32 shift = std::min<u32>(level, 15);
+		const u32 level_width = std::max<u32>(1u, width >> shift);
+		const u32 level_height = std::max<u32>(1u, height >> shift);
+		const u32 level_depth = (type == MTL::TextureType3D) ? std::max<u32>(1u, depth >> shift) : 1u;
+
+		texture_level_extent extent;
+		extent.width = level_width;
+		extent.height = level_height;
+		extent.depth = level_depth;
+
+		if (!compressed)
+		{
+			extent.row_bytes = level_width * block_size;
+			extent.rows = level_height;
+			return extent;
+		}
+
+		// Every DXT format is four by four.  A level smaller than one block is
+		// still stored as one whole block, so the block count is the ceiling and
+		// never zero (TextureUtils.cpp:664-668).
+		constexpr u32 block_edge = 4;
+		const u32 blocks_x = std::max<u32>(1u, (level_width + block_edge - 1) / block_edge);
+		const u32 blocks_y = std::max<u32>(1u, (level_height + block_edge - 1) / block_edge);
+		extent.row_bytes = blocks_x * block_size;
+		extent.rows = blocks_y;
+		return extent;
+	}
+
+	texture_readback_region get_texture_readback_region(u32 width, u32 height, u32 pitch, u32 block_size, bool compressed, u32 byte_offset, u32 tail)
+	{
+		texture_readback_region region;
+		region.width = width;
+		region.height = height;
+
+		// A compressed guest row is a row of blocks, so both the row index and the
+		// x byte offset are block indices; multiply by the block edge to reach the
+		// texel origin Metal takes.
+		const u32 block_edge = compressed ? 4u : 1u;
+
+		if (byte_offset && pitch)
+		{
+			region.y = (byte_offset / pitch) * block_edge;
+			region.x = ((byte_offset % pitch) / block_size) * block_edge;
+			region.width = (width > region.x) ? width - region.x : 0;
+			region.height = (height > region.y) ? height - region.y : 0;
+
+			// The staging buffer keeps the guest layout from the section base, so
+			// the destination is the raw byte offset, not the texel origin.
+			region.byte_offset = byte_offset;
+		}
+
+		if (tail && pitch)
+		{
+			const u32 rows = (tail / pitch) * block_edge;
+			region.height = (region.height > rows) ? region.height - rows : 0;
+		}
+
+		return region;
+	}
+
 	void texture_cache::upload_texture_data(command_recorder& cmd, texture* dst, u32 gcm_format, bool is_swizzled, const std::vector<rsx::subresource_layout>& layouts) const
 	{
 		// TODO(excise): level 1; block timer.
@@ -273,7 +338,7 @@ namespace mtl
 		}
 	}
 
-	void texture_cache::clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u16 width, u16 height, u16 depth, u8 first_level, u8 level_count) const
+	void texture_cache::clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count) const
 	{
 		if (!image || !level_count)
 		{
@@ -287,6 +352,13 @@ namespace mtl
 
 		const u32 block_size = rsx::get_format_block_size_in_bytes(gcm_format);
 		const MTL::TextureType type = image->value()->textureType();
+
+		// The host image defines the region a clear may touch.  The guest fields
+		// can describe a cube's six faces or a mip chain the host clamped, so a
+		// clear driven by them can address past a level or outside the allocation.
+		const u32 base_width = static_cast<u32>(image->value()->width());
+		const u32 base_height = static_cast<u32>(image->value()->height());
+		const u32 base_depth = (type == MTL::TextureType3D) ? static_cast<u32>(image->value()->depth()) : 1u;
 
 		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
 		if (!encoder)
@@ -302,31 +374,17 @@ namespace mtl
 			}
 
 			// The level is a quarter of the previous one in each direction, and a
-			// compressed level holds four by four blocks.
-			const u32 level_width = std::max<u32>(1u, static_cast<u32>(width) >> level);
-			const u32 level_height = std::max<u32>(1u, static_cast<u32>(height) >> level);
+			// compressed level holds four by four blocks.  A level below one block
+			// still occupies a whole block, and a 3-D level shrinks in depth too.
+			const texture_level_extent extent = get_texture_level_extent(
+				type, base_width, base_height, base_depth, level, block_size, compressed);
 
-			u32 row_bytes = 0;
-			u32 rows = 0;
-
-			if (compressed)
-			{
-				row_bytes = (level_width / 4) * block_size;
-				rows = level_height / 4;
-			}
-			else
-			{
-				row_bytes = level_width * block_size;
-				rows = level_height;
-			}
-
-			if (!row_bytes || !rows)
+			if (!extent.row_bytes || !extent.rows)
 			{
 				continue;
 			}
 
-			const u32 slices = (type == MTL::TextureType3D) ? std::max<u32>(1u, depth) : 1u;
-			const u64 size = static_cast<u64>(row_bytes) * rows * slices;
+			const u64 size = static_cast<u64>(extent.row_bytes) * extent.rows * extent.depth;
 
 			// A shared buffer's contents are undefined too, so the zeroing is
 			// explicit rather than an assumption about the allocator.
@@ -341,9 +399,16 @@ namespace mtl
 				std::memset(bytes, 0, size);
 			}
 
-			encoder->copyFromBuffer(staging, 0, row_bytes, row_bytes * rows,
-				MTL::Size::Make(level_width, level_height, slices),
-				image->value(), 0, level, MTL::Origin::Make(0, 0, 0));
+			// A cube keeps its six faces in the slice dimension.  A 3-D volume
+			// carries its depth in the copy size.  Only the cube repeats the copy.
+			const u32 slices = (type == MTL::TextureTypeCube) ? 6u : 1u;
+
+			for (u32 slice = 0; slice < slices; ++slice)
+			{
+				encoder->copyFromBuffer(staging, 0, extent.row_bytes, extent.row_bytes * extent.rows,
+					MTL::Size::Make(extent.width, extent.height, extent.depth),
+					image->value(), slice, level, MTL::Origin::Make(0, 0, 0));
+			}
 
 			cmd.resources().defer_release(staging);
 		}
@@ -380,10 +445,6 @@ namespace mtl
 		}
 
 		texture* target = vram_texture;
-		u32 transfer_width = width;
-		u32 transfer_height = height;
-		u32 transfer_x = 0;
-		u32 transfer_y = 0;
 
 		if (context == rsx::texture_upload_context::framebuffer_storage)
 		{
@@ -401,28 +462,28 @@ namespace mtl
 			target = surf->get_surface(rsx::surface_access::transfer_read);
 		}
 
+		const bool compressed =
+			gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1 ||
+			gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
+			gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45;
+		const u32 block_size = rsx::get_format_block_size_in_bytes(gcm_format);
+
 		const auto valid_range = get_confirmed_range();
+		u32 transfer_offset = 0;
+		u32 transfer_tail = 0;
 		if (const auto section_range = get_section_range(); section_range != valid_range)
 		{
-			if (const auto offset = (valid_range.start - get_section_base()))
-			{
-				transfer_y = offset / rsx_pitch;
-				transfer_x = (offset % rsx_pitch) / rsx::get_format_block_size_in_bytes(gcm_format);
-
-				ensure(transfer_width >= transfer_x);
-				ensure(transfer_height >= transfer_y);
-				transfer_width -= transfer_x;
-				transfer_height -= transfer_y;
-			}
-
-			if (const auto tail = (section_range.end - valid_range.end))
-			{
-				const auto row_count = tail / rsx_pitch;
-
-				ensure(transfer_height >= row_count);
-				transfer_height -= row_count;
-			}
+			transfer_offset = valid_range.start - get_section_base();
+			transfer_tail = section_range.end - valid_range.end;
 		}
+
+		const texture_readback_region region = get_texture_readback_region(
+			width, height, rsx_pitch, block_size, compressed, transfer_offset, transfer_tail);
+		const u32 transfer_width = region.width;
+		const u32 transfer_height = region.height;
+		const u32 transfer_x = region.x;
+		const u32 transfer_y = region.y;
+		ensure(transfer_width && transfer_height);
 
 		const u32 staging_size = std::max<u32>(rsx_pitch * height, static_cast<u32>(get_section_size()));
 		if (!m_staging || m_staging->value()->length() < staging_size)
@@ -446,7 +507,7 @@ namespace mtl
 
 		// The staging buffer keeps the guest row pitch, so the base imp_flush is a
 		// straight memcpy (texture_cache_utils.h:1612).
-		const u32 dst_offset = transfer_y * rsx_pitch + transfer_x * rsx::get_format_block_size_in_bytes(gcm_format);
+		const u32 dst_offset = region.byte_offset;
 
 		MTL::Texture* source = target->value();
 		const MTL::PixelFormat format = source->pixelFormat();

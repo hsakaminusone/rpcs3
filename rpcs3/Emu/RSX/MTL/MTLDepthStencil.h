@@ -8,6 +8,13 @@
 
 #include <unordered_map>
 
+namespace rsx
+{
+	struct color_write_mask;
+	struct depth_stencil_state;
+	struct multisample_state;
+}
+
 namespace mtl
 {
 	// One stencil face (LLD-depth-rop §3.1).  The reference is deliberately absent:
@@ -41,8 +48,8 @@ namespace mtl
 		u8 back = 0;
 	};
 
-	depth_stencil_state capture_depth_stencil_state();
-	stencil_references capture_stencil_references();
+	depth_stencil_state capture_depth_stencil_state(const rsx::depth_stencil_state& decoded);
+	stencil_references capture_stencil_references(const rsx::depth_stencil_state& decoded);
 
 	// NV4097_SET_DEPTH_BOUNDS_MIN/MAX/TEST_ENABLE: dynamic encoder state.  The RSX
 	// range is saturated into the depth format's range and, when the shader
@@ -53,8 +60,9 @@ namespace mtl
 		f32 max = 1.0f;
 	};
 
-	// `emulate_depth_range` is the draw's RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE.
-	depth_bounds capture_depth_bounds(bool emulate_depth_range);
+	// `emulate_depth_range` is the draw's RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE,
+	// taken from the resolved fragment program.
+	depth_bounds capture_depth_bounds(const rsx::depth_stencil_state& decoded, bool emulate_depth_range);
 
 	// The latch is the key of the cached MTL::DepthStencilState, so it needs value
 	// semantics.  A memcmp would read the padding the members leave behind.
@@ -73,15 +81,15 @@ namespace mtl
 		bool alpha_to_one = false;
 	};
 
-	anti_aliasing_state capture_anti_aliasing_state();
+	anti_aliasing_state capture_anti_aliasing_state(const rsx::multisample_state& decoded);
 
-	// The colour write mask of one attachment (LLD-depth-rop §3.2).  The RSX channel
-	// mask is reconciled with the host channel order, as the surface format decides
-	// the storage (color_utils.hpp:267,300; CONFLICTS.md C3).
-	MTL::ColorWriteMask capture_color_write_mask(u32 index, rsx::surface_color_format format);
+	// The colour write mask of one attachment (LLD-depth-rop §3.2).  The core has
+	// already remapped the RSX channel mask to the host channel order and filtered
+	// it to the channels the surface format stores (RSXCoreRenderer.cpp decode).
+	MTL::ColorWriteMask capture_color_write_mask(const rsx::color_write_mask& mask);
 
 	// SET_ZMIN_MAX_CONTROL -> the encoder depth clip mode (LLD-depth-rop §3.3).
-	MTL::DepthClipMode capture_depth_clip_mode();
+	MTL::DepthClipMode capture_depth_clip_mode(const rsx::depth_stencil_state& decoded);
 
 	// Build the immutable object (LLD-depth-rop §3.1).  The caller owns the result.
 	MTL::DepthStencilState* create_depth_stencil_state(MTL::Device* device, const depth_stencil_state& state);

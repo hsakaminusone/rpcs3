@@ -2,9 +2,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
-#include "Emu/RSX/rsx_methods.h"
+#include "Emu/RSX/Core/RSXDrawState.h"
 #include "Emu/RSX/Common/TextureUtils.h"
-#include "Emu/RSX/Utils/color_utils.hpp"
 #include "util/fnv_hash.hpp"
 #include "util/logs.hpp"
 
@@ -48,39 +47,41 @@ namespace mtl
 		}
 	}
 
-	depth_stencil_state capture_depth_stencil_state()
+	depth_stencil_state capture_depth_stencil_state(const rsx::depth_stencil_state& decoded)
 	{
 		depth_stencil_state state;
 
 		// SET_DEPTH_TEST_ENABLE has no Metal counterpart: a disabled test becomes
-		// compare Always and stops the depth write (CONFLICTS.md C2).
-		if (rsx::method_registers.depth_test_enabled())
+		// compare Always and stops the depth write (CONFLICTS.md C2).  The decoded
+		// function is only valid while the test is enabled.
+		if (decoded.depth_test_enabled)
 		{
-			state.depth_compare = rsx::method_registers.depth_func();
-			state.depth_write = rsx::method_registers.depth_write_enabled();
+			state.depth_compare = decoded.depth_func;
+			state.depth_write = decoded.depth_write_enabled;
 		}
 
-		if (rsx::method_registers.stencil_test_enabled())
+		if (decoded.stencil_test_enabled)
 		{
 			auto& front = state.front;
-			front.compare = rsx::method_registers.stencil_func();
-			front.fail = rsx::method_registers.stencil_op_fail();
-			front.zfail = rsx::method_registers.stencil_op_zfail();
-			front.zpass = rsx::method_registers.stencil_op_zpass();
-			front.read_mask = rsx::method_registers.stencil_func_mask();
-			front.write_mask = rsx::method_registers.stencil_mask();
+			front.compare = decoded.front.func;
+			front.fail = decoded.front.op_fail;
+			front.zfail = decoded.front.op_zfail;
+			front.zpass = decoded.front.op_zpass;
+			front.read_mask = decoded.front.func_mask;
+			front.write_mask = decoded.front.write_mask;
 
 			// Metal always carries both faces; a disabled two-sided test mirrors the
-			// front (LLD-depth-rop §2.3).
-			if (rsx::method_registers.two_sided_stencil_test_enabled())
+			// front (LLD-depth-rop §2.3).  The decoded back face is only valid for a
+			// two-sided test.
+			if (decoded.two_sided_stencil_test_enabled)
 			{
 				auto& back = state.back;
-				back.compare = rsx::method_registers.back_stencil_func();
-				back.fail = rsx::method_registers.back_stencil_op_fail();
-				back.zfail = rsx::method_registers.back_stencil_op_zfail();
-				back.zpass = rsx::method_registers.back_stencil_op_zpass();
-				back.read_mask = rsx::method_registers.back_stencil_func_mask();
-				back.write_mask = rsx::method_registers.back_stencil_mask();
+				back.compare = decoded.back.func;
+				back.fail = decoded.back.op_fail;
+				back.zfail = decoded.back.op_zfail;
+				back.zpass = decoded.back.op_zpass;
+				back.read_mask = decoded.back.func_mask;
+				back.write_mask = decoded.back.write_mask;
 			}
 			else
 			{
@@ -91,31 +92,32 @@ namespace mtl
 		return state;
 	}
 
-	stencil_references capture_stencil_references()
+	stencil_references capture_stencil_references(const rsx::depth_stencil_state& decoded)
 	{
 		// A single-sided RSX draw applies the front reference to both faces
 		// (GLDraw.cpp:148-156; VKGSRender.cpp:351-355).
-		const u8 front = rsx::method_registers.stencil_func_ref();
-		const u8 back = rsx::method_registers.two_sided_stencil_test_enabled()
-			? rsx::method_registers.back_stencil_func_ref()
+		const u8 front = decoded.front.func_ref;
+		const u8 back = decoded.two_sided_stencil_test_enabled
+			? decoded.back.func_ref
 			: front;
 
 		return { front, back };
 	}
 
-	depth_bounds capture_depth_bounds(bool emulate_depth_range)
+	depth_bounds capture_depth_bounds(const rsx::depth_stencil_state& decoded, bool emulate_depth_range)
 	{
-		if (!rsx::method_registers.depth_bounds_test_enabled())
+		if (!decoded.depth_bounds_test_enabled)
 		{
 			// The disabled bounds are an open range, which on Metal is [0,1]: the VK
-			// form (`VKDraw.cpp:251-256`) collapses into the clamp below.
+			// form (`VKDraw.cpp:251-256`) collapses into the clamp below.  The decoded
+			// min/max are stale in this case and must not be read.
 			return {};
 		}
 
-		const auto format = rsx::method_registers.surface_depth_fmt();
+		// The core already saturated the bounds into the bound depth format's range.
 		depth_bounds state;
-		state.min = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_min());
-		state.max = rsx::clamp_depth_bounds_value(format, rsx::method_registers.depth_bounds_max());
+		state.min = decoded.depth_bounds_min;
+		state.max = decoded.depth_bounds_max;
 
 		if (emulate_depth_range)
 		{
@@ -128,52 +130,33 @@ namespace mtl
 		return state;
 	}
 
-	anti_aliasing_state capture_anti_aliasing_state()
+	anti_aliasing_state capture_anti_aliasing_state(const rsx::multisample_state& decoded)
 	{
 		anti_aliasing_state state;
-		state.alpha_to_coverage = rsx::method_registers.msaa_alpha_to_coverage_enabled();
-		state.alpha_to_one = rsx::method_registers.msaa_alpha_to_one_enabled();
+		state.alpha_to_coverage = decoded.alpha_to_coverage_enabled;
+		state.alpha_to_one = decoded.alpha_to_one_enabled;
 		return state;
 	}
 
-	MTL::ColorWriteMask capture_color_write_mask(u32 index, rsx::surface_color_format format)
+	MTL::ColorWriteMask capture_color_write_mask(const rsx::color_write_mask& mask)
 	{
-		bool red = rsx::method_registers.color_mask_r(index);
-		bool green = rsx::method_registers.color_mask_g(index);
-		bool blue = rsx::method_registers.color_mask_b(index);
-		bool alpha = rsx::method_registers.color_mask_a(index);
-
-		// The single- and two-channel formats store the RSX blue channel in the host
-		// red slot (color_utils.hpp:267,275).
-		switch (format)
-		{
-		case rsx::surface_color_format::b8:
-			rsx::get_b8_colormask(red, green, blue, alpha);
-			break;
-		case rsx::surface_color_format::g8b8:
-			rsx::get_g8b8_r8g8_colormask(red, green, blue, alpha);
-			break;
-		default:
-			break;
-		}
-
-		// Drop the channels the format does not store (color_utils.hpp:300).
-		const auto stored = rsx::get_write_output_mask(format);
-		MTL::ColorWriteMask mask = MTL::ColorWriteMaskNone;
-		if (red && stored[0]) mask |= MTL::ColorWriteMaskRed;
-		if (green && stored[1]) mask |= MTL::ColorWriteMaskGreen;
-		if (blue && stored[2]) mask |= MTL::ColorWriteMaskBlue;
-		if (alpha && stored[3]) mask |= MTL::ColorWriteMaskAlpha;
-		return mask;
+		// The core remapped the channels to the host order and filtered them to the
+		// channels the surface format stores; this is a direct translation.
+		MTL::ColorWriteMask result = MTL::ColorWriteMaskNone;
+		if (mask.r) result |= MTL::ColorWriteMaskRed;
+		if (mask.g) result |= MTL::ColorWriteMaskGreen;
+		if (mask.b) result |= MTL::ColorWriteMaskBlue;
+		if (mask.a) result |= MTL::ColorWriteMaskAlpha;
+		return result;
 	}
 
-	MTL::DepthClipMode capture_depth_clip_mode()
+	MTL::DepthClipMode capture_depth_clip_mode(const rsx::depth_stencil_state& decoded)
 	{
 		// SET_ZMIN_MAX_CONTROL carries clip (b0) and clamp (b4) independently
 		// (rsx_decode.h:634-647); Metal carries one bit.  Clip only when the RSX
 		// clips and does not clamp, so the "both" and "neither" cases draw instead
 		// of discarding (LLD-depth-rop §3.3 leaves those two cases open).
-		const bool clip = rsx::method_registers.depth_clip_enabled() && !rsx::method_registers.depth_clamp_enabled();
+		const bool clip = decoded.depth_clip_enabled && !decoded.depth_clamp_enabled;
 		return clip ? MTL::DepthClipModeClip : MTL::DepthClipModeClamp;
 	}
 

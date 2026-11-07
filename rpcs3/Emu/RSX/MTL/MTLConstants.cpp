@@ -528,12 +528,14 @@ namespace mtl
 				{
 					if (r.tex_addr[unit] || r.tex_format[unit])
 					{
-						std::fprintf(manifest, "t%u 0x%x/0x%x/%ux%u/s0x%x/f0x%x/lod %.3f,%.3f,%.3f/mip %u/pitch %u/dim %u/remap 0x%x ",
+						std::fprintf(manifest, "t%u 0x%x/0x%x/%ux%u/s0x%x/f0x%x/lod %.3f,%.3f,%.3f/mip %u/pitch %u/dim %u/remap 0x%x/tid 0x%llx/sid 0x%llx ",
 							unit, r.tex_addr[unit], r.tex_format[unit], r.tex_width[unit],
 							r.tex_height[unit], r.tex_sampler_hash[unit], r.tex_sampler_flags[unit],
 							static_cast<f64>(r.tex_lod[unit][0]), static_cast<f64>(r.tex_lod[unit][1]),
 							static_cast<f64>(r.tex_lod[unit][2]), r.tex_mip[unit], r.tex_pitch[unit],
-							r.tex_dimension[unit], r.tex_format_ex[unit]);
+							r.tex_dimension[unit], r.tex_format_ex[unit],
+							static_cast<unsigned long long>(r.texture_id[unit]),
+							static_cast<unsigned long long>(r.sampler_id[unit]));
 					}
 				}
 
@@ -692,7 +694,12 @@ namespace mtl
 		}
 
 		m_dump_index = index;
-		m_dump_burst = 6;
+		// The forward half follows the same window the capture uses, so a run that
+		// widens the window to a whole scene also keeps the rings of every frame in
+		// it.  The history above is always the twelve frames before the press; the
+		// default burst keeps the six frames a one-frame defect needs.
+		m_dump_total = static_cast<u32>(probe::dump_frame_count());
+		m_dump_burst = m_dump_total;
 	}
 
 	// TODO(excise): level 5; the frames that follow a key press, so a defect that
@@ -706,8 +713,8 @@ namespace mtl
 
 		const frame_snapshot& frame = m_history[(m_history_pos + history_depth - 1) % history_depth];
 
-		char age[8];
-		std::snprintf(age, sizeof(age), "p%u", 7 - m_dump_burst);
+		char age[16];
+		std::snprintf(age, sizeof(age), "p%u", m_dump_total - m_dump_burst + 1);
 		dump_snapshot(frame, m_dump_index, age);
 
 		--m_dump_burst;

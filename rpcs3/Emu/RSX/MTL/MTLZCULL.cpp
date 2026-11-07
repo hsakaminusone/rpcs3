@@ -23,12 +23,12 @@ namespace mtl
 
 	zcull::query_counter* zcull::counter(rsx::reports::occlusion_query_info* query)
 	{
-		if (query->driver_handle >= counter_capacity)
+		if (query->slot_index >= counter_capacity)
 		{
 			return nullptr;
 		}
 
-		return &m_counters[query->driver_handle];
+		return &m_counters[query->slot_index];
 	}
 
 	void zcull::init(const device& /*dev*/, resource_manager& resources, command_recorder& recorder)
@@ -47,13 +47,6 @@ namespace mtl
 			m_free[index] = index;
 		}
 		m_free_count = counter_capacity;
-
-		// The shared report machinery indexes its query pool by driver_handle
-		// (VKGSRender.cpp:597-600 does the same).
-		for (u32 index = 0; index < rsx::reports::occlusion_query_count; ++index)
-		{
-			m_occlusion_query_data[index].driver_handle = index;
-		}
 
 		m_counters = {};
 		m_deferred = {};

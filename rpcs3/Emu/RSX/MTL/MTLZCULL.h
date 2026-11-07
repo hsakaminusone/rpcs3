@@ -14,8 +14,8 @@ namespace mtl
 	class resource_manager;
 
 	// The Metal 4 ZCULL backend (HLD-04 §3.8).  It owns one persistent
-	// visibility-result buffer and implements the five shared ZCULL_control hooks
-	// with its counters.
+	// visibility-result buffer and implements the five shared
+	// occlusion_query_provider hooks with its counters.
 	//
 	// A counter is one uint64_t at a fixed offset in the buffer, and a counter is
 	// owned by a query for the query's whole life.  Every pass descriptor carries
@@ -31,7 +31,7 @@ namespace mtl
 	// Every call site is the RSX thread: the shared report machinery calls the five
 	// overrides and the draw path calls apply and on_slot_complete (HLD-04 §2.3).
 	// The state therefore needs no lock.
-	class zcull : public rsx::reports::ZCULL_control
+	class zcull : public rsx::reports::occlusion_query_provider
 	{
 	public:
 		// One counter per live query, and the shared pool holds every query, so the
@@ -45,13 +45,13 @@ namespace mtl
 		void init(const device& dev, resource_manager& resources, command_recorder& recorder);
 		void shutdown();
 
-		// The one buffer holds every counter, so every slot returns it.  The parent
-		// still passes the open slot, and the parameter is kept so its call site is
-		// unchanged.  The pass descriptor must carry this buffer before open_pass,
-		// with VisibilityResultTypeAccumulate.
+		// The one buffer holds every counter, so every slot returns it.  The
+		// backend still passes the open slot, and the parameter is kept so its
+		// call site is unchanged.  The pass descriptor must carry this buffer
+		// before open_pass, with VisibilityResultTypeAccumulate.
 		MTL::Buffer* visibility_buffer(u32 slot) const;
 
-		// Apply the pending counting mode to `encoder`.  The parent calls it once
+		// Apply the pending counting mode to `encoder`.  The backend calls it once
 		// after it opens a pass and once before each draw, so a query that starts or
 		// ends between draws lands on the encoder that carries the following draws.
 		// It is a no-op when neither the mode nor the encoder changed.

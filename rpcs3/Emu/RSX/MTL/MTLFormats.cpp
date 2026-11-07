@@ -116,69 +116,6 @@ namespace mtl
 		}
 	}
 
-	resolved_clear resolve_surface_clear(rsx::surface_color_format format, u8 r, u8 g, u8 b, u8 a, u32 mask)
-	{
-		resolved_clear result{};
-		u32 colormask = mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK;
-
-		if (!colormask)
-		{
-			return result;
-		}
-
-		// The clear is a hardware word copy, so the bytes a format does not store are
-		// not written at all.
-		bool use_fast_clear = (colormask == RSX_GCM_CLEAR_COLOR_RGBA_MASK);
-
-		switch (format)
-		{
-		case rsx::surface_color_format::x32:
-		case rsx::surface_color_format::w16z16y16x16:
-		case rsx::surface_color_format::w32z32y32x32:
-			// A float surface takes no colour clear.
-			colormask = 0;
-			break;
-		case rsx::surface_color_format::b8:
-			rsx::get_b8_clear_color(r, g, b, a);
-			colormask = rsx::get_b8_clearmask(colormask);
-			use_fast_clear = (colormask & RSX_GCM_CLEAR_RED_BIT) != 0;
-			break;
-		case rsx::surface_color_format::g8b8:
-			rsx::get_g8b8_clear_color(r, g, b, a);
-			colormask = rsx::get_g8b8_r8g8_clearmask(colormask);
-			use_fast_clear = ((colormask & RSX_GCM_CLEAR_COLOR_RG_MASK) == RSX_GCM_CLEAR_COLOR_RG_MASK);
-			break;
-		case rsx::surface_color_format::r5g6b5:
-			rsx::get_rgb565_clear_color(r, g, b, a);
-			use_fast_clear = ((colormask & RSX_GCM_CLEAR_COLOR_RGB_MASK) == RSX_GCM_CLEAR_COLOR_RGB_MASK);
-			break;
-		case rsx::surface_color_format::x1r5g5b5_o1r5g5b5:
-			rsx::get_a1rgb555_clear_color(r, g, b, a, 255);
-			break;
-		case rsx::surface_color_format::x1r5g5b5_z1r5g5b5:
-			rsx::get_a1rgb555_clear_color(r, g, b, a, 0);
-			break;
-		case rsx::surface_color_format::a8b8g8r8:
-		case rsx::surface_color_format::x8b8g8r8_o8b8g8r8:
-		case rsx::surface_color_format::x8b8g8r8_z8b8g8r8:
-			rsx::get_abgr8_clear_color(r, g, b, a);
-			colormask = rsx::get_abgr8_clearmask(colormask);
-			break;
-		default:
-			break;
-		}
-
-		if (!colormask)
-		{
-			return result;
-		}
-
-		result.color = MTL::ClearColor::Make(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
-		result.mask = colormask;
-		result.fast = use_fast_clear;
-		return result;
-	}
-
 	MTL::ColorWriteMask to_color_write_mask(u32 clear_mask)
 	{
 		MTL::ColorWriteMask result = MTL::ColorWriteMaskNone;

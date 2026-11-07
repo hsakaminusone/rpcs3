@@ -353,6 +353,7 @@ namespace mtl
 			// Never reset an allocator while its GPU work is in flight (HLD-01 §4.7).
 			slot.allocator->reset();
 			slot.command_buffer->beginCommandBuffer(slot.allocator);
+			slot.buffer_open = true;
 			slot.label_staging_offset = 0;
 			slot.labels.clear();
 			m_pending_count = 0;
@@ -386,6 +387,7 @@ namespace mtl
 			// A label commit already submitted the frame's last commands, so only the
 			// drawable is left; a commit with nothing in it would be pure overhead.
 			m_reenter_pending = false;
+			m_slots[m_slot].buffer_open = false;
 
 			if (m_drawable)
 			{
@@ -414,6 +416,7 @@ namespace mtl
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/submit/end buffer");
 			slot.command_buffer->endCommandBuffer();
+			slot.buffer_open = false;
 		}
 
 		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -465,6 +468,7 @@ namespace mtl
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/readback wait/end buffer");
 			slot.command_buffer->endCommandBuffer();
+			slot.buffer_open = false;
 		}
 
 		// Each commit takes a generation of its own, so a late feedback of the
@@ -525,6 +529,7 @@ namespace mtl
 
 		slot.allocator->reset();
 		slot.command_buffer->beginCommandBuffer(slot.allocator);
+		slot.buffer_open = true;
 		slot.label_staging_offset = 0;
 		// The feedback proves every label of the committed command buffer visible,
 		// so the next acquire on one of them needs no wait.
@@ -559,6 +564,15 @@ namespace mtl
 			reenter_slot();
 		}
 
+		frame_slot& slot = m_slots[m_slot];
+
+		if (!slot.buffer_open)
+		{
+			// A pass opened outside a frame would be encoded on an ended buffer;
+			// re-enter the slot instead (L159).
+			reenter_slot();
+		}
+
 		// The pass boundary is the natural place for a label batch: no open pass is
 		// split, and the writes are ordered before the pass's load actions.
 		flush_label_writes();
@@ -590,6 +604,16 @@ namespace mtl
 		if (m_compute_encoder)
 		{
 			return m_compute_encoder;
+		}
+
+		frame_slot& open_slot = m_slots[m_slot];
+
+		if (!open_slot.buffer_open)
+		{
+			// The slot's command buffer was ended (e.g. the frame was submitted)
+			// while a copy outside the frame was still queued; encoding on an
+			// ended buffer faults inside Metal.  Re-enter the slot first (L159).
+			reenter_slot();
 		}
 
 		close_encoder();
@@ -668,6 +692,7 @@ namespace mtl
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/commit labels/end buffer");
 			slot.command_buffer->endCommandBuffer();
+			slot.buffer_open = false;
 		}
 
 		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;

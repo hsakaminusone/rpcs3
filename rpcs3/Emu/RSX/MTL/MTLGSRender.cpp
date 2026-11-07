@@ -31,8 +31,12 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/Common/BufferUtils.h"
+#include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Common/io_buffer.h"
 #include "Emu/RSX/Core/RSXDrawCommands.h"
+#include "Emu/RSX/Core/RSXRendererFactory.h"
+#include "Emu/RSX/NV47/HW/context_accessors.define.h"
+#include "Emu/RSX/GSFrameBase.h"
 #include "Emu/RSX/Overlays/Shaders/shader_loading_dialog_native.h"
 #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
 #include "Emu/RSX/Program/program_util.h"
@@ -55,6 +59,7 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 // The two media-capture triggers are owned by the Qt side and the shared report
 // path (RSXThread.cpp:43, VKPresent.cpp:16).
@@ -110,6 +115,33 @@ namespace mtl
 			mix(static_cast<u32>(state.logic_operation));
 			mix(static_cast<u32>(state.shade_mode));
 			return hash;
+		}
+
+		// The guest bytes an RSX texture can sample.  The footprint is the texture's
+		// own guest size, across its mip chain, because the guest memory is what a
+		// hazard aliases.  The host image the cache binds may be a view, a temporary
+		// copy or a differently-sized section; none of that changes which guest
+		// bytes the draw reads.
+		template <typename Texture>
+		utils::address_range32 sampled_guest_range(const rsx::context* ctx, const Texture& texture)
+		{
+			if (!texture.enabled())
+			{
+				return {};
+			}
+
+			const u32 address = rsx::get_address(ctx, texture.offset(), texture.location());
+			const usz size = rsx::get_texture_size(texture);
+
+			if (!address || !size)
+			{
+				return {};
+			}
+
+			// The RSX address space is 32-bit.  A footprint that would run past the
+			// end cannot be expressed; the clamped range is still conservative.
+			const usz limit = 0x1'0000'0000ull - address;
+			return utils::address_range32::start_length(address, static_cast<u32>(std::min(size, limit)));
 		}
 
 		u32 hash_raster_state(const raster_state& state)
@@ -251,13 +283,37 @@ namespace mtl
 		u32 diagnostic_capture_index_dumps = 0;
 		u32 diagnostic_capture_vertex_dumps = 0;
 
+		// TODO(excise): level 5; the automatic scene triggers (a cubemap bind, a
+		// content match, a video plane).  They are detectors, not the user's press.
+		// A run that wants F12 to be the only trigger sets MTL_PROBE_AUTO_CAPTURE=0
+		// so a detector cannot spend the run's window, fill the disk, or refuse the
+		// press while its own window is open.  Unset means enabled, which is the old
+		// behaviour.
+		bool diagnostic_auto_capture()
+		{
+			static const bool enabled = [] {
+				const char* value = std::getenv("MTL_PROBE_AUTO_CAPTURE");
+				return !(value && *value && *value != '0');
+			}();
+			return enabled;
+		}
+
 		// A manual window is armed from the flip, after the frame's draws are
 		// encoded, so its first captured frame is the next one and the gap does
 		// not apply: the user pressed the screenshot key on the frame that shows
-		// the defect, and waiting out the gap would capture a later scene.
-		void diagnostic_try_arm_capture(const char* reason, bool manual = false)
+		// the defect, and waiting out the gap would capture a later scene.  A
+		// manual press also supersedes an automatic window that is still open: the
+		// detectors can fire at a scene change, and the press is the stronger
+		// signal, so refusing it is the one ordering that loses the frame the user
+		// pointed at.
+		void diagnostic_try_arm_capture(const char* reason, bool manual = false, bool forced = false)
 		{
 			if (!probe::at_least(5))
+			{
+				return;
+			}
+
+			if (!manual && !forced && !diagnostic_auto_capture())
 			{
 				return;
 			}
@@ -268,7 +324,7 @@ namespace mtl
 			// gap is still bypassed for a manual press, so the next press can arm as
 			// soon as the previous window ends.
 			if ((!manual && diagnostic_capture_windows >= diagnostic_capture_window_limit) ||
-				diagnostic_frame_index <= diagnostic_capture_last_frame ||
+				(!manual && diagnostic_frame_index <= diagnostic_capture_last_frame) ||
 				(!manual && diagnostic_frame_index < diagnostic_capture_gap_until))
 			{
 				return;
@@ -314,7 +370,7 @@ namespace mtl
 				const f64 at = probe::capture_after_seconds();
 				if (at >= 0.0 && probe::elapsed_seconds() >= at)
 				{
-					diagnostic_try_arm_capture("time");
+					diagnostic_try_arm_capture("time", false, true);
 				}
 			}
 
@@ -368,7 +424,7 @@ namespace mtl
 		// Every call is cheap when no trigger is configured, and a match only
 		// reaches the arming code, which already refuses an active window and the
 		// inter-window gap.
-		void diagnostic_arm_from_content(u64 fp_hash, u64 vp_hash)
+		void diagnostic_arm_from_content(const rsx::context& ctx, u64 fp_hash, u64 vp_hash)
 		{
 			if (!probe::at_least(5) || !diagnostic_arm_configured())
 			{
@@ -382,9 +438,9 @@ namespace mtl
 			{
 				for (u32 unit = 0; unit < rsx::limits::fragment_textures_count; ++unit)
 				{
-					const auto& tex = rsx::method_registers.fragment_textures[unit];
+					const auto& tex = ctx.register_state->fragment_textures[unit];
 
-					if (tex.enabled() && rsx::get_address(tex.offset(), tex.location()) == diagnostic_arm_texture())
+					if (tex.enabled() && rsx::get_address(&ctx, tex.offset(), tex.location()) == diagnostic_arm_texture())
 					{
 						match = true;
 						break;
@@ -405,13 +461,49 @@ namespace mtl
 		// right and the image that was bound is wrong; a surface that stays black
 		// proves the shader is not sampling what the binder writes.  One run decides
 		// the side, and it is visible on screen without reading a log.
+		//
+		// A one-texel image removes UV and LOD together, so it cannot separate a
+		// wrong coordinate from a wrong mip.  Two patterned modes add that split:
+		// "uv" is a red/green coordinate gradient, and "checker" colours each
+		// four-by-four block by its block index.  A splotch that becomes the wrong
+		// pattern is a UV or LOD fault; one that stays black is after the sample.
+		enum class replacement_mode
+		{
+			off,
+			red,
+			uv,
+			checker
+		};
+
+		replacement_mode diagnostic_replace_mode()
+		{
+			static const replacement_mode mode = [] {
+				const char* value = std::getenv("MTL_PROBE_REPLACE_TEXTURES");
+
+				if (!value || !*value || *value == '0')
+				{
+					return replacement_mode::off;
+				}
+
+				if (!std::strcmp(value, "uv") || !std::strcmp(value, "2"))
+				{
+					return replacement_mode::uv;
+				}
+
+				if (!std::strcmp(value, "checker") || !std::strcmp(value, "3"))
+				{
+					return replacement_mode::checker;
+				}
+
+				return replacement_mode::red;
+			}();
+
+			return mode;
+		}
+
 		bool diagnostic_replace_textures()
 		{
-			static const bool enabled = [] {
-				const char* value = std::getenv("MTL_PROBE_REPLACE_TEXTURES");
-				return value && *value && *value != '0';
-			}();
-			return enabled;
+			return diagnostic_replace_mode() != replacement_mode::off;
 		}
 
 		// TODO(excise): level 5; MTL_PROBE_REPLACE_UNITS=0,3 narrows the red
@@ -454,70 +546,131 @@ namespace mtl
 			return false;
 		}
 
-		MTL::ResourceID diagnostic_red_texture(resource_manager& resources, rsx::texture_dimension_extended dimension)
+		MTL::ResourceID diagnostic_replacement_texture(resource_manager& resources, rsx::texture_dimension_extended dimension)
 		{
-			static MTL::Texture* red_2d = nullptr;
-			static MTL::Texture* red_cube = nullptr;
-			static MTL::Texture* red_3d = nullptr;
+			// One cached image per replacement mode and texture kind.  The cache is
+			// a diagnostic: a persistent image is deliberately never released, so
+			// the cache outlives every bind of the run.
+			constexpr u32 mode_count = 3;
+			constexpr u32 kind_count = 3;
+			static MTL::Texture* cache[mode_count][kind_count] = {};
 
-			MTL::Texture** slot = nullptr;
-			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+			const replacement_mode mode = diagnostic_replace_mode();
+
+			if (mode == replacement_mode::off)
+			{
+				return {};
+			}
+
+			u32 kind = 0;
+			MTL::TextureType type = MTL::TextureType2D;
 
 			switch (dimension)
 			{
 			case rsx::texture_dimension_extended::texture_dimension_cubemap:
-				slot = &red_cube;
-				descriptor->setTextureType(MTL::TextureTypeCube);
-				descriptor->setArrayLength(1);
+				kind = 1;
+				type = MTL::TextureTypeCube;
 				break;
 			case rsx::texture_dimension_extended::texture_dimension_3d:
-				slot = &red_3d;
-				descriptor->setTextureType(MTL::TextureType3D);
-				descriptor->setDepth(1);
+				kind = 2;
+				type = MTL::TextureType3D;
 				break;
 			default:
-				slot = &red_2d;
-				descriptor->setTextureType(MTL::TextureType2D);
 				break;
 			}
 
+			MTL::Texture*& slot = cache[static_cast<u32>(mode) - 1][kind];
+
+			if (slot)
+			{
+				return slot->gpuResourceID();
+			}
+
+			const bool cube = (type == MTL::TextureTypeCube);
+			// The gradient needs enough steps to read as a gradient; the checker
+			// needs four-texel blocks and a block index small enough to colour.
+			const u32 width = (mode == replacement_mode::red) ? 1u : (mode == replacement_mode::uv) ? 256u : 64u;
+			const u32 height = width;
+
+			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+			descriptor->setTextureType(type);
 			descriptor->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA8Unorm);
-			descriptor->setWidth(1);
-			descriptor->setHeight(1);
+			descriptor->setWidth(width);
+			descriptor->setHeight(height);
+			descriptor->setDepth(1);
 			descriptor->setMipmapLevelCount(1);
 			descriptor->setSampleCount(1);
-			if (dimension != rsx::texture_dimension_extended::texture_dimension_cubemap)
-			{
-				descriptor->setArrayLength(1);
-			}
+			descriptor->setArrayLength(1);
 			descriptor->setStorageMode(MTL::StorageModeShared);
 			descriptor->setUsage(MTL::TextureUsageShaderRead);
 
-			if (!*slot)
+			std::vector<u8> pixels(static_cast<usz>(width) * height * 4);
+
+			for (u32 y = 0; y < height; ++y)
 			{
-				*slot = resources.new_texture(descriptor, MTL::StorageModeShared);
-
-				if (*slot)
+				for (u32 x = 0; x < width; ++x)
 				{
-					resources.make_persistent(*slot);
+					usz offset = (static_cast<usz>(y) * width + x) * 4;
 
-					const u32 red = 0xff0000ff; // RGBA8 red, opaque.
-					if (dimension == rsx::texture_dimension_extended::texture_dimension_cubemap)
+					switch (mode)
 					{
-						for (u32 face = 0; face < 6; ++face)
-						{
-							(*slot)->replaceRegion(MTL::Region::Make2D(0, 0, 1, 1), 0, face, &red, 4, 4);
-						}
-					}
-					else
+					case replacement_mode::red:
+						pixels[offset + 0] = 255;
+						pixels[offset + 1] = 0;
+						pixels[offset + 2] = 0;
+						break;
+					case replacement_mode::uv:
+						pixels[offset + 0] = static_cast<u8>(x * 255 / (width - 1));
+						pixels[offset + 1] = static_cast<u8>(y * 255 / (height - 1));
+						pixels[offset + 2] = ((x ^ y) & 0x10) ? 64 : 192;
+						break;
+					case replacement_mode::checker:
 					{
-						(*slot)->replaceRegion(MTL::Region::Make2D(0, 0, 1, 1), 0, &red, 4);
+						// A four-by-four block carries its own index in red and
+						// green and a parity in blue.  A wrong coordinate lands on
+						// the wrong block, so the colour changes with the error.
+						const u32 block_x = x / 4;
+						const u32 block_y = y / 4;
+						const u32 index = block_x + block_y * (width / 4);
+						pixels[offset + 0] = static_cast<u8>(index * 37);
+						pixels[offset + 1] = static_cast<u8>(index * 101);
+						pixels[offset + 2] = ((block_x + block_y) & 1) ? 255 : 32;
+						break;
 					}
+					case replacement_mode::off:
+						break;
+					}
+
+					pixels[offset + 3] = 255;
 				}
 			}
 
+			slot = resources.new_texture(descriptor, MTL::StorageModeShared);
 			descriptor->release();
-			return *slot ? (*slot)->gpuResourceID() : MTL::ResourceID();
+
+			if (!slot)
+			{
+				return {};
+			}
+
+			resources.make_persistent(slot);
+
+			const MTL::Region region = MTL::Region::Make2D(0, 0, width, height);
+			const usz row_bytes = static_cast<usz>(width) * 4;
+
+			if (cube)
+			{
+				for (u32 face = 0; face < 6; ++face)
+				{
+					slot->replaceRegion(region, 0, face, pixels.data(), row_bytes, row_bytes * height);
+				}
+			}
+			else
+			{
+				slot->replaceRegion(region, 0, pixels.data(), row_bytes);
+			}
+
+			return slot->gpuResourceID();
 		}
 
 		// The sampled host images of one capture frame are dumped once each.  The
@@ -699,12 +852,13 @@ namespace mtl
 
 		struct draw_command_visitor
 		{
+			const rsx::context& ctx;
 			byte_ring& index_ring;
 			const rsx::vertex_input_layout& layout;
 
 			vertex_input_state operator()(const rsx::draw_array_command&) const
 			{
-				const auto& clause = rsx::method_registers.current_draw_clause;
+				const auto& clause = ctx.register_state->current_draw_clause;
 				const u32 vertex_count = clause.get_elements_count();
 				const u32 min_index = clause.min_index();
 
@@ -764,10 +918,10 @@ namespace mtl
 
 			vertex_input_state operator()(const rsx::draw_indexed_array_command& command) const
 			{
-				const auto& clause = rsx::method_registers.current_draw_clause;
+				const auto& clause = ctx.register_state->current_draw_clause;
 				const rsx::index_array_type type = clause.is_immediate_draw
 					? rsx::index_array_type::u32
-					: rsx::method_registers.index_type();
+					: ctx.register_state->index_type();
 
 				const u32 vertex_count = clause.get_elements_count();
 				const u32 index_count = expands_primitive(clause.primitive)
@@ -775,7 +929,7 @@ namespace mtl
 					: vertex_count;
 
 				const bool widen = type == rsx::index_array_type::u16 &&
-					!rsx::method_registers.restart_index_enabled() &&
+					!ctx.register_state->restart_index_enabled() &&
 					!expands_primitive(clause.primitive) &&
 					strip_topology(clause.primitive);
 
@@ -807,8 +961,8 @@ namespace mtl
 						command.raw_index_buffer,
 						type,
 						clause.primitive,
-						rsx::method_registers.restart_index_enabled(),
-						rsx::method_registers.restart_index(),
+						ctx.register_state->restart_index_enabled(),
+						ctx.register_state->restart_index(),
 						expands_primitive);
 				}
 
@@ -857,13 +1011,13 @@ namespace mtl
 				// offset the vertex id, which the modulo op needs
 				// (RSXVertexFetch.glsl:198).
 				result.index_rebase = true;
-				result.vertex_index_offset = rsx::method_registers.vertex_data_base_index();
+				result.vertex_index_offset = ctx.register_state->vertex_data_base_index();
 				return result;
 			}
 
 			vertex_input_state operator()(const rsx::draw_inlined_array&) const
 			{
-				const auto& clause = rsx::method_registers.current_draw_clause;
+				const auto& clause = ctx.register_state->current_draw_clause;
 				const u32 stream_length = static_cast<u32>(clause.inline_vertex_array.size());
 				const u32 vertex_count = (stream_length * sizeof(u32)) / layout.interleaved_blocks[0]->attribute_stride;
 
@@ -902,29 +1056,30 @@ namespace mtl
 		};
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 3; the per-draw state block, sampled for the first draws.
-		void dump_draw_state(u32 index, const surface_state& surface, const pipeline_properties& properties,
+		void dump_draw_state(const rsx::context& ctx, u32 index, const surface_state& surface, const pipeline_properties& properties,
 			const framebuffer& attachments, const rsx::framebuffer_layout& layout, const areau& scissor, bool supports_bc)
 		{
-			auto& m = rsx::method_registers;
-			const raster_state raster = capture_raster_state();
-			const depth_stencil_state depth = capture_depth_stencil_state();
+			const blend_state encoded_blend = capture_blend_state(ctx);
+			const raster_state raster = capture_raster_state(ctx);
+			const depth_stencil_state depth = capture_depth_stencil_state(ctx.draw_state.depth_stencil);
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: draw %u, primitive %u, color target %u, color format %u, depth format %u, aa %u, raster type %u, clip %ux%u, depth enabled %u",
-				index, static_cast<u32>(m.current_draw_clause.primitive), static_cast<u32>(surface.color_target),
+				index, static_cast<u32>(ctx.register_state->current_draw_clause.primitive), static_cast<u32>(surface.color_target),
 				static_cast<u32>(surface.color_format), static_cast<u32>(surface.depth_format), static_cast<u32>(surface.antialias),
 				static_cast<u32>(surface.raster_type), static_cast<u32>(surface.clip_width), static_cast<u32>(surface.clip_height),
-				surface.depth_enabled ? 1u : 0u);
+				ctx.draw_state.depth_stencil.depth_test_enabled ? 1u : 0u);
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: draw %u, rsx color mask %u%u%u%u, blend enable mask 0x%x, factors src %u/%u dst %u/%u, equations %u/%u, alpha test %u, logic op %u/%u, shade %u",
-				index, m.color_mask_r(0) ? 1u : 0u, m.color_mask_g(0) ? 1u : 0u, m.color_mask_b(0) ? 1u : 0u, m.color_mask_a(0) ? 1u : 0u,
-				m.blend_enabled_mask(),
-				static_cast<u32>(m.blend_func_sfactor_rgb()), static_cast<u32>(m.blend_func_sfactor_a()),
-				static_cast<u32>(m.blend_func_dfactor_rgb()), static_cast<u32>(m.blend_func_dfactor_a()),
-				static_cast<u32>(m.blend_equation_rgb()), static_cast<u32>(m.blend_equation_a()),
-				m.alpha_test_enabled() ? 1u : 0u, m.logic_op_enabled() ? 1u : 0u, static_cast<u32>(m.logic_operation()),
-				static_cast<u32>(m.shade_mode()));
+				index, ctx.draw_state.blend.color_mask[0].r ? 1u : 0u, ctx.draw_state.blend.color_mask[0].g ? 1u : 0u,
+				ctx.draw_state.blend.color_mask[0].b ? 1u : 0u, ctx.draw_state.blend.color_mask[0].a ? 1u : 0u,
+				ctx.draw_state.blend.enable_mask,
+				static_cast<u32>(encoded_blend.source_rgb), static_cast<u32>(encoded_blend.source_a),
+				static_cast<u32>(encoded_blend.destination_rgb), static_cast<u32>(encoded_blend.destination_a),
+				static_cast<u32>(encoded_blend.equation_rgb), static_cast<u32>(encoded_blend.equation_a),
+				encoded_blend.alpha_test_enabled ? 1u : 0u, encoded_blend.logic_op_enabled ? 1u : 0u,
+				static_cast<u32>(encoded_blend.logic_operation), static_cast<u32>(encoded_blend.shade_mode));
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: draw %u, mapped write mask 0x%x 0x%x 0x%x 0x%x, attachment count %u, samples %u, alpha to coverage %u, alpha to one %u, raster %u, topology %u",
@@ -945,10 +1100,12 @@ namespace mtl
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: draw %u, rsx depth test %u func %u write %u, stencil test %u, cull %u/%u, front face %u, polygon %u/%u, clip %.4f..%.4f, point %.3f",
-				index, m.depth_test_enabled() ? 1u : 0u, static_cast<u32>(m.depth_func()), m.depth_write_enabled() ? 1u : 0u,
-				m.stencil_test_enabled() ? 1u : 0u, m.cull_face_enabled() ? 1u : 0u, static_cast<u32>(m.cull_face_mode()),
-				static_cast<u32>(m.front_face_mode()), static_cast<u32>(m.polygon_mode_front()), static_cast<u32>(m.polygon_mode_back()),
-				static_cast<f64>(m.clip_min()), static_cast<f64>(m.clip_max()), static_cast<f64>(m.point_size()));
+				index, ctx.draw_state.depth_stencil.depth_test_enabled ? 1u : 0u,
+				static_cast<u32>(ctx.draw_state.depth_stencil.depth_func), ctx.draw_state.depth_stencil.depth_write_enabled ? 1u : 0u,
+				ctx.draw_state.depth_stencil.stencil_test_enabled ? 1u : 0u, raster.cull_enabled ? 1u : 0u,
+				static_cast<u32>(raster.cull_face), static_cast<u32>(raster.front_face),
+				static_cast<u32>(raster.front_polygon_mode), static_cast<u32>(raster.back_polygon_mode),
+				static_cast<f64>(raster.clip_min), static_cast<f64>(raster.clip_max), static_cast<f64>(raster.point_size));
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: draw %u, mapped cull %u winding %u fill %u, depth compare %u depth write %u",
@@ -972,16 +1129,15 @@ namespace mtl
 				attachments.color(0) ? attachments.color(0)->samples() : 0u);
 
 			// TODO(excise): level 3; per-event trace line.
-			MTL_NOTE(3, "Metal 4: draw %u, clear color %.4f %.4f %.4f %.4f, clear depth %.4f stencil %u, clear rect %u %u %ux%u",
+			MTL_NOTE(3, "Metal 4: draw %u, clear color %.4f %.4f %.4f %.4f, clear depth %.4f stencil %u, clear covers %u",
 				index, static_cast<f64>(surface.clear_color.red), static_cast<f64>(surface.clear_color.green),
 				static_cast<f64>(surface.clear_color.blue), static_cast<f64>(surface.clear_color.alpha),
 				static_cast<f64>(surface.clear_depth), static_cast<u32>(surface.clear_stencil),
-				static_cast<u32>(surface.clear_x), static_cast<u32>(surface.clear_y),
-				static_cast<u32>(surface.clear_width), static_cast<u32>(surface.clear_height));
+				ctx.draw_state.clear.scissor_covers_surface ? 1u : 0u);
 
 			for (u32 unit = 0; unit < 16; ++unit)
 			{
-				const auto& tex = m.fragment_textures[unit];
+				const auto& tex = ctx.register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
@@ -1027,7 +1183,7 @@ namespace mtl
 			return (hash ^ value) * 1099511628211ull;
 		}
 
-		void diagnostic_census_draw(u32 draw, u32 vp_id, u64 vp_hash, u32 fp_id, u64 fp_hash,
+		void diagnostic_census_draw(const rsx::context& ctx, u32 draw, u32 vp_id, u64 vp_hash, u32 fp_id, u64 fp_hash,
 			bool interpreter, const rsx::framebuffer_layout& layout, const surface_state& surface)
 		{
 			if (!probe::at_least(3))
@@ -1044,14 +1200,14 @@ namespace mtl
 
 			for (u32 unit = 0; unit < rsx::limits::fragment_textures_count; ++unit)
 			{
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = ctx.register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				key = diagnostic_census_mix(key, rsx::get_address(tex.offset(), tex.location()));
+				key = diagnostic_census_mix(key, rsx::get_address(&ctx, tex.offset(), tex.location()));
 				key = diagnostic_census_mix(key, static_cast<u32>(tex.format()));
 			}
 
@@ -1083,14 +1239,14 @@ namespace mtl
 
 			for (u32 unit = 0; unit < rsx::limits::fragment_textures_count; ++unit)
 			{
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = ctx.register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				const u32 address = rsx::get_address(tex.offset(), tex.location());
+				const u32 address = rsx::get_address(&ctx, tex.offset(), tex.location());
 				const bool is_target =
 					address == layout.color_addresses[0] || address == layout.color_addresses[1] ||
 					address == layout.color_addresses[2] || address == layout.color_addresses[3] ||
@@ -1131,11 +1287,11 @@ namespace mtl
 
 		// The PSO key of one draw (HLD-05 §3.5).  Every field is a latch the encoder
 		// state does not carry, so the key holds exactly the pipeline's inputs.
-		pipeline_properties capture_pipeline_properties(const surface_state& surface, const RSXVertexProgram& vertex)
+		pipeline_properties capture_pipeline_properties(const rsx::context& ctx, const surface_state& surface, const RSXVertexProgram& vertex)
 		{
-			const blend_state blend = capture_blend_state();
-			const raster_state raster = capture_raster_state();
-			const anti_aliasing_state aa = capture_anti_aliasing_state();
+			const blend_state blend = capture_blend_state(ctx);
+			const raster_state raster = capture_raster_state(ctx);
+			const anti_aliasing_state aa = capture_anti_aliasing_state(ctx.draw_state.multisample);
 
 			pipeline_properties properties;
 			properties.color_format = surface.color_format;
@@ -1154,7 +1310,7 @@ namespace mtl
 			// The RSX ignores the output of a non-point primitive, so such a draw
 			// takes the class that constrains nothing; a point draw keeps the point
 			// class, which is the class the output belongs to.
-			const MTL::PrimitiveTopologyClass draw_class = get_primitive_topology_class(rsx::method_registers.current_draw_clause.primitive);
+			const MTL::PrimitiveTopologyClass draw_class = get_primitive_topology_class(ctx.register_state->current_draw_clause.primitive);
 			properties.input_primitive_topology = draw_class;
 
 			if (draw_class != MTL::PrimitiveTopologyClassPoint &&
@@ -1172,7 +1328,7 @@ namespace mtl
 
 			for (u32 index = 0; index < properties.attachment_count; ++index)
 			{
-				properties.write_mask[index] = capture_color_write_mask(index, surface.color_format);
+				properties.write_mask[index] = capture_color_write_mask(ctx.draw_state.blend.color_mask[index]);
 			}
 
 			return properties;
@@ -1344,34 +1500,27 @@ namespace mtl
 		std::mutex guard;
 	};
 
-	MTLGSRender::MTLGSRender(utils::serial* ar) noexcept
-		: GSRender(ar)
+	MTLGSRender::MTLGSRender(rsx::context* ctx, rsx::display_output* display) noexcept
+		: render_backend(ctx, display)
 	{
 		// The guest shaders are compiled from GLSL, so the glslang context belongs
 		// to the renderer instance and comes up before the first one is compiled
 		// (VKGSRender.cpp:704).  Without it every shader parses against zero limits.
 		spirv::initialize_compiler_context();
+
+		// bind_context returns early for the initial context, so the backend binds
+		// it explicitly (VKGSRender.cpp:438, GLGSRender.cpp:39).
+		on_bind_context(m_ctx);
 	}
 
 	// Out of line so the unique_ptr teardown sees the complete types
 	// (MTLGSRender.h only forward-declares them).
 	MTLGSRender::~MTLGSRender()
 	{
-		// The base owns the ZCULL control through a unique_ptr and the backend
-		// hands it a member of frame_resources, so the base must not delete it.
-		// on_exit releases it on the graceful path; a renderer that never reached
-		// on_exit reaches the teardown with the pointer still aliased
-		// (GLGSRender.cpp:69, VKGSRender.cpp:916).
-		zcull_ctrl.release();
 		spirv::finalize_compiler_context();
 	}
 
-	u64 MTLGSRender::get_cycles()
-	{
-		return thread_ctrl::get_cycles(static_cast<named_thread<MTLGSRender>&>(*this));
-	}
-
-	void MTLGSRender::on_init_thread()
+	void MTLGSRender::on_init()
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "init");
@@ -1382,12 +1531,12 @@ namespace mtl
 		}
 
 		// The 16-bool backend contract (RSXThread.h:80; 10 §2.2).
-		m_device->fill_backend_config(backend_config);
+		m_device->fill_backend_config(m_config);
 
 		// Which side writes the guest label decides whether an acquire can park
 		// the FIFO reader on a GPU wait (DEVIATIONS-SYNC SY13, L138).
 		rsx_log.notice("Metal 4: guest labels are written by the %s",
-			backend_config.supports_host_gpu_labels ? "GPU (host label synchronization)" : "CPU (host store)");
+			m_config.supports_host_gpu_labels ? "GPU (host label synchronization)" : "CPU (host store)");
 
 		// The resource layer and the recorder come up with the device, because the
 		// guest window joins the persistent residency set and the ring is sized once
@@ -1403,14 +1552,13 @@ namespace mtl
 		m_frame_resources->samplers.init(m_device->dev());
 
 		// The occlusion counters, and every pass carries their buffer
-		// (MTLFramebuffer.cpp).  The base class owns the pointer, not the object.
+		// (MTLFramebuffer.cpp).  occlusion_queries() hands them to the thread.
 		m_frame_resources->zcull_control.init(*m_device, m_frame_resources->resources, m_frame_resources->recorder);
 		m_frame_resources->attachments.set_visibility_buffer(m_frame_resources->zcull_control.visibility_buffer(0));
-		zcull_ctrl.reset(&m_frame_resources->zcull_control);
 
 		// A frame without a native view is legal: the presenter stays invalid and
 		// the frame runs without a present (C7).
-		if (GSFrameBase* frame = get_frame())
+		if (GSFrameBase* frame = m_frame)
 		{
 			m_frame_resources->present.init(*m_device, frame->handle());
 		}
@@ -1433,9 +1581,9 @@ namespace mtl
 		m_frame_resources->interpreter.init(m_device->compiler(), m_device->pipeline_task_options(),
 			&m_frame_resources->jobs, &m_device->lost_flag());
 
-		if (!m_overlay_manager)
+		if (!RSX(m_ctx)->overlay_manager())
 		{
-			GSFrameBase* frame = get_frame();
+			GSFrameBase* frame = m_frame;
 
 			if (frame)
 			{
@@ -1451,11 +1599,15 @@ namespace mtl
 		}
 		else
 		{
-			rsx::shader_loading_dialog_native dlg(this);
+			rsx::shader_loading_dialog_native dlg(RSX(m_ctx));
 			m_frame_resources->shaders->load(&dlg, context);
 		}
 
-		GSRender::on_init_thread();
+		create_frame_context();
+
+		// The caches were built without a context; bind this one now.  bind_context
+		// skips the initial context, so the explicit call is the only one.
+		on_bind_context(m_ctx);
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 1; start the present-gap watchdog once the backend
@@ -1467,7 +1619,7 @@ namespace mtl
 #endif
 	}
 
-	void MTLGSRender::on_exit()
+	void MTLGSRender::on_shutdown()
 	{
 		// The tables are printed one last time, because a bounded run ends in a
 		// signal and its periodic report is the only other chance to see them.
@@ -1495,7 +1647,7 @@ namespace mtl
 				rsx_log.error("Metal: shader jobs did not drain; leaking the frame resources and device");
 				m_frame_resources.release();
 				m_device.release();
-				GSRender::on_exit();
+				destroy_frame_context();
 				return;
 			}
 
@@ -1508,7 +1660,7 @@ namespace mtl
 				rsx_log.error("Metal: device removed; leaking the frame resources and device");
 				m_frame_resources.release();
 				m_device.release();
-				GSRender::on_exit();
+				destroy_frame_context();
 				return;
 			}
 
@@ -1521,8 +1673,6 @@ namespace mtl
 			m_frame_resources->interpreter.shutdown();
 			m_frame_resources->present.shutdown();
 			m_frame_resources->output.shutdown();
-			// The base class must let go of the backend before the backend goes.
-			zcull_ctrl.release();
 			m_frame_resources->zcull_control.shutdown();
 			m_frame_resources->textures.destroy();
 			m_frame_resources->samplers.shutdown();
@@ -1541,7 +1691,7 @@ namespace mtl
 		}
 
 		m_device.reset();
-		GSRender::on_exit();
+		destroy_frame_context();
 	}
 
 	void MTLGSRender::open_frame()
@@ -1592,88 +1742,49 @@ namespace mtl
 #endif
 	}
 
-	void MTLGSRender::begin()
+	void MTLGSRender::begin_draw()
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "frame/begin");
-
-		// Publish pipelines that finished while the previous frame presented.
-		if (m_frame_resources)
+		if (!m_frame_resources)
 		{
-			m_frame_resources->jobs.advance();
+			return;
 		}
 
+		// Publish a link that completed since the previous clause.  This is the only
+		// drain point inside the draw loop, and it does not wait.
+		m_frame_resources->jobs.advance();
 		open_frame();
-		rsx::thread::begin();
-
-		// The framebuffer is prepared in begin(), as in the reference backends
-		// (VKGSRender.cpp:1281-1286 calls init_buffers -> prepare_rtts, GLDraw.cpp:916
-		// does the same).  end() tests should_skip_draw() before it would bind, and
-		// that test includes rtt_config_valid; without this bind a single invalid
-		// layout would leave the flag clear, end() would skip, the bind would never
-		// run, and every later draw would be skipped as well.  bind_framebuffer() is
-		// idempotent, so the bind in end() still serves a clear or a changed layout.
-		if (m_frame_resources && !skip_current_frame && !cond_render_ctrl.disable_rendering())
-		{
-			bind_framebuffer(rsx::framebuffer_creation_context::context_draw);
-		}
 	}
 
-	bool MTLGSRender::update_scissor(bool clip_viewport)
-	{
-		// TODO(excise): level 1; block timer.
-		MTL_PERF_SCOPE(1, "scissor");
-		areau region;
-		if (get_scissor(region, clip_viewport))
-		{
-			m_scissor = region;
-			return true;
-		}
-
-		return !m_graphics_state.test(rsx::pipeline_state::scissor_setup_invalid);
-	}
-
-	bool MTLGSRender::bind_framebuffer(rsx::framebuffer_creation_context context)
+	bool MTLGSRender::on_framebuffer_bound(const rsx::framebuffer_layout& layout)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "framebuffer/bind");
-		open_frame();
-
-		const bool clipped_scissor = (context == rsx::framebuffer_creation_context::context_draw);
-
-		if (m_current_framebuffer_context == context &&
-			!m_graphics_state.test(rsx::rtt_config_dirty) &&
-			m_frame_resources->attachments.valid() && m_framebuffer_layout.ignore_change)
-		{
-			// The layout has not changed, so the bound set is still current
-			// (VKGSRender.cpp:2618, GLRenderTargets.cpp:107).  The context is part of
-			// the test because get_framebuffer_layout() resolves the attachments
-			// differently for a clear than for a draw (color_buffer_unused /
-			// depth_buffer_unused, RSXThread.cpp:1541-1609), so a clear that follows
-			// a draw must rebuild the layout rather than reuse the draw's.
-			update_scissor(clipped_scissor);
-			return true;
-		}
-
-		m_current_framebuffer_context = context;
-
-		m_graphics_state.clear(rsx::rtt_config_dirty | rsx::rtt_config_contested | rsx::rtt_config_valid | rsx::rtt_cache_state_dirty);
-		get_framebuffer_layout(context, m_framebuffer_layout);
-
-		if (!m_graphics_state.test(rsx::rtt_config_valid))
+		if (!m_frame_resources)
 		{
 			return false;
 		}
 
-		m_frame_resources->attachments.bind(m_frame_resources->recorder, m_frame_resources->cache, m_framebuffer_layout, resolution_scaling_config);
+		open_frame();
+
+		// The core calls this hook even when the layout did not change, so the bound
+		// set is still current and must not be rebuilt (RSXGraphEngine.cpp:827-839).
+		if (layout.ignore_change && m_frame_resources->attachments.valid())
+		{
+			return true;
+		}
+
+		m_frame_resources->attachments.bind(m_frame_resources->recorder, m_frame_resources->cache,
+			m_ctx->fb.layout, RSX(m_ctx)->resolution_scaling_config);
 		reconcile_render_targets();
 
 		// TODO(excise): level 2; the framebuffer bind stream and its formats.  A
 		// bind runs near once per draw, so it is counted and classified here.
 		MTL_PROBE_LATCH(2, "framebuffer/bind");
-		MTL_PROBE_HISTOGRAM(2, "framebuffer color format", static_cast<u32>(m_framebuffer_layout.color_format), "gcm color format");
-		MTL_PROBE_HISTOGRAM(2, "framebuffer depth format", static_cast<u32>(m_framebuffer_layout.depth_format), "gcm depth format");
-		MTL_PROBE_HISTOGRAM(2, "framebuffer aa mode", static_cast<u32>(m_framebuffer_layout.aa_mode), "aa mode");
+		MTL_PROBE_HISTOGRAM(2, "framebuffer color format", static_cast<u32>(m_ctx->fb.layout.color_format), "gcm color format");
+		MTL_PROBE_HISTOGRAM(2, "framebuffer depth format", static_cast<u32>(m_ctx->fb.layout.depth_format), "gcm depth format");
+		MTL_PROBE_HISTOGRAM(2, "framebuffer aa mode", static_cast<u32>(m_ctx->fb.layout.aa_mode), "aa mode");
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 3; the first binds of the run only.
@@ -1683,22 +1794,23 @@ namespace mtl
 		if (diagnostic_bind_trace)
 		{
 			MTL_NOTE(3, "Metal 4: bind context %u, color 0x%x/0x%x/0x%x/0x%x fmt 0x%x pitch %u, depth 0x%x fmt 0x%x pitch %u, %ux%u, aa_mode %u",
-				static_cast<u32>(context),
-				m_framebuffer_layout.color_addresses[0], m_framebuffer_layout.color_addresses[1],
-				m_framebuffer_layout.color_addresses[2], m_framebuffer_layout.color_addresses[3],
-				static_cast<u32>(m_framebuffer_layout.color_format), m_framebuffer_layout.actual_color_pitch[0],
-				m_framebuffer_layout.zeta_address, static_cast<u32>(m_framebuffer_layout.depth_format),
-				m_framebuffer_layout.actual_zeta_pitch,
-				static_cast<u32>(m_framebuffer_layout.width), static_cast<u32>(m_framebuffer_layout.height),
-				static_cast<u32>(m_framebuffer_layout.aa_mode));
+				static_cast<u32>(m_ctx->fb.current_context),
+				m_ctx->fb.layout.color_addresses[0], m_ctx->fb.layout.color_addresses[1],
+				m_ctx->fb.layout.color_addresses[2], m_ctx->fb.layout.color_addresses[3],
+				static_cast<u32>(m_ctx->fb.layout.color_format), m_ctx->fb.layout.actual_color_pitch[0],
+				m_ctx->fb.layout.zeta_address, static_cast<u32>(m_ctx->fb.layout.depth_format),
+				m_ctx->fb.layout.actual_zeta_pitch,
+				static_cast<u32>(m_ctx->fb.layout.width), static_cast<u32>(m_ctx->fb.layout.height),
+				static_cast<u32>(m_ctx->fb.layout.aa_mode));
 		}
 #endif // MTL_DEBUG_LOGS
 
-		update_scissor(clipped_scissor);
-		// The occlusion result of the previous framebuffer is stale after a bind
-		// (VKGSRender.cpp:2851, GLRenderTargets.cpp:321).
-		check_zcull_status(true);
 		return m_frame_resources->attachments.valid();
+	}
+
+	bool MTLGSRender::is_framebuffer_bound() const
+	{
+		return m_frame_resources && m_frame_resources->attachments.valid();
 	}
 
 	void MTLGSRender::reconcile_render_targets()
@@ -1710,44 +1822,44 @@ namespace mtl
 		texture_cache& textures = frame.textures;
 		command_recorder& cmd = frame.recorder;
 
-		const u8 color_bpp = rsx::get_format_block_size_in_bytes(m_framebuffer_layout.color_format);
-		const u8 samples = rsx::get_format_sample_count(m_framebuffer_layout.aa_mode);
+		const u8 color_bpp = rsx::get_format_block_size_in_bytes(m_ctx->fb.layout.color_format);
+		const u8 samples = rsx::get_format_sample_count(m_ctx->fb.layout.aa_mode);
 
 		// A range that stops being a target is written back or dropped before the
 		// record of it is replaced, because the cache no longer knows the address
 		// afterwards (VKGSRender.cpp:2659-2692).
 		for (u32 index = 0; index < rsx::limits::color_buffers_count; ++index)
 		{
-			if (m_surface_info[index].pitch && g_cfg.video.write_color_buffers)
+			if (m_ctx->fb.surface_info[index].pitch && g_cfg.video.write_color_buffers)
 			{
-				const auto stale_range = m_surface_info[index].get_memory_range();
+				const auto stale_range = m_ctx->fb.surface_info[index].get_memory_range();
 				textures.set_memory_read_flags(stale_range, rsx::memory_read_flags::flush_once);
 				textures.flush_if_cache_miss_likely(cmd, stale_range);
 			}
 
-			m_surface_info[index].address = 0;
-			m_surface_info[index].pitch = 0;
-			m_surface_info[index].width = m_framebuffer_layout.width;
-			m_surface_info[index].height = m_framebuffer_layout.height;
-			m_surface_info[index].color_format = m_framebuffer_layout.color_format;
-			m_surface_info[index].bpp = color_bpp;
-			m_surface_info[index].samples = samples;
+			m_ctx->fb.surface_info[index].address = 0;
+			m_ctx->fb.surface_info[index].pitch = 0;
+			m_ctx->fb.surface_info[index].width = m_ctx->fb.layout.width;
+			m_ctx->fb.surface_info[index].height = m_ctx->fb.layout.height;
+			m_ctx->fb.surface_info[index].color_format = m_ctx->fb.layout.color_format;
+			m_ctx->fb.surface_info[index].bpp = color_bpp;
+			m_ctx->fb.surface_info[index].samples = samples;
 		}
 
-		if (m_depth_surface_info.pitch && g_cfg.video.write_depth_buffer)
+		if (m_ctx->fb.depth_surface_info.pitch && g_cfg.video.write_depth_buffer)
 		{
-			const auto stale_range = m_depth_surface_info.get_memory_range();
+			const auto stale_range = m_ctx->fb.depth_surface_info.get_memory_range();
 			textures.set_memory_read_flags(stale_range, rsx::memory_read_flags::flush_once);
 			textures.flush_if_cache_miss_likely(cmd, stale_range);
 		}
 
-		m_depth_surface_info.address = 0;
-		m_depth_surface_info.pitch = 0;
-		m_depth_surface_info.width = m_framebuffer_layout.width;
-		m_depth_surface_info.height = m_framebuffer_layout.height;
-		m_depth_surface_info.depth_format = m_framebuffer_layout.depth_format;
-		m_depth_surface_info.bpp = rsx::get_format_block_size_in_bytes(m_framebuffer_layout.depth_format);
-		m_depth_surface_info.samples = samples;
+		m_ctx->fb.depth_surface_info.address = 0;
+		m_ctx->fb.depth_surface_info.pitch = 0;
+		m_ctx->fb.depth_surface_info.width = m_ctx->fb.layout.width;
+		m_ctx->fb.depth_surface_info.height = m_ctx->fb.layout.height;
+		m_ctx->fb.depth_surface_info.depth_format = m_ctx->fb.layout.depth_format;
+		m_ctx->fb.depth_surface_info.bpp = rsx::get_format_block_size_in_bytes(m_ctx->fb.layout.depth_format);
+		m_ctx->fb.depth_surface_info.samples = samples;
 
 		// The surfaces the bind superseded or orphaned are released first, so a
 		// release cannot drop a lock the bound-target pass below takes
@@ -1790,7 +1902,7 @@ namespace mtl
 
 		store.orphaned_surfaces.clear();
 
-		for (u8 index : rsx::utility::get_rtt_indexes(m_framebuffer_layout.target))
+		for (u8 index : rsx::utility::get_rtt_indexes(m_ctx->fb.layout.target))
 		{
 			surface* target = store.m_bound_render_targets[index].second;
 			if (!target)
@@ -1798,19 +1910,19 @@ namespace mtl
 				continue;
 			}
 
-			m_surface_info[index].address = m_framebuffer_layout.color_addresses[index];
-			m_surface_info[index].pitch = m_framebuffer_layout.actual_color_pitch[index];
+			m_ctx->fb.surface_info[index].address = m_ctx->fb.layout.color_addresses[index];
+			m_ctx->fb.surface_info[index].pitch = m_ctx->fb.layout.actual_color_pitch[index];
 
 			// A target with no address or no pitch has no guest range to lock
 			// (VKGSRender.cpp:2780).
-			if (!m_surface_info[index].address || !m_surface_info[index].pitch)
+			if (!m_ctx->fb.surface_info[index].address || !m_ctx->fb.surface_info[index].pitch)
 			{
 				continue;
 			}
 
-			ensure(target->get_rsx_pitch() == m_framebuffer_layout.actual_color_pitch[index]);
+			ensure(target->get_rsx_pitch() == m_ctx->fb.layout.actual_color_pitch[index]);
 
-			const auto range = m_surface_info[index].get_memory_range(m_framebuffer_layout.aa_factors);
+			const auto range = m_ctx->fb.surface_info[index].get_memory_range(m_ctx->fb.layout.aa_factors);
 
 			// A cached view of this range, and every scaled or cropped view derived
 			// from it, is stale the moment the range becomes an attachment.
@@ -1821,8 +1933,8 @@ namespace mtl
 				// The section becomes the guest-side backing of the surface, so the
 				// write-back at flip has somewhere to land (texture_cache.h:1410).
 				textures.lock_memory_region(cmd, target, range, true,
-					m_surface_info[index].width, m_surface_info[index].height,
-					m_surface_info[index].pitch, target);
+					m_ctx->fb.surface_info[index].width, m_ctx->fb.surface_info[index].height,
+					m_ctx->fb.surface_info[index].pitch, target);
 			}
 			else
 			{
@@ -1888,23 +2000,23 @@ namespace mtl
 
 		if (surface* depth = store.m_bound_depth_stencil.second)
 		{
-			m_depth_surface_info.address = m_framebuffer_layout.zeta_address;
-			m_depth_surface_info.pitch = m_framebuffer_layout.actual_zeta_pitch;
+			m_ctx->fb.depth_surface_info.address = m_ctx->fb.layout.zeta_address;
+			m_ctx->fb.depth_surface_info.pitch = m_ctx->fb.layout.actual_zeta_pitch;
 
 			// A depth target with no address or no pitch has no guest range to lock
 			// (VKGSRender.cpp:2796).
-			if (m_depth_surface_info.address && m_depth_surface_info.pitch)
+			if (m_ctx->fb.depth_surface_info.address && m_ctx->fb.depth_surface_info.pitch)
 			{
-				ensure(depth->get_rsx_pitch() == m_framebuffer_layout.actual_zeta_pitch);
+				ensure(depth->get_rsx_pitch() == m_ctx->fb.layout.actual_zeta_pitch);
 
-				const auto range = m_depth_surface_info.get_memory_range(m_framebuffer_layout.aa_factors);
+				const auto range = m_ctx->fb.depth_surface_info.get_memory_range(m_ctx->fb.layout.aa_factors);
 				textures.notify_surface_changed(range);
 
 				if (g_cfg.video.write_depth_buffer)
 				{
 					textures.lock_memory_region(cmd, depth, range, true,
-						m_depth_surface_info.width, m_depth_surface_info.height,
-						m_depth_surface_info.pitch, depth);
+						m_ctx->fb.depth_surface_info.width, m_ctx->fb.depth_surface_info.height,
+						m_ctx->fb.depth_surface_info.pitch, depth);
 				}
 				else
 				{
@@ -1914,65 +2026,54 @@ namespace mtl
 		}
 	}
 
-	void MTLGSRender::clear_surface(u32 mask)
+	void MTLGSRender::clear()
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "clear");
-		if (skip_current_frame || !m_frame_resources)
+		if (!m_frame_resources)
 		{
 			return;
 		}
 
-		// A stencil clear cannot run with the stencil write mask off
-		// (VKGSRender.cpp:1413).
-		if (!rsx::method_registers.stencil_mask())
-		{
-			mask &= ~RSX_GCM_CLEAR_STENCIL_BIT;
-		}
-
-		if (!(mask & RSX_GCM_CLEAR_ANY_MASK))
+		// The core has already checked the frame skip, dropped the stencil bit for a
+		// zero write mask, decoded draw_state.clear and bound the framebuffer.
+		const rsx::clear_state& clear = m_ctx->draw_state.clear;
+		const rsx::flags32_t mask = clear.mask;
+		if (!mask)
 		{
 			return;
 		}
 
-		// The clear context is what makes the store create the attachments it needs.
-		u8 context = rsx::framebuffer_creation_context::context_draw;
-		if (mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK)
+		surface_state state = capture_surface_state(*m_ctx);
+
+		// The colour fields are only decoded when a colour clear is possible; for a
+		// float target the core deliberately zeroes the mask and leaves them stale.
+		const bool write_color = clear.color_mask != 0;
+		if (write_color)
 		{
-			context |= rsx::framebuffer_creation_context::context_clear_color;
+			state.clear_color = MTL::ClearColor::Make(
+				clear.color_r / 255.f, clear.color_g / 255.f,
+				clear.color_b / 255.f, clear.color_a / 255.f);
+			state.clear_colormask = clear.color_mask;
+			state.clear_color_fast = clear.color_mask_full;
 		}
 
-		if (mask & RSX_GCM_CLEAR_DEPTH_STENCIL_MASK)
-		{
-			context |= rsx::framebuffer_creation_context::context_clear_depth;
-		}
-
-		if (!bind_framebuffer(rsx::framebuffer_creation_context{context}))
-		{
-			return;
-		}
-
-		surface_state state = capture_surface_state();
-
-		// The clear registers hold one A8R8G8B8 word that the hardware copies into the
-		// surface, so the format decides the colour and the channels the clear writes
-		// (S4, S3; VKGSRender.cpp:1526-1578).
-		const resolved_clear resolved = resolve_surface_clear(state.color_format,
-			rsx::method_registers.clear_color_r(), rsx::method_registers.clear_color_g(),
-			rsx::method_registers.clear_color_b(), rsx::method_registers.clear_color_a(), mask);
-		state.clear_color = resolved.color;
-		state.clear_colormask = resolved.mask;
-		state.clear_color_fast = resolved.fast;
-
-		const u8 stencil_mask = rsx::method_registers.stencil_mask();
-		const bool write_color = resolved.mask != 0;
 		const bool write_depth = (mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
 		const bool write_stencil = (mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0;
+		if (write_depth)
+		{
+			// Format-decoded by the core; no host encoding is applied.
+			state.clear_depth = clear.depth_value;
+		}
+		if (write_stencil)
+		{
+			state.clear_stencil = clear.stencil_value;
+		}
 
-		// The stencil write mask below 0xff makes the stencil clear a partial write,
-		// which MTLLoadActionClear cannot express.  The fill then writes the reference
-		// through the mask (S5; VKGSRender.cpp:1624-1638).
-		const bool partial_stencil = write_stencil && stencil_mask != 0xff;
+		// A stencil write mask below 0xff makes the stencil clear a partial write,
+		// which MTLLoadActionClear cannot express.  The fill then writes the
+		// reference through the mask (S5; VKGSRender.cpp:1624-1638).
+		const bool partial_stencil = write_stencil && clear.stencil_write_mask != 0xff;
 		state.clear_stencil_fast = !partial_stencil;
 
 		// A clear writes the attachments, so the store marks them newest for the same
@@ -1982,7 +2083,7 @@ namespace mtl
 
 		framebuffer& attachments = m_frame_resources->attachments;
 
-		if (state.clear_covers_attachment() && (!write_color || resolved.fast) && !partial_stencil)
+		if (clear.scissor_covers_surface && (!write_color || clear.color_mask_full) && !partial_stencil)
 		{
 			// TODO(excise): level 2; which clear path ran.  The whole-attachment
 			// clear is a load action; the other path is a scissored fill.
@@ -2002,17 +2103,16 @@ namespace mtl
 		// colour clear.  That combination used to open the pass with a load action
 		// and wipe everything outside the scissor, so the count names the defect.
 		MTL_PROBE_LATCH(2, "clear/scissored fill");
-		if (resolved.fast)
+		if (clear.color_mask_full)
 		{
 			MTL_PROBE_LATCH(2, "clear/scissored fill full color");
 		}
 
 		// Metal has no scissored clear, so a partial clear is a full-screen fill
-		// confined by the scissor (CONFLICTS.md C1).
-		if (!update_scissor(false))
-		{
-			return;
-		}
+		// confined by the scissor (CONFLICTS.md C1).  The core's resolve_scissor
+		// already clamped the region and cleared rtt_config_valid when it is invalid.
+		const areau region = scaled_scissor(m_ctx->draw_state.scissor, m_ctx->fb.layout,
+			RSX(m_ctx)->resolution_scaling_config);
 
 		MTL4::RenderCommandEncoder* encoder = attachments.open_pass(m_frame_resources->recorder, 0, state);
 		if (!encoder)
@@ -2023,10 +2123,10 @@ namespace mtl
 		m_frame_resources->encoder = encoder;
 		record_pass_hazards(false);
 
-		u16 x = static_cast<u16>(m_scissor.x1);
-		u16 y = static_cast<u16>(m_scissor.y1);
-		u16 width = static_cast<u16>(m_scissor.width());
-		u16 height = static_cast<u16>(m_scissor.height());
+		u16 x = static_cast<u16>(region.x1);
+		u16 y = static_cast<u16>(region.y1);
+		u16 width = static_cast<u16>(region.width());
+		u16 height = static_cast<u16>(region.height());
 
 		std::tie(x, y, width, height) = rsx::clip_region<u16>(attachments.width(), attachments.height(), x, y, width, height, true);
 
@@ -2045,8 +2145,11 @@ namespace mtl
 		// not snapshot buffer contents (MTLConstants.h fill_values).
 		if (const MTL::GPUAddress values = m_frame_resources->constants.alloc_fill_values(color, state.clear_depth))
 		{
-			const fill_stencil stencil = write_stencil ? fill_stencil{ state.clear_stencil, stencil_mask } : fill_stencil{};
-			m_frame_resources->fill.fill(m_frame_resources->recorder.fragment_table(), encoder, values, color_format, attachments.sample_count(), to_color_write_mask(resolved.mask), write_depth, stencil);
+			const fill_stencil stencil = write_stencil
+				? fill_stencil{ clear.stencil_value, clear.stencil_write_mask }
+				: fill_stencil{};
+			m_frame_resources->fill.fill(m_frame_resources->recorder.fragment_table(), encoder, values, color_format,
+				attachments.sample_count(), to_color_write_mask(clear.color_mask), write_depth, stencil);
 		}
 
 		m_frame_resources->encoder = nullptr;
@@ -2476,7 +2579,7 @@ namespace mtl
 
 #endif // MTL_DEBUG_LOGS
 
-	void MTLGSRender::load_texture_env()
+	bool MTLGSRender::resolve_sampler_state(rsx::flags32_t& invalidated_programs)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "textures/resolve");
@@ -2498,20 +2601,20 @@ namespace mtl
 		// (GLDraw.cpp:340-425).  The cache resolves the guest range to an image and
 		// the sampler is a separate object, because MSL has no combined image
 		// sampler (HLD-05 §3.2).
-		for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+		for (u32 textures_ref = m_ctx->program.fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
 			if (!(textures_ref & 1))
 			{
 				continue;
 			}
 
-			if (!fs_sampler_state[i])
+			if (!m_fs_sampler_descriptors[i])
 			{
-				fs_sampler_state[i] = std::make_unique<texture_cache::sampled_image_descriptor>();
+				m_fs_sampler_descriptors[i] = std::make_unique<texture_cache::sampled_image_descriptor>();
 			}
 
-			auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
-			const auto& tex = rsx::method_registers.fragment_textures[i];
+			auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(m_fs_sampler_descriptors[i].get());
+			const auto& tex = m_ctx->register_state->fragment_textures[i];
 
 			// A disabled unit must not keep the image of the previous draw.  The
 			// argument writer clears the table slot when the bind becomes null (B3).
@@ -2525,8 +2628,9 @@ namespace mtl
 			}
 
 			const rsx::format_class previous_class = descriptor->format_class;
-			const bool dirty = m_textures_dirty[i];
-			m_textures_dirty[i] = false;
+			// The core clears the referenced mask after this hook returns true; do
+			// not consume the bit here.
+			const bool dirty = m_ctx->textures.fragment_textures_dirty & (1u << i);
 			bool resampled = false;
 
 			if (dirty || frame.textures.test_if_descriptor_expired(frame.recorder, frame.cache, descriptor, tex))
@@ -2555,7 +2659,7 @@ namespace mtl
 				if (diagnostic_unit_traces++ < 16)
 				{
 					MTL_NOTE(3, "Metal 4: resolve fragment unit %u, address 0x%x, format 0x%x, %ux%u, dirty %u, class %u, ctx %u",
-						i, rsx::get_address(tex.offset(), tex.location()), static_cast<u32>(tex.format()),
+						i, rsx::get_address(m_ctx, tex.offset(), tex.location()), static_cast<u32>(tex.format()),
 						static_cast<u32>(tex.width()), static_cast<u32>(tex.height()), dirty ? 1u : 0u,
 						static_cast<u32>(descriptor->format_class), static_cast<u32>(descriptor->upload_context));
 				}
@@ -2575,19 +2679,20 @@ namespace mtl
 
 			if (descriptor->format_class != previous_class)
 			{
-				// The host image changed class under the program's feet.
-				m_graphics_state |= rsx::fragment_program_state_dirty;
+				// The host image changed class under the program's feet.  The core
+				// propagates the flag into graphics_state.
+				invalidated_programs |= rsx::fragment_program_state_dirty;
 			}
 
 			bool deferred = false;
 			frame.fragment_textures[i] = frame.textures.resolve_texture_bind(
 				frame.recorder, descriptor,
-				frame.samplers.get(capture_fragment_sampler(static_cast<u8>(i))), deferred);
+				frame.samplers.get(capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i))), deferred);
 
 			if (diagnostic_replace_textures() && diagnostic_replace_unit(i))
 			{
 				// TODO(excise): level 5; the red-image bisection.
-				frame.fragment_textures[i].texture = diagnostic_red_texture(
+				frame.fragment_textures[i].texture = diagnostic_replacement_texture(
 					frame.resources, tex.get_extended_texture_dimension());
 			}
 
@@ -2648,9 +2753,9 @@ namespace mtl
 			// the bounded prefix of the whole run never reaches.
 			if (diagnostic_capture_active())
 			{
-				const u32 guest_address = rsx::get_address(tex.offset(), tex.location());
-				const auto& params = current_fragment_program.texture_params[i];
-				const sampler_state state = capture_fragment_sampler(static_cast<u8>(i));
+				const u32 guest_address = rsx::get_address(m_ctx, tex.offset(), tex.location());
+				const auto& params = m_ctx->program.fragment_program.texture_params[i];
+				const sampler_state state = capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i));
 
 				MTL_NOTE(5, "Metal 4: capture frame %llu unit %u, guest 0x%x ref 0x%x, raw 0x%x gcm 0x%x %ux%u pitch %u mips %u, ctx %u class %u, image %p %ux%u fmt 0x%x, sampler wrap %u/%u/%u filter %u/%u unnorm %u lod %.3f..%.3f bias %.3f aniso %u border %u compare %u/%u nearest %u, params scale %.4f %.4f %.4f bias %.4f %.4f %.4f clamp %.4f %.4f %.4f %.4f remap 0x%x control 0x%x",
 					static_cast<unsigned long long>(diagnostic_frame_index), i, guest_address, descriptor->ref_address,
@@ -2734,7 +2839,7 @@ namespace mtl
 			if (diagnostic_unit_traces++ < 16)
 			{
 				MTL_NOTE(3, "Metal 4: fragment unit %u reads 0x%x, gcm 0x%x, %ux%u, pitch %u, ctx %u, class %u, ref 0x%x, %s, image %p %ux%u fmt 0x%x",
-					i, rsx::get_address(tex.offset(), tex.location()),
+					i, rsx::get_address(m_ctx, tex.offset(), tex.location()),
 					static_cast<u32>(tex.format()) & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN),
 					static_cast<u32>(tex.width()), static_cast<u32>(tex.height()), tex.pitch(),
 					static_cast<u32>(descriptor->upload_context), static_cast<u32>(descriptor->format_class),
@@ -2753,6 +2858,7 @@ namespace mtl
 				frame.fragment_textures[i].texture._impl)
 			{
 				frame.scheduler.note_write(frame.fragment_textures[i].texture,
+					sampled_guest_range(m_ctx, m_ctx->register_state->fragment_textures[i]),
 					access_stages(rsx::surface_access::transfer_write, false));
 			}
 
@@ -2760,7 +2866,7 @@ namespace mtl
 			// through a castable view (VKDraw.cpp:702-721).  The view is the surface
 			// itself when the surface carries no stencil, and the slot then stays
 			// unbound.
-			if ((current_fragment_program.texture_state.redirected_textures & (1u << i)) &&
+			if ((m_ctx->program.fragment_program.texture_state.redirected_textures & (1u << i)) &&
 				stencil_sampler && descriptor->image_handle)
 			{
 				if (texture* stencil = descriptor->image_handle->stencil_view())
@@ -2770,20 +2876,20 @@ namespace mtl
 			}
 		}
 
-		for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+		for (u32 textures_ref = m_ctx->program.vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
 			if (!(textures_ref & 1))
 			{
 				continue;
 			}
 
-			if (!vs_sampler_state[i])
+			if (!m_vs_sampler_descriptors[i])
 			{
-				vs_sampler_state[i] = std::make_unique<texture_cache::sampled_image_descriptor>();
+				m_vs_sampler_descriptors[i] = std::make_unique<texture_cache::sampled_image_descriptor>();
 			}
 
-			auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
-			const auto& tex = rsx::method_registers.vertex_textures[i];
+			auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(m_vs_sampler_descriptors[i].get());
+			const auto& tex = m_ctx->register_state->vertex_textures[i];
 
 			// A disabled unit binds null, not the image from the previous draw (B4).
 			if (!tex.enabled())
@@ -2794,8 +2900,7 @@ namespace mtl
 				continue;
 			}
 
-			const bool dirty = m_vertex_textures_dirty[i];
-			m_vertex_textures_dirty[i] = false;
+			const bool dirty = m_ctx->textures.vertex_textures_dirty & (1u << i);
 			bool resampled = false;
 
 			if (dirty || frame.textures.test_if_descriptor_expired(frame.recorder, frame.cache, descriptor, tex))
@@ -2817,7 +2922,7 @@ namespace mtl
 
 				// TODO(excise): level 3; per-event trace line.
 				MTL_NOTE(3, "Metal 4: resolve vertex unit %u, address 0x%x, format 0x%x, %ux%u, dirty %u, ctx %u",
-					i, rsx::get_address(tex.offset(), tex.location()), static_cast<u32>(tex.format()),
+					i, rsx::get_address(m_ctx, tex.offset(), tex.location()), static_cast<u32>(tex.format()),
 					static_cast<u32>(tex.width()), static_cast<u32>(tex.height()), dirty ? 1u : 0u,
 					static_cast<u32>(descriptor->upload_context));
 			}
@@ -2834,11 +2939,11 @@ namespace mtl
 			bool deferred = false;
 			frame.vertex_textures[i] = frame.textures.resolve_texture_bind(
 				frame.recorder, descriptor,
-				frame.samplers.get(capture_vertex_sampler(static_cast<u8>(i))), deferred);
+				frame.samplers.get(capture_vertex_sampler(*m_ctx->register_state, static_cast<u8>(i))), deferred);
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: vertex unit %u reads 0x%x, gcm 0x%x, %ux%u, ctx %u, class %u, %s, image %p",
-				i, rsx::get_address(tex.offset(), tex.location()),
+				i, rsx::get_address(m_ctx, tex.offset(), tex.location()),
 				static_cast<u32>(tex.format()) & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN),
 				static_cast<u32>(tex.width()), static_cast<u32>(tex.height()),
 				static_cast<u32>(descriptor->upload_context), static_cast<u32>(descriptor->format_class),
@@ -2848,11 +2953,16 @@ namespace mtl
 				frame.vertex_textures[i].texture._impl)
 			{
 				frame.scheduler.note_write(frame.vertex_textures[i].texture,
+					sampled_guest_range(m_ctx, m_ctx->register_state->vertex_textures[i]),
 					access_stages(rsx::surface_access::transfer_write, false));
 			}
 		}
 
-		m_frame_stats.textures_upload_time += m_profiler.duration();
+		// The core adds textures_upload_time after this hook returns true.
+
+		// A unit that cannot be resolved binds null; that is not a reason to skip
+		// the draw or the program resolution that follows.
+		return true;
 	}
 
 	void MTLGSRender::record_pass_hazards(bool sample_textures)
@@ -2869,19 +2979,23 @@ namespace mtl
 		// barrier for it would consume a write record the frame still needs.
 		if (sample_textures)
 		{
-			for (u32 referenced = current_fp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			for (u32 referenced = m_ctx->program.fp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
 			{
 				if ((referenced & 1) && frame.fragment_textures[i].texture._impl)
 				{
-					scheduler.note_read(frame.fragment_textures[i].texture, access_stages(rsx::surface_access::shader_read, false));
+					scheduler.note_read(frame.fragment_textures[i].texture,
+						sampled_guest_range(m_ctx, m_ctx->register_state->fragment_textures[i]),
+						access_stages(rsx::surface_access::shader_read, false));
 				}
 			}
 
-			for (u32 referenced = current_vp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			for (u32 referenced = m_ctx->program.vp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
 			{
 				if ((referenced & 1) && frame.vertex_textures[i].texture._impl)
 				{
-					scheduler.note_read(frame.vertex_textures[i].texture, access_stages(rsx::surface_access::shader_read, true));
+					scheduler.note_read(frame.vertex_textures[i].texture,
+						sampled_guest_range(m_ctx, m_ctx->register_state->vertex_textures[i]),
+						access_stages(rsx::surface_access::shader_read, true));
 				}
 			}
 		}
@@ -2890,7 +3004,8 @@ namespace mtl
 		for (u32 index = 0; index < frame.attachments.color_count(); ++index)
 		{
 			surface* color = frame.attachments.color(index);
-			scheduler.note_write(color->resource_id(), access_stages(rsx::surface_access::shader_write, false));
+			scheduler.note_write(color->resource_id(), color->get_memory_range(),
+				access_stages(rsx::surface_access::shader_write, false));
 
 			// A multisampled attachment resolves into its resolve target when the
 			// pass ends, and the resolve target is the image a later draw samples
@@ -2901,13 +3016,18 @@ namespace mtl
 			{
 				// TODO(excise): level 2; the resolve-target write of a pass (area J).
 				MTL_PROBE_LATCH(2, "surface/resolve target write");
-				scheduler.note_write(resolve->resource_id(), MTL::StageTile);
+				// The resolve target is a private image the cache does not key by
+				// guest address, but it is the surface's resolved image, so a later
+				// sample of the surface range must be ordered behind it.  The write
+				// therefore carries the surface's footprint, not a range of its own.
+				scheduler.note_write(resolve->resource_id(), color->get_memory_range(), MTL::StageTile);
 			}
 		}
 
 		if (frame.attachments.has_depth())
 		{
-			scheduler.note_write(frame.attachments.depth()->resource_id(), access_stages(rsx::surface_access::shader_write, false));
+			scheduler.note_write(frame.attachments.depth()->resource_id(), frame.attachments.depth()->get_memory_range(),
+				access_stages(rsx::surface_access::shader_write, false));
 		}
 
 		// A cyclic reference the cache met while it resolved this clause: the surface
@@ -2927,100 +3047,34 @@ namespace mtl
 	// subdraws: the pipeline, the pass and the encoder state are per clause, and
 	// the vertex streams and the ABI blocks are per subdraw.  end() runs before
 	// rsx::thread::end(), which owns the post-execute cleanup (RSXThread.cpp:971).
-	void MTLGSRender::end()
+	bool MTLGSRender::end_draw()
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "frame/end");
 
-		// Publish a link that completed since the previous clause.  This is the
-		// only drain point inside the draw loop, and it does not wait.
-		if (m_frame_resources)
+		// The core decoded the draw state, resolved the samplers and the programs,
+		// and moved the pipeline bits into draw_state.dirty before this hook.  The
+		// framebuffer is bound and a skipped draw never reaches here.
+		if (!m_frame_resources)
 		{
-			m_frame_resources->jobs.advance();
+			return false;
 		}
 
-		static u32 diagnostic_skip_count = 0;
-		static bool diagnostic_bind_reported = false;
+		frame_resources& frame = *m_frame_resources;
+		auto& draw_call = m_ctx->register_state->current_draw_clause;
+
+		// The core's resolve_scissor already intersected the viewport, clamped to the
+		// window and marked the invalid case.
+		const areau scissor_region = scaled_scissor(m_ctx->draw_state.scissor, m_ctx->fb.layout,
+			RSX(m_ctx)->resolution_scaling_config);
+
 		static bool diagnostic_program_reported = false;
 		static bool diagnostic_pipeline_reported = false;
 		static bool diagnostic_pass_reported = false;
 
-		if (should_skip_draw())
-		{
-			// TODO(excise): level 2; one latch per cause, so the coverage table
-			// counts them.  The predicate has four independent causes and a bare
-			// latch cannot say which one fires.
-			if (skip_current_frame)
-			{
-				MTL_PROBE_LATCH(2, "skip/frame");
-			}
-
-			if (!m_graphics_state.test(rsx::rtt_config_valid))
-			{
-				MTL_PROBE_LATCH(2, "skip/config invalid");
-			}
-
-			if (cond_render_ctrl.disable_rendering())
-			{
-				MTL_PROBE_LATCH(2, "skip/conditional render");
-			}
-
-			if (m_graphics_state.test(rsx::rtt_config_no_attachments))
-			{
-				MTL_PROBE_LATCH(2, "skip/no attachments");
-			}
-
-			// TODO(excise): level 2; the first 64 refused draws, with the geometry
-			// that decided the refusal.  The shared scissor setter clears
-			// rtt_config_valid for an empty rectangle or one outside the window
-			// clip (RSXThread.cpp:2142-2149), so the numbers below are what
-			// makes the refusal.
-			if (mtl::probe::at_least(2) && diagnostic_skip_count < 64)
-			{
-				const auto& regs = rsx::method_registers;
-
-				MTL_NOTE(2, "Metal 4: should_skip_draw refuses the draw: skip frame %u, config valid %u, conditional render disabled %u, no attachments %u, scissor %ux%u+%u+%u, window clip %ux%u, viewport %ux%u+%u+%u, scissor invalid %u, scissor clipped %u",
-					skip_current_frame ? 1u : 0u,
-					m_graphics_state.test(rsx::rtt_config_valid) ? 1u : 0u,
-					cond_render_ctrl.disable_rendering() ? 1u : 0u,
-					m_graphics_state.test(rsx::rtt_config_no_attachments) ? 1u : 0u,
-					regs.scissor_origin_x(), regs.scissor_origin_y(), regs.scissor_width(), regs.scissor_height(),
-					regs.window_clip_horizontal(), regs.window_clip_vertical(),
-					regs.viewport_origin_x(), regs.viewport_origin_y(), regs.viewport_width(), regs.viewport_height(),
-					m_graphics_state.test(rsx::pipeline_state::scissor_setup_invalid) ? 1u : 0u,
-					m_graphics_state.test(rsx::pipeline_state::scissor_setup_clipped) ? 1u : 0u);
-
-				diagnostic_skip_count++;
-			}
-
-			execute_nop_draw();
-			rsx::thread::end();
-			return;
-		}
-
-		if (!bind_framebuffer(rsx::framebuffer_creation_context::context_draw))
-		{
-			if (!diagnostic_bind_reported)
-			{
-				diagnostic_bind_reported = true;
-				rsx_log.error("Metal 4: bind_framebuffer refuses the draw");
-			}
-
-			execute_nop_draw();
-			rsx::thread::end();
-			return;
-		}
-
-		frame_resources& frame = *m_frame_resources;
-		auto& draw_call = rsx::method_registers.current_draw_clause;
-
+		// The programs of this draw.  The core resolved both, and the texture units
+		// resolved before them.
 		static u32 diagnostic_draws = 0;
-
-		// The programs of this draw.  analyse_current_rsx_pipeline fills the
-		// metadata (RSXThread.cpp:2318).  The texture units resolve first, because
-		// the program builders read the resolved descriptors (RSXThread.cpp:2488).
-		analyse_current_rsx_pipeline();
-		load_texture_env();
 
 		// TODO(excise): level 2; the draw stream is counted and classified here.
 		MTL_PROBE_LATCH(2, "draw/record");
@@ -3037,20 +3091,20 @@ namespace mtl
 
 			for (u32 unit = 0; unit < frame.fragment_textures.size(); ++unit)
 			{
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = m_ctx->register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				const u32 guest_address = rsx::get_address(tex.offset(), tex.location());
+				const u32 guest_address = rsx::get_address(m_ctx, tex.offset(), tex.location());
 				const bool is_target =
-					guest_address == m_framebuffer_layout.color_addresses[0] ||
-					guest_address == m_framebuffer_layout.color_addresses[1] ||
-					guest_address == m_framebuffer_layout.color_addresses[2] ||
-					guest_address == m_framebuffer_layout.color_addresses[3] ||
-					guest_address == m_framebuffer_layout.zeta_address;
+					guest_address == m_ctx->fb.layout.color_addresses[0] ||
+					guest_address == m_ctx->fb.layout.color_addresses[1] ||
+					guest_address == m_ctx->fb.layout.color_addresses[2] ||
+					guest_address == m_ctx->fb.layout.color_addresses[3] ||
+					guest_address == m_ctx->fb.layout.zeta_address;
 
 				const u32 remaining = (units_len < sizeof(units)) ? static_cast<u32>(sizeof(units) - units_len) : 0u;
 
@@ -3080,13 +3134,13 @@ namespace mtl
 			MTL_NOTE(3, "Metal 4: draw %u, command %u, primitive %u, inline %u, color 0x%x/0x%x/0x%x/0x%x fmt 0x%x, depth 0x%x fmt 0x%x, %ux%u, aa_mode %u, scissor (%u,%u,%u,%u), samples:%s",
 				diagnostic_draws, static_cast<u32>(draw_call.command), static_cast<u32>(draw_call.primitive),
 				::size32(draw_call.inline_vertex_array),
-				m_framebuffer_layout.color_addresses[0], m_framebuffer_layout.color_addresses[1],
-				m_framebuffer_layout.color_addresses[2], m_framebuffer_layout.color_addresses[3],
-				static_cast<u32>(m_framebuffer_layout.color_format),
-				m_framebuffer_layout.zeta_address, static_cast<u32>(m_framebuffer_layout.depth_format),
-				static_cast<u32>(m_framebuffer_layout.width), static_cast<u32>(m_framebuffer_layout.height),
-				static_cast<u32>(m_framebuffer_layout.aa_mode),
-				m_scissor.x1, m_scissor.y1, m_scissor.width(), m_scissor.height(),
+				m_ctx->fb.layout.color_addresses[0], m_ctx->fb.layout.color_addresses[1],
+				m_ctx->fb.layout.color_addresses[2], m_ctx->fb.layout.color_addresses[3],
+				static_cast<u32>(m_ctx->fb.layout.color_format),
+				m_ctx->fb.layout.zeta_address, static_cast<u32>(m_ctx->fb.layout.depth_format),
+				static_cast<u32>(m_ctx->fb.layout.width), static_cast<u32>(m_ctx->fb.layout.height),
+				static_cast<u32>(m_ctx->fb.layout.aa_mode),
+				scissor_region.x1, scissor_region.y1, scissor_region.width(), scissor_region.height(),
 				units_len ? units : " none");
 		}
 #endif // MTL_DEBUG_LOGS
@@ -3107,14 +3161,14 @@ namespace mtl
 		{
 			for (u32 unit = 0; unit < frame.fragment_textures.size(); ++unit)
 			{
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = m_ctx->register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				const u32 guest_address = rsx::get_address(tex.offset(), tex.location());
+				const u32 guest_address = rsx::get_address(m_ctx, tex.offset(), tex.location());
 				u32 nonzero = 0;
 				const auto* words_at = vm::get_super_ptr<u32>(guest_address);
 
@@ -3137,14 +3191,14 @@ namespace mtl
 
 			for (u32 unit = 0; unit < frame.fragment_textures.size() && diagnostic_sample_count < 64; ++unit)
 			{
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = m_ctx->register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				const u32 guest_address = rsx::get_address(tex.offset(), tex.location());
+				const u32 guest_address = rsx::get_address(m_ctx, tex.offset(), tex.location());
 				const u32 gcm_format = static_cast<u32>(tex.format()) & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 				const u32 block = rsx::get_format_block_size_in_bytes(gcm_format);
 				// A compressed format stores a 4x4 block in `block` bytes, so the
@@ -3160,9 +3214,9 @@ namespace mtl
 					continue;
 				}
 
-				if (fs_sampler_state[unit] && diagnostic_sampled_count <= 8)
+				if (m_fs_sampler_descriptors[unit] && diagnostic_sampled_count <= 8)
 				{
-					auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(fs_sampler_state[unit].get());
+					auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(m_fs_sampler_descriptors[unit].get());
 
 					if (descriptor && descriptor->image_handle)
 					{
@@ -3283,24 +3337,20 @@ namespace mtl
 		}
 #endif // MTL_DEBUG_LOGS
 
-		get_current_vertex_program(vs_sampler_state);
-		get_current_fragment_program(fs_sampler_state);
-		if (current_vertex_program.data.empty() || !current_fragment_program.ucode_length)
+		if (m_ctx->program.vertex_program.data.empty() || !m_ctx->program.fragment_program.ucode_length)
 		{
 			if (!diagnostic_program_reported)
 			{
 				diagnostic_program_reported = true;
 				rsx_log.error("Metal 4: the draw has no program (vertex bytes %u, fragment words %u)",
-					static_cast<u32>(current_vertex_program.data.size()), current_fragment_program.ucode_length);
+					static_cast<u32>(m_ctx->program.vertex_program.data.size()), m_ctx->program.fragment_program.ucode_length);
 			}
 
-			execute_nop_draw();
-			rsx::thread::end();
-			return;
+			return false;
 		}
 
-		const surface_state surface = capture_surface_state();
-		pipeline_properties properties = capture_pipeline_properties(surface, current_vertex_program);
+		const surface_state surface = capture_surface_state(*m_ctx);
+		pipeline_properties properties = capture_pipeline_properties(*m_ctx, surface, m_ctx->program.vertex_program);
 
 		// TODO(excise): level 2; the classified draw state, one row per draw.
 		MTL_PROBE_HISTOGRAM(2, "draw topology", static_cast<u32>(properties.input_primitive_topology), "topology");
@@ -3311,19 +3361,19 @@ namespace mtl
 		// TODO(excise): level 3; the programs of this draw.  A program changes more
 		// often than a format does, so the lookup stays off the level-2 path, which
 		// is the performance path.
-		MTL_PROBE_HISTOGRAM(3, "draw vertex program", current_vp_metadata.ucode_hash, "vertex ucode hash");
-		MTL_PROBE_HISTOGRAM(3, "draw fragment program", current_fp_metadata.ucode_hash, "fragment ucode hash");
+		MTL_PROBE_HISTOGRAM(3, "draw vertex program", m_ctx->program.vp_metadata.ucode_hash, "vertex ucode hash");
+		MTL_PROBE_HISTOGRAM(3, "draw fragment program", m_ctx->program.fp_metadata.ucode_hash, "fragment ucode hash");
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 5; a content trigger opens the window before the
 		// draw-state block below, so the matching draw itself is described.
-		diagnostic_arm_from_content(current_fp_metadata.ucode_hash, current_vp_metadata.ucode_hash);
+		diagnostic_arm_from_content(*m_ctx, m_ctx->program.fp_metadata.ucode_hash, m_ctx->program.vp_metadata.ucode_hash);
 
 		// TODO(excise): level 3; the draw-state block, for the first draws and the
 		// capture frame.
 		if (diagnostic_draws < 9 || diagnostic_capture_active())
 		{
-			dump_draw_state(diagnostic_draws - 1, surface, properties, frame.attachments, m_framebuffer_layout, m_scissor,
+			dump_draw_state(*m_ctx, diagnostic_draws - 1, surface, properties, frame.attachments, m_ctx->fb.layout, scissor_region,
 				frame.resources.supports_bc_texture_compression());
 		}
 #endif // MTL_DEBUG_LOGS
@@ -3341,8 +3391,8 @@ namespace mtl
 		std::shared_ptr<const interpreter_pipeline> interpreted;
 
 		if (interpreter_enabled &&
-			interpreter_cache::build_request(current_vertex_program, current_fragment_program,
-				current_vp_metadata, current_fp_metadata, interpreted_request))
+			interpreter_cache::build_request(*m_ctx, m_ctx->program.vertex_program, m_ctx->program.fragment_program,
+				m_ctx->program.vp_metadata, m_ctx->program.fp_metadata, interpreted_request))
 		{
 			// The interpreter declares only the outputs it writes.  The real
 			// pipeline still sees the unmodified mask, so the trim is a copy.
@@ -3381,9 +3431,9 @@ namespace mtl
 			const bool compile_async = !interpreter_only && shadermode != shader_mode::recompiler;
 
 			const auto data = frame.programs.get_graphics_pipeline(
-				&m_program_cache_hint,
-				current_vertex_program,
-				current_fragment_program,
+				&m_ctx->program.cache_hint,
+				m_ctx->program.vertex_program,
+				m_ctx->program.fragment_program,
 				properties,
 				compile_async,
 				true,
@@ -3426,9 +3476,7 @@ namespace mtl
 				// The host miss contract yields once; the link is on Metal's compiler
 				// threads.  Do not drain here: the next end()/begin() publishes.
 				std::this_thread::yield();
-				execute_nop_draw();
-				rsx::thread::end();
-				return;
+				return false;
 			}
 		}
 
@@ -3463,7 +3511,7 @@ namespace mtl
 			frame.interpreter_texture_count = 0;
 			for (u32 unit = 0; unit < rsx::limits::fragment_textures_count; ++unit)
 			{
-				if (current_fp_metadata.referenced_textures_mask & (1u << unit))
+				if (m_ctx->program.fp_metadata.referenced_textures_mask & (1u << unit))
 				{
 					frame.interpreter_texture_count = unit + 1;
 				}
@@ -3475,11 +3523,11 @@ namespace mtl
 			// (VKShaderInterpreter.cpp:2255-2293).
 			byte_ring& ring = frame.constants.instruction_ring();
 
-			const u64 vertex_key = static_cast<u64>(current_vp_metadata.ucode_hash) ^
-				(static_cast<u64>(current_vertex_program.base_address) << 32) ^
-				(static_cast<u64>(current_vertex_program.entry) << 16) ^
-				static_cast<u64>(current_vertex_program.output_mask) ^
-				(static_cast<u64>(current_vp_metadata.ucode_length) << 48);
+			const u64 vertex_key = static_cast<u64>(m_ctx->program.vp_metadata.ucode_hash) ^
+				(static_cast<u64>(m_ctx->program.vertex_program.base_address) << 32) ^
+				(static_cast<u64>(m_ctx->program.vertex_program.entry) << 16) ^
+				static_cast<u64>(m_ctx->program.vertex_program.output_mask) ^
+				(static_cast<u64>(m_ctx->program.vp_metadata.ucode_length) << 48);
 
 			if (auto found = frame.interpreter_vertex_blocks.find(vertex_key); found != frame.interpreter_vertex_blocks.end())
 			{
@@ -3487,33 +3535,31 @@ namespace mtl
 			}
 			else
 			{
-				const u64 block_size = 16 + current_vp_metadata.ucode_length;
+				const u64 block_size = 16 + m_ctx->program.vp_metadata.ucode_length;
 				u32 offset = 0;
 				void* block = ring.alloc(block_size, offset, 256);
 
 				if (!block)
 				{
 					rsx_log.error("Metal: interpreter vertex instruction ring exhausted");
-					execute_nop_draw();
-					rsx::thread::end();
-					return;
+					return false;
 				}
 
 				u32* header = static_cast<u32*>(block);
-				header[0] = current_vertex_program.base_address;
-				header[1] = current_vertex_program.entry;
-				header[2] = current_vertex_program.output_mask;
-				header[3] = rsx::method_registers.two_side_light_en() ? 1u : 0u;
-				std::memcpy(static_cast<std::byte*>(block) + 16, current_vertex_program.data.data(), current_vp_metadata.ucode_length);
+				header[0] = m_ctx->program.vertex_program.base_address;
+				header[1] = m_ctx->program.vertex_program.entry;
+				header[2] = m_ctx->program.vertex_program.output_mask;
+				header[3] = m_ctx->register_state->two_side_light_en() ? 1u : 0u;
+				std::memcpy(static_cast<std::byte*>(block) + 16, m_ctx->program.vertex_program.data.data(), m_ctx->program.vp_metadata.ucode_length);
 
 				frame.interpreter_vertex_instructions = ring.address_of(offset);
 				frame.interpreter_vertex_blocks.emplace(vertex_key, frame.interpreter_vertex_instructions);
 			}
 
-			const u64 fragment_key = static_cast<u64>(current_fp_metadata.ucode_hash) ^
-				(static_cast<u64>(rsx::method_registers.shader_control()) << 32) ^
-				(static_cast<u64>(current_fragment_program.texture_state.texture_dimensions) << 48) ^
-				(static_cast<u64>(current_fp_metadata.program_ucode_length) << 24);
+			const u64 fragment_key = static_cast<u64>(m_ctx->program.fp_metadata.ucode_hash) ^
+				(static_cast<u64>(m_ctx->register_state->shader_control()) << 32) ^
+				(static_cast<u64>(m_ctx->program.fragment_program.texture_state.texture_dimensions) << 48) ^
+				(static_cast<u64>(m_ctx->program.fp_metadata.program_ucode_length) << 24);
 
 			if (auto found = frame.interpreter_fragment_blocks.find(fragment_key); found != frame.interpreter_fragment_blocks.end())
 			{
@@ -3521,23 +3567,21 @@ namespace mtl
 			}
 			else
 			{
-				const u64 block_size = 16 + current_fp_metadata.program_ucode_length;
+				const u64 block_size = 16 + m_ctx->program.fp_metadata.program_ucode_length;
 				u32 offset = 0;
 				void* block = ring.alloc(block_size, offset, 256);
 
 				if (!block)
 				{
 					rsx_log.error("Metal: interpreter fragment instruction ring exhausted");
-					execute_nop_draw();
-					rsx::thread::end();
-					return;
+					return false;
 				}
 
 				u32 resident = 0;
 
 				for (u32 unit = 0; unit < 16; ++unit)
 				{
-					if ((current_fp_metadata.referenced_textures_mask & (1u << unit)) &&
+					if ((m_ctx->program.fp_metadata.referenced_textures_mask & (1u << unit)) &&
 						frame.fragment_textures[unit].texture._impl)
 					{
 						resident |= 1u << unit;
@@ -3545,11 +3589,11 @@ namespace mtl
 				}
 
 				u32* header = static_cast<u32*>(block);
-				header[0] = rsx::method_registers.shader_control();
-				header[1] = current_fragment_program.texture_state.texture_dimensions;
+				header[0] = m_ctx->register_state->shader_control();
+				header[1] = m_ctx->program.fragment_program.texture_state.texture_dimensions;
 				header[2] = resident;
 				header[3] = 0;
-				std::memcpy(static_cast<std::byte*>(block) + 16, current_fragment_program.get_data(), current_fp_metadata.program_ucode_length);
+				std::memcpy(static_cast<std::byte*>(block) + 16, m_ctx->program.fragment_program.get_data(), m_ctx->program.fp_metadata.program_ucode_length);
 
 				frame.interpreter_fragment_instructions = ring.address_of(offset);
 				frame.interpreter_fragment_blocks.emplace(fragment_key, frame.interpreter_fragment_instructions);
@@ -3565,10 +3609,10 @@ namespace mtl
 		// TODO(excise): level 3; the census row of this draw.  It needs the
 		// compiled ids, which are only known after the pipeline resolves, and it
 		// runs before the draw is encoded so its first draw is this one.
-		diagnostic_census_draw(diagnostic_current_draw,
-			compiled_vertex ? compiled_vertex->id : ~0u, current_vp_metadata.ucode_hash,
-			compiled_fragment ? compiled_fragment->id : ~0u, current_fp_metadata.ucode_hash,
-			use_interpreter, m_framebuffer_layout, surface);
+		diagnostic_census_draw(*m_ctx, diagnostic_current_draw,
+			compiled_vertex ? compiled_vertex->id : ~0u, m_ctx->program.vp_metadata.ucode_hash,
+			compiled_fragment ? compiled_fragment->id : ~0u, m_ctx->program.fp_metadata.ucode_hash,
+			use_interpreter, m_ctx->fb.layout, surface);
 #endif // MTL_DEBUG_LOGS
 
 		// The emulated depth compare samples the depth surface, which this pass also
@@ -3577,7 +3621,7 @@ namespace mtl
 		// and the shader reads the mirror (REALISATION.md, "The depth/stencil-as-
 		// texture cluster").
 		frame.depth_input = {};
-		if ((current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE) && frame.attachments.has_depth())
+		if ((m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE) && frame.attachments.has_depth())
 		{
 			const MTL::ResourceID mirror = frame.attachments.depth()->mirror_depth(frame.recorder);
 			MTL::SamplerState* sampler = frame.samplers.get(stencil_mirror_sampler());
@@ -3596,11 +3640,9 @@ namespace mtl
 				rsx_log.error("Metal 4: the pass of the draw could not open");
 			}
 
-			// Every other failure path of this function ends in a NOP draw, and the
-			// shared draw bookkeeping runs the same way (VKDraw.cpp:1283-1288).
-			execute_nop_draw();
-			rsx::thread::end();
-			return;
+			// Returning false runs the NOP draw and the shared bookkeeping
+			// (VKDraw.cpp:1283-1288).
+			return false;
 		}
 
 		frame.encoder = encoder;
@@ -3615,8 +3657,8 @@ namespace mtl
 
 		encoder->setRenderPipelineState(use_interpreter ? interpreted->state : program->state);
 
-		const auto diagnostic_encoder_state = capture_encoder_state(!!(current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
-		MTL::ScissorRect scissor = build_scissor_rect(m_scissor.x1, m_scissor.y1, m_scissor.x1 + m_scissor.width(), m_scissor.y1 + m_scissor.height(), diagnostic_encoder_state.clip_height);
+		const auto diagnostic_encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
+		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), diagnostic_encoder_state.clip_height);
 		apply_encoder_state(encoder, diagnostic_encoder_state, scissor, frame.depth_cache);
 
 #if MTL_DEBUG_LOGS
@@ -3627,7 +3669,7 @@ namespace mtl
 		if (probe::at_least(5))
 		{
 			frame.current_pipeline_state = use_interpreter ? interpreted->state : program->state;
-			frame.current_pipeline_key = static_cast<u32>(current_vp_metadata.ucode_hash ^ (current_fp_metadata.ucode_hash * 0x9e3779b1ull));
+			frame.current_pipeline_key = static_cast<u32>(m_ctx->program.vp_metadata.ucode_hash ^ (m_ctx->program.fp_metadata.ucode_hash * 0x9e3779b1ull));
 			frame.current_vp_id = frame.compiled_vertex ? frame.compiled_vertex->id : 0;
 			frame.current_fp_id = frame.compiled_fragment ? frame.compiled_fragment->id : 0;
 
@@ -3639,9 +3681,9 @@ namespace mtl
 			frame.current_viewport[1] = static_cast<f32>(viewport.originY);
 			frame.current_viewport[2] = static_cast<f32>(viewport.width);
 			frame.current_viewport[3] = static_cast<f32>(viewport.height);
-			frame.current_blend_hash = hash_blend_state(capture_blend_state());
-			frame.current_depth_hash = static_cast<u32>(hash_depth_stencil_state(capture_depth_stencil_state()));
-			frame.current_raster_hash = hash_raster_state(capture_raster_state());
+			frame.current_blend_hash = hash_blend_state(capture_blend_state(*m_ctx));
+			frame.current_depth_hash = static_cast<u32>(hash_depth_stencil_state(capture_depth_stencil_state(m_ctx->draw_state.depth_stencil)));
+			frame.current_raster_hash = hash_raster_state(capture_raster_state(*m_ctx));
 		}
 #endif // MTL_DEBUG_LOGS
 
@@ -3672,8 +3714,8 @@ namespace mtl
 		// TODO(excise): level 2; the coordinate audit.  The clip size against the
 		// attachment, and the raster modes, decide whether geometry lands as the
 		// title drew it (area A and area C of the design).
-		MTL_PROBE_LATCH(2, diagnostic_encoder_state.clip_width == m_framebuffer_layout.width &&
-			diagnostic_encoder_state.clip_height == m_framebuffer_layout.height
+		MTL_PROBE_LATCH(2, diagnostic_encoder_state.clip_width == m_ctx->fb.layout.width &&
+			diagnostic_encoder_state.clip_height == m_ctx->fb.layout.height
 			? "audit/clip matches target" : "audit/clip mismatches target");
 		MTL_PROBE_HISTOGRAM(2, "audit fill mode", static_cast<u32>(diagnostic_encoder_state.fill_mode), "triangle fill mode");
 		MTL_PROBE_HISTOGRAM(2, "audit cull mode", static_cast<u32>(diagnostic_encoder_state.cull_mode), "cull mode");
@@ -3706,7 +3748,7 @@ namespace mtl
 		// The indexed-constant tables of a hardware-instanced draw.  The shared
 		// helper replays the clause, so it runs before the subdraw loop
 		// (RSXDrawCommands.cpp:743-751).
-		if (current_vertex_program.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS)
+		if (m_ctx->program.vertex_program.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS)
 		{
 			rsx::io_buffer lookup([&](usz size) -> std::tuple<void*, usz>
 			{
@@ -3726,7 +3768,7 @@ namespace mtl
 			// (RSXDrawCommands.cpp:752-754).  The compiled program supplies the
 			// relocation table, so the instance tables stride like the shader
 			// (RSXDrawCommands.cpp:755-756; VKGSRender.cpp:2167-2168).
-			GRAPH_frontend().fill_constants_instancing_buffer(lookup, constants, frame.compiled_vertex);
+			RSX(m_ctx)->GRAPH_frontend().fill_constants_instancing_buffer(lookup, constants, frame.compiled_vertex);
 		}
 		else
 		{
@@ -3740,7 +3782,7 @@ namespace mtl
 		{
 			emit_geometry(sub_index++);
 
-			if (draw_call.is_trivial_instanced_draw && backend_config.supports_hw_instanced_rendering)
+			if (draw_call.is_trivial_instanced_draw && m_config.supports_hw_instanced_rendering)
 			{
 				draw_call.end();
 			}
@@ -3825,7 +3867,7 @@ namespace mtl
 		// for their guest ranges.  A later sample resolves to them only if the store
 		// says so: its write tag is what wins the tie against a cached copy
 		// (texture_cache.h:2680, VKDraw.cpp:1424).
-		frame.cache.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled);
+		frame.cache.on_write(m_ctx->fb.layout.color_write_enabled, m_ctx->fb.layout.zeta_write_enabled);
 
 		// A colour attachment resolves when its pass stores, so the resolved image
 		// already holds this draw.  on_write() sets require_resolve for the next
@@ -3840,7 +3882,7 @@ namespace mtl
 			}
 		}
 
-		rsx::thread::end();
+		return true;
 	}
 
 	void MTLGSRender::emit_geometry(u32 sub_index)
@@ -3852,7 +3894,7 @@ namespace mtl
 		m_profiler.start();
 		frame_resources& frame = *m_frame_resources;
 		MTL4::RenderCommandEncoder* encoder = frame.encoder;
-		auto& draw_call = rsx::method_registers.current_draw_clause;
+		auto& draw_call = m_ctx->register_state->current_draw_clause;
 
 		// The vertex state of this subdraw (GLDraw.cpp:730-760).
 		const rsx::flags32_t vertex_state_mask = rsx::vertex_base_changed | rsx::vertex_arrays_changed;
@@ -3879,15 +3921,15 @@ namespace mtl
 
 		if (vertex_state & rsx::vertex_arrays_changed)
 		{
-			GRAPH_frontend().analyse_inputs_interleaved(frame.vertex_layout, current_vp_metadata);
+			RSX(m_ctx)->GRAPH_frontend().analyse_inputs_interleaved(frame.vertex_layout, m_ctx->program.vp_metadata);
 		}
 		else if (vertex_state & rsx::vertex_base_changed)
 		{
 			for (auto& info : frame.vertex_layout.interleaved_blocks)
 			{
 				info->vertex_range.second = 0;
-				const u32 vertex_base_offset = rsx::method_registers.vertex_data_base_offset();
-				info->real_offset_address = rsx::get_address(rsx::get_vertex_offset_from_base(vertex_base_offset, info->base_offset), info->memory_location);
+				const u32 vertex_base_offset = m_ctx->register_state->vertex_data_base_offset();
+				info->real_offset_address = rsx::get_address(m_ctx, rsx::get_vertex_offset_from_base(vertex_base_offset, info->base_offset), info->memory_location);
 			}
 		}
 		else
@@ -3901,18 +3943,23 @@ namespace mtl
 		if (vertex_state && !frame.vertex_layout.validate())
 		{
 			// No vertex inputs are enabled.  Nothing reaches the GPU, but the
-			// clause's pipeline dependencies still have to run
-			// (GLDraw.cpp:755-766).
-			execute_nop_draw();
-			rsx::thread::end();
+			// clause's remaining pipeline dependencies still have to run
+			// (VKDraw.cpp:1026-1034).
+			do
+			{
+				draw_call.execute_pipeline_dependencies(m_ctx);
+			}
+			while (draw_call.next());
+
+			draw_call.end();
 			return;
 		}
 
 		// The index array and the vertex range of this subdraw
 		// (GLVertexBuffers.cpp:66-150).
 		const vertex_input_state input = std::visit(
-			draw_command_visitor{ frame.constants.index_ring(), frame.vertex_layout },
-			GRAPH_frontend().get_draw_command(rsx::method_registers));
+			draw_command_visitor{ *m_ctx, frame.constants.index_ring(), frame.vertex_layout },
+			RSX(m_ctx)->GRAPH_frontend().get_draw_command(*m_ctx->register_state));
 
 		// TODO(excise): level 1; running total.
 		MTL_PERF_COUNT(1, "draw/vertices", input.vertex_draw_count);
@@ -3928,10 +3975,10 @@ namespace mtl
 		u32 vertex_base = input.min_index;
 		if (input.index_rebase)
 		{
-			vertex_base = rsx::get_index_from_base(vertex_base, rsx::method_registers.vertex_data_base_index());
+			vertex_base = rsx::get_index_from_base(vertex_base, m_ctx->register_state->vertex_data_base_index());
 		}
 
-		const auto required = calculate_memory_requirements(frame.vertex_layout, vertex_base, vertex_count);
+		const auto required = RSX(m_ctx)->GRAPH_frontend().calculate_memory_requirements(frame.vertex_layout, vertex_base, vertex_count);
 		u32 persistent_base = 0;
 		u32 volatile_base = 0;
 		void* persistent_data = nullptr;
@@ -3960,16 +4007,16 @@ namespace mtl
 			}
 		}
 
-		m_frame_stats.setup_time += m_profiler.duration();
+		m_ctx->stats.setup_time += m_profiler.duration();
 
 		if (persistent_data || volatile_data)
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "draw/vertex upload");
-			GRAPH_frontend().write_vertex_data_to_memory(frame.vertex_layout, vertex_base, vertex_count, persistent_data, volatile_data);
+			RSX(m_ctx)->GRAPH_frontend().write_vertex_data_to_memory(frame.vertex_layout, vertex_base, vertex_count, persistent_data, volatile_data);
 		}
 
-		m_frame_stats.vertex_upload_time += m_profiler.duration();
+		m_ctx->stats.vertex_upload_time += m_profiler.duration();
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 5; the vertex upload of the first subdraws.
@@ -4064,22 +4111,22 @@ namespace mtl
 			return;
 		}
 
-		GRAPH_frontend().fill_scale_offset_data(context->scale_offset_mat, false);
-		GRAPH_frontend().fill_user_clip_data(&context->user_clip_configuration_bits);
-		context->transform_branch_bits = rsx::method_registers.transform_branch_bits();
-		context->point_size = rsx::method_registers.point_size() * resolution_scaling_config.scale_factor();
-		context->z_near = rsx::method_registers.clip_min();
-		context->z_far = rsx::method_registers.clip_max();
+		RSX(m_ctx)->GRAPH_frontend().fill_scale_offset_data(context->scale_offset_mat, false);
+		RSX(m_ctx)->GRAPH_frontend().fill_user_clip_data(&context->user_clip_configuration_bits);
+		context->transform_branch_bits = m_ctx->register_state->transform_branch_bits();
+		context->point_size = m_ctx->register_state->point_size() * RSX(m_ctx)->resolution_scaling_config.scale_factor();
+		context->z_near = m_ctx->register_state->clip_min();
+		context->z_far = m_ctx->register_state->clip_max();
 
-		GRAPH_frontend().fill_fragment_state_buffer(fragment, current_fragment_program);
-		current_fragment_program.texture_params.write_to(sampler, current_fp_metadata.referenced_textures_mask);
-		std::memcpy(stipple, rsx::method_registers.polygon_stipple_pattern(), stipple_block_count * sizeof(vec4_block));
+		RSX(m_ctx)->GRAPH_frontend().fill_fragment_state_buffer(fragment, m_ctx->program.fragment_program);
+		m_ctx->program.fragment_program.texture_params.write_to(sampler, m_ctx->program.fp_metadata.referenced_textures_mask);
+		std::memcpy(stipple, m_ctx->register_state->polygon_stipple_pattern(), stipple_block_count * sizeof(vec4_block));
 
 		// The transform constants.  The full 468-vec4 file is re-uploaded only when
 		// the shared state flag says the file changed
 		// (Core/RSXDriverState.h:15).  The shader reads the compacted file, so the
 		// upload applies the program's relocation table (GLGSRender.cpp:1159-1171).
-		if (!frame.transform_constants_valid || m_graphics_state.test(rsx::pipeline_state::transform_constants_dirty))
+		if (!frame.transform_constants_valid || m_ctx->draw_state.dirty.test(rsx::draw_state_t::group::transform_constants))
 		{
 			vec4_block* block = frame.constants.alloc_transform_constants();
 			if (!block)
@@ -4091,17 +4138,17 @@ namespace mtl
 				? std::span<const u16>(frame.compiled_vertex->constant_ids)
 				: std::span<const u16>{};
 
-			GRAPH_frontend().fill_vertex_program_constants_data(block, reloc_table);
+			RSX(m_ctx)->GRAPH_frontend().fill_vertex_program_constants_data(block, reloc_table);
 			frame.transform_constants_index = frame.constants.transform_constants_index();
 			frame.transform_constants_valid = true;
-			m_graphics_state.clear(rsx::pipeline_state::transform_constants_dirty);
+			m_ctx->draw_state.dirty.clear(rsx::draw_state_t::group::transform_constants);
 
 #if MTL_DEBUG_LOGS
 			// TODO(excise): level 5; the transform constants of a bounded prefix.
 			if (diagnostic_trace)
 			{
 				MTL_NOTE(5, "Metal 4: transform constants, index %u, reloc %u, vp base 0x%x, [0] %.4f %.4f %.4f %.4f [1] %.4f %.4f %.4f %.4f [2] %.4f %.4f %.4f %.4f [3] %.4f %.4f %.4f %.4f",
-					frame.transform_constants_index, static_cast<u32>(reloc_table.size()), current_vertex_program.base_address,
+					frame.transform_constants_index, static_cast<u32>(reloc_table.size()), m_ctx->program.vertex_program.base_address,
 					static_cast<f64>(block[0].v[0]), static_cast<f64>(block[0].v[1]), static_cast<f64>(block[0].v[2]), static_cast<f64>(block[0].v[3]),
 					static_cast<f64>(block[1].v[0]), static_cast<f64>(block[1].v[1]), static_cast<f64>(block[1].v[2]), static_cast<f64>(block[1].v[3]),
 					static_cast<f64>(block[2].v[0]), static_cast<f64>(block[2].v[1]), static_cast<f64>(block[2].v[2]), static_cast<f64>(block[2].v[3]),
@@ -4135,7 +4182,7 @@ namespace mtl
 
 			rsx::write_fragment_constants_to_buffer(
 				{ reinterpret_cast<f32*>(constants), fragment_constant_count * 4 },
-				current_fragment_program,
+				m_ctx->program.fragment_program,
 				frame.compiled_fragment->constant_offsets,
 				true);
 
@@ -4208,9 +4255,9 @@ namespace mtl
 #endif // MTL_DEBUG_LOGS
 		}
 
-		GRAPH_frontend().fill_vertex_layout_state(
+		RSX(m_ctx)->GRAPH_frontend().fill_vertex_layout_state(
 			frame.vertex_layout,
-			current_vp_metadata,
+			m_ctx->program.vp_metadata,
 			vertex_base,
 			vertex_count,
 			&params->attrib_data[0][0],
@@ -4225,6 +4272,8 @@ namespace mtl
 		// pipeline may be released before the flip.
 		if (probe::at_least(5))
 		{
+			const areau scissor_region = scaled_scissor(m_ctx->draw_state.scissor, m_ctx->fb.layout,
+				RSX(m_ctx)->resolution_scaling_config);
 			draw_record record;
 			record.global_id = ++diagnostic_global_draw_id;
 			record.frame_id = static_cast<u32>(diagnostic_frame_index);
@@ -4263,23 +4312,23 @@ namespace mtl
 			record.fs_constants_offset = params->fs_constants_offset;
 			record.fs_texture_base_index = params->fs_texture_base_index;
 			record.fs_stipple_offset = params->fs_stipple_pattern_offset;
-			record.blend_values_index = (current_fragment_program.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
+			record.blend_values_index = (m_ctx->program.fragment_program.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
 				? frame.constants.blend_values_index() : 0;
 
 			for (u32 target = 0; target < 4; ++target)
 			{
-				record.color_target[target] = m_framebuffer_layout.color_addresses[target];
+				record.color_target[target] = m_ctx->fb.layout.color_addresses[target];
 			}
 
-			record.color_format = static_cast<u32>(m_framebuffer_layout.color_format);
-			record.depth_target = m_framebuffer_layout.zeta_address;
-			record.depth_format = static_cast<u32>(m_framebuffer_layout.depth_format);
-			record.width = m_framebuffer_layout.width;
-			record.height = m_framebuffer_layout.height;
-			record.scissor[0] = m_scissor.x1;
-			record.scissor[1] = m_scissor.y1;
-			record.scissor[2] = m_scissor.width();
-			record.scissor[3] = m_scissor.height();
+			record.color_format = static_cast<u32>(m_ctx->fb.layout.color_format);
+			record.depth_target = m_ctx->fb.layout.zeta_address;
+			record.depth_format = static_cast<u32>(m_ctx->fb.layout.depth_format);
+			record.width = m_ctx->fb.layout.width;
+			record.height = m_ctx->fb.layout.height;
+			record.scissor[0] = scissor_region.x1;
+			record.scissor[1] = scissor_region.y1;
+			record.scissor[2] = scissor_region.width();
+			record.scissor[3] = scissor_region.height();
 
 			for (u32 axis = 0; axis < 4; ++axis)
 			{
@@ -4295,14 +4344,14 @@ namespace mtl
 				record.attrib_desc[unit] = params->attrib_data[unit][0];
 				record.attrib_offset[unit] = params->attrib_data[unit][1];
 
-				const auto& tex = rsx::method_registers.fragment_textures[unit];
+				const auto& tex = m_ctx->register_state->fragment_textures[unit];
 
 				if (!tex.enabled())
 				{
 					continue;
 				}
 
-				record.tex_addr[unit] = rsx::get_address(tex.offset(), tex.location());
+				record.tex_addr[unit] = rsx::get_address(m_ctx, tex.offset(), tex.location());
 				record.tex_format[unit] = static_cast<u32>(tex.format());
 				record.tex_width[unit] = tex.width();
 				record.tex_height[unit] = tex.height();
@@ -4326,6 +4375,12 @@ namespace mtl
 				record.tex_pitch[unit] = tex.pitch();
 				record.tex_dimension[unit] = static_cast<u32>(tex.get_extended_texture_dimension());
 				record.tex_format_ex[unit] = tex.remap();
+
+				// The table entry the draw is about to write, not the guest's
+				// request.  capture.py joins these to the host-sample dump so a
+				// sampling fault can be read as "wrong object" or "right object".
+				record.texture_id[unit] = frame.fragment_textures[unit].texture._impl;
+				record.sampler_id[unit] = frame.fragment_textures[unit].sampler._impl;
 			}
 
 			// The hashes are the cheap cross-frame discriminator; the bytes are in
@@ -4434,8 +4489,8 @@ namespace mtl
 			// TODO(excise): level 5; sampled byte dump.
 			MTL_NOTE(5, "Metal 4: geometry %u, vertex program base 0x%x output mask 0x%x ctrl 0x%x, fragment ctrl 0x%x ucode %u, compiled vertex %u mask 0x%x, compiled fragment %u mask 0x%x, rop control 0x%x, alpha ref %.4f",
 				geometry,
-				current_vertex_program.base_address, current_vertex_program.output_mask, current_vertex_program.ctrl,
-				current_fragment_program.ctrl, current_fragment_program.ucode_length,
+				m_ctx->program.vertex_program.base_address, m_ctx->program.vertex_program.output_mask, m_ctx->program.vertex_program.ctrl,
+				m_ctx->program.fragment_program.ctrl, m_ctx->program.fragment_program.ucode_length,
 				frame.compiled_vertex ? frame.compiled_vertex->id : 0u,
 				frame.compiled_vertex ? frame.compiled_vertex->color_output_mask : 0u,
 				frame.compiled_fragment ? frame.compiled_fragment->id : 0u,
@@ -4451,7 +4506,7 @@ namespace mtl
 		{
 			for (u32 unit = 0; unit < 16; ++unit)
 			{
-				if (!(current_fp_metadata.referenced_textures_mask & (1u << unit)))
+				if (!(m_ctx->program.fp_metadata.referenced_textures_mask & (1u << unit)))
 				{
 					continue;
 				}
@@ -4559,10 +4614,10 @@ namespace mtl
 				frame.compiled_vertex ? frame.compiled_vertex->id : 0u,
 				frame.compiled_fragment ? frame.compiled_fragment->id : 0u,
 				static_cast<unsigned long long>(fragment_constant_count), params->fs_constants_offset,
-				current_fragment_program.texture_state.texture_dimensions,
-				current_fragment_program.texture_state.shadow_textures,
-				current_fragment_program.texture_state.redirected_textures,
-				current_fragment_program.texture_state.multisampled_textures,
+				m_ctx->program.fragment_program.texture_state.texture_dimensions,
+				m_ctx->program.fragment_program.texture_state.shadow_textures,
+				m_ctx->program.fragment_program.texture_state.redirected_textures,
+				m_ctx->program.fragment_program.texture_state.multisampled_textures,
 				fragment->rop_control, static_cast<f64>(fragment->alpha_ref),
 				static_cast<f64>(fragment->fog_param0), static_cast<f64>(fragment->fog_param1), fragment->fog_mode,
 				static_cast<f64>(fragment->wpos_scale), static_cast<f64>(fragment->wpos_bias[0]), static_cast<f64>(fragment->wpos_bias[1]),
@@ -4653,7 +4708,7 @@ namespace mtl
 		}
 #endif // MTL_DEBUG_LOGS
 
-		if (current_fragment_program.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
+		if (m_ctx->program.fragment_program.ctrl & (RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING | RSX_SHADER_CONTROL_LOGIC_OP))
 		{
 			blend_values* blend = frame.constants.alloc_blend_values();
 			if (!blend)
@@ -4666,19 +4721,18 @@ namespace mtl
 			// emulates (REVIEW-FINDINGS.md C1).
 			blend->reserved = 0;
 			blend->blend_eqn = pack_blend_pair(
-				static_cast<u32>(rsx::method_registers.blend_equation_rgb()),
-				static_cast<u32>(rsx::method_registers.blend_equation_a()));
+				static_cast<u32>(m_ctx->register_state->blend_equation_rgb()),
+				static_cast<u32>(m_ctx->register_state->blend_equation_a()));
 			blend->blend_sfactors = pack_blend_pair(
-				static_cast<u32>(rsx::method_registers.blend_func_sfactor_rgb()),
-				static_cast<u32>(rsx::method_registers.blend_func_sfactor_a()));
+				static_cast<u32>(m_ctx->register_state->blend_func_sfactor_rgb()),
+				static_cast<u32>(m_ctx->register_state->blend_func_sfactor_a()));
 			blend->blend_dfactors = pack_blend_pair(
-				static_cast<u32>(rsx::method_registers.blend_func_dfactor_rgb()),
-				static_cast<u32>(rsx::method_registers.blend_func_dfactor_a()));
+				static_cast<u32>(m_ctx->register_state->blend_func_dfactor_rgb()),
+				static_cast<u32>(m_ctx->register_state->blend_func_dfactor_a()));
 
-			const std::array<f32, 4> colors = rsx::get_constant_blend_colors();
-			std::copy(colors.begin(), colors.end(), blend->blend_constants);
+			std::copy(m_ctx->draw_state.blend.constant_color.begin(), m_ctx->draw_state.blend.constant_color.end(), blend->blend_constants);
 
-			blend->logic_op = static_cast<u32>(rsx::method_registers.logic_operation());
+			blend->logic_op = static_cast<u32>(m_ctx->register_state->logic_operation());
 
 			binds.fragment_blend = frame.constants.blend_values_block_address();
 		}
@@ -4838,7 +4892,7 @@ namespace mtl
 		diagnostic_binds++;
 #endif // MTL_DEBUG_LOGS
 
-		m_frame_stats.setup_time += m_profiler.duration();
+		m_ctx->stats.setup_time += m_profiler.duration();
 
 		const MTL::PrimitiveType primitive = get_primitive_type(draw_call.primitive);
 
@@ -4932,8 +4986,8 @@ namespace mtl
 			}
 		}
 
-		m_frame_stats.draw_exec_time += m_profiler.duration();
-		m_frame_stats.draw_calls++;
+		m_ctx->stats.draw_exec_time += m_profiler.duration();
+		m_ctx->stats.draw_calls++;
 	}
 
 
@@ -5001,7 +5055,7 @@ namespace mtl
 						MTL_NOTE(3, "Metal 4: present source from the surface, address 0x%x, %ux%u", address, width, height);
 
 						std::tie(width, height) = rsx::apply_resolution_scale<true>(
-							resolution_scaling_config, std::min(surface_width, width), std::min(surface_height, height));
+							RSX(m_ctx)->resolution_scaling_config, std::min(surface_width, width), std::min(surface_height, height));
 						return;
 					}
 				}
@@ -5107,7 +5161,7 @@ namespace mtl
 	// C7.  The RSX output is the surface at the flip address.  It is composed into
 	// the drawable by the output tier and presented through the one submit path the
 	// recorder owns (HLD-03 §4.9, HLD-06 §2.4).
-	void MTLGSRender::flip(const rsx::display_flip_info_t& info)
+	bool MTLGSRender::present_frame(const rsx::display_flip_info_t& info)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "present/flip");
@@ -5117,13 +5171,11 @@ namespace mtl
 		// opens here when it is not already open (VKPresent.cpp:471-493).  A flip
 		// never returns with no present, because that is a frozen image
 		// (GLPresent.cpp:518-519, VKPresent.cpp:983-988).
-		if (!m_frame_resources)
+		if (!m_frame_resources || !m_device || m_device->lost_flag())
 		{
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "present/flip/no frame resources", 1);
-			GSRender::flip(info);
-			rsx::thread::flip(info);
-			return;
+			return false;
 		}
 
 		open_frame();
@@ -5145,10 +5197,10 @@ namespace mtl
 			.min_scalable_dimension = static_cast<u16>(g_cfg.video.min_scalable_dimension),
 		};
 
-		if (active_scaling_config != resolution_scaling_config)
+		if (active_scaling_config != RSX(m_ctx)->resolution_scaling_config)
 		{
 			m_frame_resources->cache.sync_scaling_config(m_frame_resources->recorder, active_scaling_config);
-			resolution_scaling_config = active_scaling_config;
+			RSX(m_ctx)->resolution_scaling_config = active_scaling_config;
 		}
 
 		auto& resources = *m_frame_resources;
@@ -5218,11 +5270,11 @@ namespace mtl
 		// A skipped frame is dropped, not presented late, and the display buffer's
 		// declared extent decides whether a present is attempted
 		// (GLPresent.cpp:164, :173-201).
-		if (!info.skip_frame && info.buffer < display_buffers_count)
+		if (!info.skip_frame && info.buffer < m_ctx->display_buffers_count)
 		{
-			buffer_width = display_buffers[info.buffer].width;
-			buffer_height = display_buffers[info.buffer].height;
-			buffer_pitch = display_buffers[info.buffer].pitch;
+			buffer_width = m_ctx->display_buffers[info.buffer].width;
+			buffer_height = m_ctx->display_buffers[info.buffer].height;
+			buffer_pitch = m_ctx->display_buffers[info.buffer].pitch;
 
 			if (!buffer_width)
 			{
@@ -5252,7 +5304,7 @@ namespace mtl
 			{
 				// The source is the surface at the display buffer's guest address,
 				// not the display-buffer index (VKPresent.cpp:551).
-				const u32 address = rsx::get_address(display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
+				const u32 address = rsx::get_address(m_ctx, m_ctx->display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
 				get_present_source(address, buffer_width, buffer_height, buffer_pitch, av_format, 0, image);
 
 				static u32 diagnostic_presents = 0;
@@ -5317,12 +5369,12 @@ namespace mtl
 				// The second eye sits below the first, separated by the RSX blanking
 				// interval (VKPresent.cpp:565).
 				const auto [unused, min_expected_height] = rsx::apply_resolution_scale<true>(
-					resolution_scaling_config, RSX_SURFACE_DIMENSION_IGNORED, static_cast<u32>(display_buffers[info.buffer].height) + 30);
+					RSX(m_ctx)->resolution_scaling_config, RSX_SURFACE_DIMENSION_IGNORED, static_cast<u32>(m_ctx->display_buffers[info.buffer].height) + 30);
 
 				if (image->height() < min_expected_height)
 				{
-					const u32 image_offset = (display_buffers[info.buffer].height + 30) * buffer_pitch + display_buffers[info.buffer].offset;
-					get_present_source(rsx::get_address(image_offset, CELL_GCM_LOCATION_LOCAL), buffer_width, buffer_height, buffer_pitch, av_format, 1, image2);
+					const u32 image_offset = (m_ctx->display_buffers[info.buffer].height + 30) * buffer_pitch + m_ctx->display_buffers[info.buffer].offset;
+					get_present_source(rsx::get_address(m_ctx, image_offset, CELL_GCM_LOCATION_LOCAL), buffer_width, buffer_height, buffer_pitch, av_format, 1, image2);
 				}
 			}
 		}
@@ -5359,7 +5411,7 @@ namespace mtl
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "present/flip/capture");
 			resources.output.request_capture(resources.recorder, resources.constants, source, user_asked_for_screenshot,
-				g_cfg.video.record_with_overlays.get(), m_overlay_manager);
+				g_cfg.video.record_with_overlays.get(), RSX(m_ctx)->overlay_manager());
 		}
 
 #if MTL_DEBUG_LOGS
@@ -5384,7 +5436,7 @@ namespace mtl
 		// (VKPresent.cpp:586-589, GLPresent.cpp:253-257).
 		if (info.emu_flip)
 		{
-			evaluate_cpu_usage_reduction_limits();
+			RSX(m_ctx)->display_ctrl().evaluate_cpu_usage_reduction_limits();
 			resources.present.update_vsync();
 		}
 
@@ -5396,7 +5448,7 @@ namespace mtl
 		// The drawable is acquired even when the present source is missing, so the
 		// window shows this flip's black clear and not the previous image
 		// (GLPresent.cpp:276-281, VKPresent.cpp:781-802).
-		if (target_width && target_height &&
+		if (!info.skip_frame && target_width && target_height &&
 			resources.present.acquire(resources.recorder, target_width, target_height, drawable))
 		{
 			// TODO(excise): level 1; block timer.
@@ -5432,8 +5484,8 @@ namespace mtl
 					"draw call execution: %8lldus\n"
 					"submit and flip: %12lldus\n"
 					"Program cache lookup ellision: %u/%u",
-					info.stats.framebuffer_stats.to_string(resolution_scaling_config, !backend_config.supports_hw_msaa),
-					get_load(), info.stats.draw_calls, info.stats.submit_count,
+					info.stats.framebuffer_stats.to_string(RSX(m_ctx)->resolution_scaling_config, !m_config.supports_hw_msaa),
+					RSX(m_ctx)->get_load(), info.stats.draw_calls, info.stats.submit_count,
 					static_cast<long long>(info.stats.setup_time),
 					static_cast<long long>(info.stats.vertex_upload_time),
 					static_cast<long long>(info.stats.textures_upload_time),
@@ -5451,7 +5503,7 @@ namespace mtl
 				emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
 
 				resources.output.compose(encoder, resources.constants, drawable, source, aspect, display_area,
-					avconfig.gamma, !g_cfg.video.full_rgb_range_output.get(), avconfig.stereo_enabled, m_overlay_manager);
+					avconfig.gamma, !g_cfg.video.full_rgb_range_output.get(), avconfig.stereo_enabled, RSX(m_ctx)->overlay_manager());
 			}
 			else
 			{
@@ -5490,7 +5542,7 @@ namespace mtl
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "present/flip/retire");
-			resources.output.retire_overlays(m_overlay_manager);
+			resources.output.retire_overlays(RSX(m_ctx)->overlay_manager());
 
 			// The cache retires the temporary subresources and the predictor state of
 			// the frame that just ended (GLPresent.cpp:535).
@@ -5521,17 +5573,101 @@ namespace mtl
 
 		m_frame_open = false;
 
-		m_frame_stats.flip_time = m_profiler.duration();
+		m_ctx->stats.flip_time = m_profiler.duration();
 		// TODO(excise): level 1; frame boundary.
 		MTL_PERF_FRAME(1);
-		GSRender::flip(info);
 
-		// The base flip clears this frame's flip request and clears the display
-		// interrupt, and it stamps the host flip time the overlay refresh gate reads.
-		// Without it the overlay requests a flip on every local task, so the RSX
-		// thread acquires and presents a drawable far more often than the guest
-		// flips and stalls in the acquire (GLPresent.cpp:519, VKPresent.cpp:987).
-		rsx::thread::flip(info);
+		// Window bookkeeping only; the present itself happened above.  A skipped
+		// frame is dropped, not presented late (GLPresent.cpp:174-178).
+		m_frame->flip(m_context, info.skip_frame);
+
+		return drawable != nullptr;
+	}
+
+	void MTLGSRender::post_present()
+	{
+	}
+
+	rsx::device_status MTLGSRender::check_device_status() const
+	{
+		return (m_device && m_device->lost_flag().load(std::memory_order_acquire))
+			? rsx::device_status::lost
+			: rsx::device_status::ok;
+	}
+
+	std::unique_ptr<rsx::context_resources> MTLGSRender::create_context_resources(rsx::context*)
+	{
+		// The Metal caches are device-scoped and owned by the backend, so a context
+		// carries no resources of its own.
+		return std::make_unique<rsx::context_resources>();
+	}
+
+	void MTLGSRender::on_release_context_resources(rsx::context*)
+	{
+	}
+
+	void MTLGSRender::on_bind_context(rsx::context* ctx)
+	{
+		if (!m_frame_resources)
+		{
+			return;
+		}
+
+		// The caches are shared by every context, so the bound one moves with the
+		// switch.  The attachments belong to the previous context's layout.
+		m_frame_resources->vertex_layout.set_context(ctx);
+		m_frame_resources->cache.set_context(ctx);
+		m_frame_resources->textures.set_context(ctx);
+		m_frame_resources->attachments.reset();
+	}
+
+	void MTLGSRender::on_unbind_context(rsx::context*)
+	{
+		if (m_frame_resources)
+		{
+			m_frame_resources->attachments.reset();
+		}
+	}
+
+	rsx::reports::occlusion_query_provider* MTLGSRender::occlusion_queries()
+	{
+		return m_frame_resources ? &m_frame_resources->zcull_control : nullptr;
+	}
+
+	void MTLGSRender::patch_transform_constants(rsx::context* ctx, u32, u32)
+	{
+		if (ctx != m_ctx)
+		{
+			return;
+		}
+
+		// The group is the upload trigger; emit_geometry reads it before each draw.
+		m_ctx->draw_state.dirty.set(rsx::draw_state_t::group::transform_constants);
+	}
+
+	bool MTLGSRender::is_current_program_interpreted() const
+	{
+		return m_frame_resources && m_frame_resources->interpreter_active;
+	}
+
+	std::string MTLGSRender::logical_id() const
+	{
+		if (!m_device || !m_device->dev() || !m_device->dev()->name())
+		{
+			return "Metal | NULL";
+		}
+
+		return "Metal | " + std::string(m_device->dev()->name()->utf8String());
+	}
+
+	std::string MTLGSRender::configured_logical_id() const
+	{
+		if (rsx::resolve_render_backend_type(g_cfg.video.renderer) != video_renderer::metal)
+		{
+			return "";
+		}
+
+		return logical_id();
 	}
 
 	// A mid-frame wait must submit: the guest can wait on a label that only the
@@ -5580,9 +5716,9 @@ namespace mtl
 		// flip presents it, because a flip that finds the frame closed is a frozen
 		// image (GLPresent.cpp:518-519, VKPresent.cpp:983-988).
 		if ((m_flush_queue && !m_flush_queue->pending.empty()) ||
-			(async_flip_requested & flip_request::emu_requested))
+			RSX(m_ctx)->display_ctrl().has_flip_request(rsx::thread::flip_request::emu_requested))
 		{
-			do_local_task(rsx::FIFO::state::lock_wait);
+			RSX(m_ctx)->do_local_task(rsx::FIFO::state::lock_wait);
 		}
 	}
 
@@ -5596,7 +5732,7 @@ namespace mtl
 	// gathers the data; the backend prints it, through the probe facility so the
 	// bulk text stays out of the shared log and the run's cost is nil at level 0.
 	// TODO(excise): level 2; the hook and the print go with the probe work.
-	void MTLGSRender::on_fifo_desync(const fifo_desync_info& info)
+	void MTLGSRender::on_fifo_desync(const rsx::fifo_desync_info& info)
 	{
 		if (!mtl::probe::at_least(2))
 		{
@@ -5632,7 +5768,7 @@ namespace mtl
 
 		for (u32 index = 0; index < info.history_count; ++index)
 		{
-			const dispatch_entry& entry = info.history[index];
+			const rsx::dispatch_entry& entry = info.history[index];
 
 			history += fmt::format(" [reg 0x%x value 0x%x cmd 0x%x at 0x%x]", entry.reg, entry.value, entry.cmd, entry.position);
 			printed++;
@@ -5768,7 +5904,7 @@ namespace mtl
 	// fault that asked for it runs on a guest thread (GLGSRender.cpp:1329-1350).
 	// A request is released by the faulting thread once it has consumed its result,
 	// so the list keeps the requests that are still in flight.
-	void MTLGSRender::do_local_task(rsx::FIFO::state state)
+	bool MTLGSRender::on_local_task(rsx::FIFO::state)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "local task");
@@ -5816,8 +5952,7 @@ namespace mtl
 					// A cached image became invalid, so every unit re-resolves on its
 					// next draw (VKGSRender.cpp:1028).  The flags are the RSX thread's
 					// to write, because the faulting thread cannot touch them.
-					m_textures_dirty.fill(true);
-					m_vertex_textures_dirty.fill(true);
+					invalidate_samplers();
 					// TODO(excise): level 1; running total.
 					MTL_PERF_COUNT(1, "local task/sampler invalidations", 1);
 				}
@@ -5826,33 +5961,9 @@ namespace mtl
 			}
 		}
 
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "local task/gs");
-			GSRender::do_local_task(state);
-		}
-
-		// The in-game interface refreshes on its own schedule, and it asks for a flip
-		// when the guest is not flipping (overlays.cpp:532).  The output pass belongs
-		// to a frame, so the flip opens one when the previous frame already ended
-		// (VKGSRender.cpp:1911).
-		if (m_overlay_manager)
-		{
-			const auto should_ignore = in_begin_end && state != rsx::FIFO::state::empty;
-
-			if ((async_flip_requested & flip_request::native_ui) && !should_ignore && !is_stopped())
-			{
-				// TODO(excise): level 1; block timer.
-				MTL_PERF_SCOPE(1, "local task/overlay flip");
-				// TODO(excise): level 1; running total.
-				MTL_PERF_COUNT(1, "local task/overlay flips", 1);
-				open_frame();
-
-				rsx::display_flip_info_t info{};
-				info.buffer = current_display_buffer;
-				flip(info);
-			}
-		}
+		// The thread owns the flips, the invalidations and the native-UI path; the
+		// backend only drains its deferred work.
+		return true;
 	}
 
 	// A guest write to a range a surface owns invalidates that surface, because
@@ -5952,11 +6063,11 @@ namespace mtl
 	// the RSX thread, which owns the encoders.  A fault on the RSX thread itself
 	// cannot be queued for that thread, so it flushes in place
 	// (GLGSRender.cpp:1281).
-	bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
+	bool MTLGSRender::on_access_violation(rsx::context* ctx, u32 address, bool is_writing)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "fault");
-		if (!m_frame_resources)
+		if (ctx != m_ctx || !m_frame_resources)
 		{
 			return false;
 		}
@@ -5965,7 +6076,7 @@ namespace mtl
 		// and the access that reaches a protected page is still to be found.  A
 		// wait for this thread stalls the whole run ("Thread [rsx::thread] is too
 		// sleepy"), so the flush runs in place until the access is known.
-		const bool can_flush = is_current_thread();
+		const bool can_flush = RSX(m_ctx)->is_current_thread();
 
 		if (can_flush)
 		{
@@ -6029,12 +6140,10 @@ namespace mtl
 
 		if (!result.violation_handled)
 		{
-			// The fault is not the texture cache's, so it belongs to a query.
+			// The fault is not the texture cache's; the thread then asks ZCULL.
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "fault/unhandled", 1);
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "fault/zcull");
-			return zcull_ctrl->on_access_violation(address);
+			return false;
 		}
 
 		// TODO(excise): level 1; running total.
@@ -6052,14 +6161,13 @@ namespace mtl
 			// flags below are this thread's to write in any case.
 			if (result.invalidate_samplers)
 			{
-				m_textures_dirty.fill(true);
-				m_vertex_textures_dirty.fill(true);
+				invalidate_samplers();
 			}
 
 			return true;
 		}
 
-		const bool invalidate_samplers = result.invalidate_samplers;
+		const bool should_invalidate_samplers = result.invalidate_samplers;
 
 		// The deferred path keeps sections_to_flush only when the RSX thread has to
 		// write them back; every other handled fault unprotects in place, so an empty
@@ -6075,7 +6183,7 @@ namespace mtl
 
 			auto& queued = m_flush_queue->pending.emplace_back();
 			queued.sections = std::move(result);
-			queued.invalidate_samplers = invalidate_samplers;
+			queued.invalidate_samplers = should_invalidate_samplers;
 			queued.received = !flush_pending;
 			request = &queued;
 
@@ -6083,7 +6191,7 @@ namespace mtl
 			MTL_PERF_GAUGE(1, "fault/queue depth", m_flush_queue->pending.size());
 		}
 
-		m_eng_interrupt_mask |= rsx::backend_interrupt;
+		RSX(m_ctx)->raise_backend_interrupt();
 		vm::temporary_unlock();
 
 		if (flush_pending)
@@ -6110,11 +6218,11 @@ namespace mtl
 
 	// The guest unmapped a range, so every host copy of it is invalid
 	// (VKGSRender.cpp:1312).
-	void MTLGSRender::on_invalidate_memory_range(const utils::address_range32& range, rsx::invalidation_cause cause)
+	void MTLGSRender::on_invalidate_memory_range(rsx::context* ctx, const utils::address_range32& range, rsx::invalidation_cause cause)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "invalidate range");
-		if (!m_frame_resources)
+		if (ctx != m_ctx || !m_frame_resources)
 		{
 			return;
 		}
@@ -6140,8 +6248,19 @@ namespace mtl
 		// TODO(excise): level 3; per-event trace line.
 		MTL_NOTE(3, "Metal 4: tile unbound, every unit re-resolves");
 
-		m_textures_dirty.fill(true);
-		m_vertex_textures_dirty.fill(true);
+		invalidate_samplers();
+	}
+
+	void MTLGSRender::invalidate_samplers()
+	{
+		m_ctx->textures.fragment_textures_dirty = (1u << rsx::limits::fragment_textures_count) - 1;
+		m_ctx->textures.vertex_textures_dirty = (1u << rsx::limits::vertex_textures_count) - 1;
+	}
+
+	void MTLGSRender::on_unmap_memory_range(const utils::address_range32&)
+	{
+		// The purge lives in on_invalidate_memory_range, where the thread delivers
+		// an unmap cause.  Metal has no DMA-side unmap.
 	}
 }
 

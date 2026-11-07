@@ -2,8 +2,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/rsx_methods.h"
-#include "Emu/RSX/Utils/rsx_utils.h"
 #include "util/logs.hpp"
 
 namespace mtl
@@ -13,35 +13,36 @@ namespace mtl
 		return (enable_mask >> index) & 1u;
 	}
 
-	blend_state capture_blend_state()
+	blend_state capture_blend_state(const rsx::context& ctx)
 	{
+		const rsx::blend_state& decoded = ctx.draw_state.blend;
 		blend_state state;
 
-		state.enable_mask = rsx::method_registers.blend_enabled_mask();
-		state.source_rgb = rsx::method_registers.blend_func_sfactor_rgb();
-		state.source_a = rsx::method_registers.blend_func_sfactor_a();
-		state.destination_rgb = rsx::method_registers.blend_func_dfactor_rgb();
-		state.destination_a = rsx::method_registers.blend_func_dfactor_a();
-		state.equation_rgb = rsx::method_registers.blend_equation_rgb();
-		state.equation_a = rsx::method_registers.blend_equation_a();
+		state.enable_mask = decoded.enable_mask;
+		state.source_rgb = decoded.sfactor_rgb;
+		state.source_a = decoded.sfactor_a;
+		state.destination_rgb = decoded.dfactor_rgb;
+		state.destination_a = decoded.dfactor_a;
+		state.equation_rgb = decoded.equation_rgb;
+		state.equation_a = decoded.equation_a;
 
-		state.alpha_test_enabled = rsx::method_registers.alpha_test_enabled();
-		state.alpha_func = rsx::method_registers.alpha_func();
-		state.alpha_ref = rsx::method_registers.alpha_ref();
+		// The core does not decode these three; the register file is the source.
+		state.alpha_test_enabled = ctx.register_state->alpha_test_enabled();
+		state.alpha_func = ctx.draw_state.fragment_env.alpha_func;
+		state.alpha_ref = ctx.register_state->alpha_ref();
 
-		state.logic_op_enabled = rsx::method_registers.logic_op_enabled();
-		state.logic_operation = rsx::method_registers.logic_operation();
-		state.shade_mode = rsx::method_registers.shade_mode();
+		state.logic_op_enabled = decoded.logic_op_enabled;
+		if (decoded.logic_op_enabled)
+		{
+			state.logic_operation = decoded.logic_operation;
+		}
+
+		state.shade_mode = ctx.register_state->shade_mode();
 
 		// SET_DITHER_ENABLE is dropped: Metal has no dither state and the effect
 		// is not guest-observable (LLD-blend §2.7).
 
 		return state;
-	}
-
-	std::array<f32, 4> capture_blend_color()
-	{
-		return rsx::get_constant_blend_colors();
 	}
 
 	MTL::BlendFactor get_blend_factor(rsx::blend_factor op)

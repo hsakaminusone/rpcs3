@@ -19,6 +19,11 @@
 #include <string>
 #include <unordered_map>
 
+namespace rsx
+{
+	struct context;
+}
+
 namespace mtl
 {
 	class pipeline_jobs;
@@ -174,7 +179,8 @@ namespace mtl
 		// True when the program can be rendered by the shared body.  It rejects
 		// only features whose RSX behaviour the body does not reproduce; the
 		// attribute-interpolation control bit is not one of them (R20).
-		static bool build_request(const RSXVertexProgram& vertex,
+		static bool build_request(const rsx::context& ctx,
+			const RSXVertexProgram& vertex,
 			const RSXFragmentProgram& fragment,
 			const program_hash_util::vertex_program_utils::vertex_program_metadata& vertex_metadata,
 			const program_hash_util::fragment_program_utils::fragment_program_metadata& fragment_metadata,

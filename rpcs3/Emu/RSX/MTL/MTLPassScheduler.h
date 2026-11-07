@@ -5,7 +5,9 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/Common/TextureUtils.h"
+#include "Utilities/address_range.h"
 
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +21,14 @@ namespace mtl
 	// The hazard-derived pass scheduler (HLD-01 C3, HLD-03 §2.4).  It owns the
 	// encoder boundaries and every barrier.  It does not open or close encoders: it
 	// answers, and the caller acts.
+	//
+	// The hazard identity is the guest memory a resource occupies, not the Metal
+	// object that backs it.  RSX aliases arbitrary guest ranges: the same address
+	// can be a render target in one pass and a sampled texture in the next, and the
+	// backend then holds two MTLTextures with two different gpuResourceIDs over the
+	// same bytes.  Keying a record by gpuResourceID therefore misses every such
+	// write-to-read edge, so each note carries the guest range it covers and two
+	// accesses conflict when their resources match or their ranges overlap.
 	class pass_scheduler
 	{
 	public:
@@ -34,9 +44,10 @@ namespace mtl
 
 		// Record the read and the write of a resource at stages in the open pass.
 		// Each one consumes the opposite record, because the edge it finds is the
-		// edge it queues.
-		void note_read(MTL::ResourceID resource, MTL::Stages stages);
-		void note_write(MTL::ResourceID resource, MTL::Stages stages);
+		// edge it queues.  A range that is invalid (a resource with no guest bytes,
+		// such as a temporary image) matches by resource only.
+		void note_read(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages);
+		void note_write(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages);
 
 		// Emit every queued edge that the open encoder can order.  An edge it cannot
 		// order is carried to the next encoder and latches the split request.
@@ -57,19 +68,47 @@ namespace mtl
 
 		bool split_requested() const { return m_split; }
 
+		// The edges the notes have queued since the last begin_pass.  flush() emits
+		// and clears them; the tests read them because a scheduler has no encoder.
+		usz queued_edges() const { return m_pending.size(); }
+
 	private:
 		struct record
 		{
+			// The guest footprint of the last ranged access.  An invalid range means
+			// the resource has no guest bytes, so only its own id can match.
+			utils::address_range32 range;
+
 			MTL::Stages write_stages = 0;
 			u32 write_pass = 0;
 			MTL::Stages read_stages = 0;
 			u32 read_pass = 0;
+
+			bool write_listed = false;
+			bool read_indexed = false;
+			utils::address_range32 read_indexed_range;
 		};
 
-		// One entry per resource the frame has touched.  A flat map keeps the note
-		// path O(1); a linear scan would make the frame's cost quadratic in its
-		// working set, which is the load-bearing path of every draw.
-		std::unordered_map<u64, record> m_records;
+		record* fetch(u64 resource);
+		void index_read(record& entry);
+
+		static bool overlaps(const record& entry, const utils::address_range32& range);
+
+		// One record per resource the frame has touched.  A deque keeps the pointers
+		// the two indexes hold stable while the map grows.
+		std::deque<record> m_records;
+		std::unordered_map<u64, record*> m_by_resource;
+
+		// The write candidates of a read: one entry per distinct write resource of
+		// the frame.  A frame has a handful (up to four colours, depth, resolves and
+		// transfer writes), so a scan beats a range index.
+		std::vector<record*> m_write_records;
+
+		// The read candidates of a write, indexed by a 64 KiB guest block.  A frame
+		// can sample hundreds of textures, so a linear scan would be quadratic in
+		// its working set; the exact range test rejects the block false candidates.
+		std::unordered_map<u32, std::vector<record*>> m_read_blocks;
+
 		std::vector<barrier_spec> m_pending;
 		std::vector<barrier_spec> m_carried;
 		u32 m_pass = 0;

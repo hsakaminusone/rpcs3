@@ -2,22 +2,32 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "util/logs.hpp"
 
 namespace mtl
 {
-	draw_state capture_draw_state()
+	draw_state capture_draw_state(const rsx::context& ctx)
 	{
+		const rsx::rsx_state& regs = *ctx.register_state;
+		const rsx::input_assembly_state& decoded = ctx.draw_state.input_assembly;
 		draw_state state;
 
-		state.base_offset = rsx::method_registers.vertex_data_base_offset();
-		state.base_index = rsx::method_registers.vertex_data_base_index();
-		state.index_address = rsx::method_registers.index_array_address();
-		state.index_location = rsx::method_registers.index_array_location();
-		state.index_type = rsx::method_registers.index_type();
-		state.restart_enabled = rsx::method_registers.restart_index_enabled();
-		state.restart_index = rsx::method_registers.restart_index();
+		// The vertex bases and the index array are rewritten between subdraws by the
+		// draw clause barriers, so they are raw inputs.
+		state.base_offset = regs.vertex_data_base_offset();
+		state.base_index = regs.vertex_data_base_index();
+		state.index_address = regs.index_array_address();
+		state.index_location = regs.index_array_location();
+
+		// An immediate draw inlines u32 indices regardless of the index-array type
+		// register.  Everything else uses the decoded input-assembly type.
+		state.index_type = regs.current_draw_clause.is_immediate_draw
+			? rsx::index_array_type::u32
+			: decoded.index_type;
+		state.restart_enabled = decoded.restart_index_enabled;
+		state.restart_index = decoded.restart_index;
 
 		return state;
 	}

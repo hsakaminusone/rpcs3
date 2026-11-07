@@ -45,6 +45,10 @@ DYNAMIC_IMPORT_RENAME("Kernel32.dll", SetThreadDescriptionImport, "SetThreadDesc
 #include <pthread_np.h>
 #define cpu_set_t cpuset_t
 #endif
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 #include <errno.h>
 #include <signal.h>
 #ifndef __OpenBSD__
@@ -2551,6 +2555,51 @@ const bool s_exception_handler_set = []() -> bool
 
 #else
 
+// TODO(excise): level 1; temporary diagnostic for L159/B25.  The handler turns
+// a fatal fault into an abort, so a debugger and a crash reporter only see the
+// abort path.  With RPCS3_TRACE_ON_SIGNAL=1 the fault path prints the faulting
+// stack, with module and symbol, so the caller of the IOGPU fault can be read
+// without a debugger.
+static bool trace_on_signal()
+{
+	static const bool enabled = [] {
+		const char* value = std::getenv("RPCS3_TRACE_ON_SIGNAL");
+		return value && *value && *value != '0';
+	}();
+
+	return enabled;
+}
+
+static void print_signal_backtrace() noexcept
+{
+#if defined(__linux__) || defined(__APPLE__)
+	if (!trace_on_signal())
+	{
+		return;
+	}
+
+	void* frames[64];
+	const int count = ::backtrace(frames, static_cast<int>(sizeof(frames) / sizeof(frames[0])));
+
+	sys_log.fatal("Backtrace:");
+
+	for (int i = 0; i < count; ++i)
+	{
+		Dl_info info{};
+
+		if (::dladdr(frames[i], &info) && info.dli_sname)
+		{
+			const u64 offset = static_cast<u64>(reinterpret_cast<u8*>(frames[i]) - reinterpret_cast<u8*>(info.dli_saddr));
+			sys_log.fatal("  #%d %p %s+0x%llx (%s)", i, frames[i], info.dli_sname, offset, info.dli_fname ? info.dli_fname : "?");
+		}
+		else
+		{
+			sys_log.fatal("  #%d %p (%s)", i, frames[i], info.dli_fname ? info.dli_fname : "?");
+		}
+	}
+#endif
+}
+
 static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 {
 	ucontext_t* context = static_cast<ucontext_t*>(uct);
@@ -2679,6 +2728,7 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
 	logs::listener::sync_all();
+	print_signal_backtrace();
 
 	if (IsDebuggerPresent())
 	{
@@ -2699,6 +2749,7 @@ static void sigill_handler(int /*sig*/, siginfo_t* info, void* /*uct*/) noexcept
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
 	logs::listener::sync_all();
+	print_signal_backtrace();
 
 	if (IsDebuggerPresent())
 	{

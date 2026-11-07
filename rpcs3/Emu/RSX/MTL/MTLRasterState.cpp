@@ -2,38 +2,47 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "Emu/RSX/Core/RSXContext.h"
+#include "Emu/RSX/Core/RSXFrameBuffer.h"
 #include "Emu/RSX/rsx_methods.h"
 
 #include <cstring>
 
 namespace mtl
 {
-	raster_state capture_raster_state()
+	raster_state capture_raster_state(const rsx::context& ctx)
 	{
+		const rsx::raster_state& raster = ctx.draw_state.raster;
 		raster_state state;
 
-		state.cull_face = rsx::method_registers.cull_face_mode();
-		state.cull_enabled = rsx::method_registers.cull_face_enabled();
-		state.front_face = rsx::method_registers.front_face_mode();
-		state.front_polygon_mode = rsx::method_registers.polygon_mode_front();
-		state.back_polygon_mode = rsx::method_registers.polygon_mode_back();
+		state.cull_face = raster.cull_face_mode;
+		state.cull_enabled = raster.cull_face_enabled;
+		state.front_face = raster.front_face_mode;
+		state.front_polygon_mode = raster.polygon_mode_front;
+		state.back_polygon_mode = raster.polygon_mode_back;
 
-		state.poly_offset_fill = rsx::method_registers.poly_offset_fill_enabled();
-		state.poly_offset_scale = rsx::method_registers.poly_offset_scale();
-		state.poly_offset_bias = rsx::method_registers.poly_offset_bias();
+		state.poly_offset_fill = raster.poly_offset_fill_enabled;
+		state.poly_offset_scale = raster.poly_offset_scale;
+		state.poly_offset_bias = raster.poly_offset_bias;
 
-		state.clip_min = rsx::method_registers.clip_min();
-		state.clip_max = rsx::method_registers.clip_max();
-		state.point_size = rsx::method_registers.point_size();
-		state.line_width = rsx::method_registers.line_width();
-		state.line_smooth = rsx::method_registers.line_smooth_enabled();
-		state.user_clip_control = rsx::method_registers.clip_planes_mask();
+		// The clip range is decoded as part of the viewport group, not the raster
+		// group; it is the only decoded source of the clip min/max.
+		state.clip_min = ctx.draw_state.viewport.z_clip_min;
+		state.clip_max = ctx.draw_state.viewport.z_clip_max;
+		state.point_size = ctx.register_state->point_size();
+		state.line_width = raster.line_width;
+		state.line_smooth = raster.line_smooth_enabled;
+		state.user_clip_control = ctx.register_state->clip_planes_mask();
 
-		state.stipple_enabled = rsx::method_registers.polygon_stipple_enabled();
-		std::memcpy(state.stipple_pattern.data(), rsx::method_registers.polygon_stipple_pattern(), sizeof(state.stipple_pattern));
+		// The pattern is only decoded while stipple is enabled; copy it only then.
+		state.stipple_enabled = ctx.draw_state.stipple.enabled;
+		if (state.stipple_enabled)
+		{
+			std::memcpy(state.stipple_pattern.data(), ctx.draw_state.stipple.pattern.data(), sizeof(state.stipple_pattern));
+		}
 
-		state.point_sprite_enabled = rsx::method_registers.point_sprite_enabled();
-		state.point_sprite_mask = rsx::method_registers.point_sprite_control_mask();
+		state.point_sprite_enabled = ctx.register_state->point_sprite_enabled();
+		state.point_sprite_mask = ctx.register_state->point_sprite_control_mask();
 
 		return state;
 	}
@@ -103,6 +112,15 @@ namespace mtl
 		znear = state.clip_min;
 		zfar = state.clip_max;
 		return true;
+	}
+
+	areau scaled_scissor(const rsx::scissor_state& region, const rsx::framebuffer_layout& layout,
+		const rsx::surface_scaling_config_t& scaling)
+	{
+		areau scissor;
+		std::tie(scissor.x1, scissor.y1) = rsx::apply_resolution_scale<false>(scaling, region.x1, region.y1, layout.width, layout.height);
+		std::tie(scissor.x2, scissor.y2) = rsx::apply_resolution_scale<true>(scaling, region.x2, region.y2, layout.width, layout.height);
+		return scissor;
 	}
 
 	MTL::Viewport build_viewport(u16 clip_width, u16 clip_height, f64 znear, f64 zfar)

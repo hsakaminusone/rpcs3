@@ -4,7 +4,7 @@
 
 #ifdef RSX_ENABLE_METAL4
 
-#include "Emu/RSX/GSRender.h"
+#include "Emu/RSX/Core/RSXRenderBackend.h"
 
 #include <memory>
 
@@ -21,67 +21,81 @@ namespace mtl
 {
 	class device;
 
-	// The Metal 4 renderer (docs/research/metal4/08 §2.1; 10 §4.7).  This is the
-	// rsx::thread spine: it brings up the device, fills the backend contract and
-	// owns the frame loop.  The per-cluster work lands in the MTL modules.
+	// The Metal 4 render backend (docs/research/metal4/08 §2.1; 10 §4.7).  The
+	// core owns the frame and draw lifecycle and hands this backend decoded state;
+	// the per-cluster work lands in the MTL modules.
 	//
 	// This header stays free of metal-cpp so the UI can name the renderer:
 	// gcm_enums.h:1183 has `using namespace gcm`, which makes Objective-C's
 	// `Method` ambiguous in a TU that reaches metal-cpp afterwards.  The backend
-	// objects sit behind one opaque type for the same reason, so this header also
-	// stays free of the RSX headers the UI must not reach.
-	class MTLGSRender : public GSRender
+	// objects sit behind one opaque type for the same reason.
+	class MTLGSRender final : public rsx::render_backend
 	{
 	public:
-		explicit MTLGSRender(utils::serial* ar) noexcept;
+		MTLGSRender(rsx::context* ctx, rsx::display_output* display) noexcept;
 		~MTLGSRender() override;
 
-		u64 get_cycles() override;
-		void on_init_thread() override;
-		void on_exit() override;
-		void begin() override;
-		void end() override;
-		void emit_geometry(u32 sub_index) override;
-		void flip(const rsx::display_flip_info_t& info) override;
-		void clear_surface(u32 mask) override;
+		bool is_current_program_interpreted() const override;
 
-		// The sync hooks (HLD-04 §4).  A pending flush request or an emu flip runs
-		// the local task; the frame stays open until its flip presents it.  The
-		// texture cache owns the invalidation of the guest ranges the CPU writes.
-		void on_semaphore_acquire_wait() override;
+		// Device name, in the same shape as Vulkan's "Vulkan | <gpu>".
+		std::string logical_id() const override;
+		std::string configured_logical_id() const override;
+
+		// The sync hooks (HLD-04 §4).  A release this backend still has in flight
+		// must complete before a semaphore acquire reads the guest word.
 		void write_barrier(u32 memory_address, u32 memory_range) override;
-
-		// A back-end semaphore release is a guest-visible memory write.  Metal can
-		// record it on the GPU, in command-stream order, so the release is fast; the
-		// acquire waits for that write before it reads the guest word.
 		bool release_GCM_label(u32 type, u32 address, u32 data) override;
 		bool sync_label(u32 address) override;
 
-		// The blit engine's GPU path.  False sends the transfer to the CPU fallback
-		// (nv3089.cpp:592-598).  Metal keeps the fallback and logs the transfer
-		// until the GPU path lands.
-		bool scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate) override;
-		bool on_access_violation(u32 address, bool is_writing) override;
-		void on_invalidate_memory_range(const utils::address_range32& range, rsx::invalidation_cause cause) override;
-		void notify_tile_unbound(u32 tile) override;
-
 		// The FIFO desync capture (RR7-FREEZE-FORENSICS.md §8.1).  The shared
-		// FIFO gathers the data and calls this; the backend prints it, so the
-		// diagnostic belongs to the backend and the other backends pay nothing
-		// but a virtual call they never implement.
+		// FIFO gathers the data and calls this; the backend prints it.
 		// TODO(excise): level 2; the hook and the print go with the probe work.
-		void on_fifo_desync(const fifo_desync_info& info) override;
+		void on_fifo_desync(const rsx::fifo_desync_info& info) override;
 
-		// Drain the deferred flush queue.  A guest fault cannot flush, because it
-		// runs on the guest thread and the flush needs an encoder, so it posts a
-		// request and waits; this is where the request runs (GLGSRender.cpp:1329).
-		void do_local_task(rsx::FIFO::state state) override;
+	protected:
+		void on_init() override;
+		void on_shutdown() override;
+		rsx::device_status check_device_status() const override;
+
+		std::unique_ptr<rsx::context_resources> create_context_resources(rsx::context* ctx) override;
+		void on_release_context_resources(rsx::context* ctx) override;
+		void on_bind_context(rsx::context* ctx) override;
+		void on_unbind_context(rsx::context* ctx) override;
+
+		bool on_framebuffer_bound(const rsx::framebuffer_layout& layout) override;
+		bool is_framebuffer_bound() const override;
+
+		void begin_draw() override;
+		bool end_draw() override;
+		void clear() override;
+		void emit_geometry(u32 sub_index) override;
+		bool resolve_sampler_state(rsx::flags32_t& invalidated_programs) override;
+
+		bool present_frame(const rsx::display_flip_info_t& info) override;
+		void post_present() override;
+
+		bool on_access_violation(rsx::context* ctx, u32 address, bool is_writing) override;
+		void on_invalidate_memory_range(rsx::context* ctx, const utils::address_range32& range, rsx::invalidation_cause cause) override;
+		void on_unmap_memory_range(const utils::address_range32& range) override;
+
+		void notify_tile_unbound(u32 tile) override;
+		bool scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate) override;
+		void on_semaphore_acquire_wait() override;
+		bool on_local_task(rsx::FIFO::state state) override;
+
+		rsx::reports::occlusion_query_provider* occlusion_queries() override;
+		void patch_transform_constants(rsx::context* ctx, u32 index, u32 count) override;
 
 	private:
 		// The resource layer, the command recorder, the surface store, the pass the
 		// attachments belong to, the built-in fill, the presenter and the draw path.
 		// Defined in the .cpp.
 		struct frame_resources;
+
+		// The deferred flush queue.  It is not part of the frame resources, because
+		// a request outlives the frame that is open when it arrives.  Defined in
+		// the .cpp, so the header stays free of the RSX texture-cache headers.
+		struct flush_queue;
 
 		// Open the frame's command buffer on the next ring slot.  Called once per
 		// frame, before the first pass, because the ring's slot is only reusable
@@ -94,30 +108,12 @@ namespace mtl
 		void get_present_source(u32 address, u32& width, u32& height, u32 pitch, u32 format, u8 eye,
 			MTL::Texture*& image);
 
-		// The scratch images of the CPU upload path, one per stereo eye.
-		std::array<MTL::Texture*, 2> m_flip_scratch{};
-
-		// Bind the surfaces the context names and refresh the scissor.  False when
-		// there is no valid configuration to draw into.
-		bool bind_framebuffer(rsx::framebuffer_creation_context context);
-		// Refresh the cached scissor.  get_scissor() returns false both for an
-		// unchanged region and for an invalid one, so the flag decides
-		// (RSXThread.cpp:2095).
-		bool update_scissor(bool clip_viewport);
-
-		// The RSX has no texture cache: a sample must read the surface that last wrote
-		// the range, because the guest copy stays stale while write-back is off.  The
-		// surface store and the texture cache both cover the guest ranges, so binding
-		// an attachment set must tell the cache that the store now owns those ranges
-		// (texture_cache.h:2038, :2493).  Metal 4 leaves the GPU-side order of a
-		// render-then-sample pair to the pass scheduler's barriers; this is the
-		// emulator-side half of that pair.
+		// Write the bound surfaces into the context's layout identity and tell the
+		// caches which ranges the surface store now owns.
 		void reconcile_render_targets();
 
-		// Resolve the referenced texture units of the open clause and record the
-		// Metal image and sampler of each.  It runs before the programs are built,
-		// because the builders read the resolved descriptors (RSXThread.cpp:2488).
-		void load_texture_env();
+		// Mark every texture unit dirty so the next draw re-resolves it.
+		void invalidate_samplers();
 
 		// Record the open pass's hazard set and emit the barriers it needs.  The
 		// attachment set is the pass's write and the resolved units its read, so a
@@ -127,15 +123,10 @@ namespace mtl
 
 		std::unique_ptr<device> m_device;
 		std::unique_ptr<frame_resources> m_frame_resources;
-
-		// The deferred flush queue.  It is not part of the frame resources, because
-		// a request outlives the frame that is open when it arrives.  Defined in
-		// the .cpp, so the header stays free of the RSX texture-cache headers.
-		struct flush_queue;
 		std::unique_ptr<flush_queue> m_flush_queue;
 
-		// The current scissor rectangle, in attachment pixels (MTLRasterState.h).
-		areau m_scissor;
+		// The scratch images of the CPU upload path, one per stereo eye.
+		std::array<MTL::Texture*, 2> m_flip_scratch{};
 
 		// The frame's command buffer is open.  A frame opens lazily on its first
 		// pass and closes at the flip, which submits it.

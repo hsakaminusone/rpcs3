@@ -62,15 +62,15 @@ namespace mtl
 		depth_stencil_state depth_stencil{};
 	};
 
-	// Capture the per-draw encoder state from the live registers.  It composes the
-	// latches in MTLRasterState, MTLDepthStencil and MTLBlendState; it does not
-	// re-read the register file.  `emulate_depth_range` is the draw's
+	// Capture the per-draw encoder state from the core-decoded draw state.  It
+	// composes the latches in MTLRasterState, MTLDepthStencil and MTLBlendState; it
+	// does not re-read the register file.  `emulate_depth_range` is the draw's
 	// RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE, which only the caller holds.
-	encoder_state capture_encoder_state(bool emulate_depth_range);
+	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range);
 
 	// Apply the state to the open encoder.  The scissor is the caller's: it comes
-	// from rsx::thread::get_scissor, which owns the viewport-rect intersection, the
-	// window clamp and the invalid case (MTLRasterState.h).
+	// from graph_engine::resolve_scissor, which owns the viewport-rect intersection,
+	// the window clamp and the invalid case (MTLRasterState.h).
 	void apply_encoder_state(MTL4::RenderCommandEncoder* encoder, const encoder_state& state, const MTL::ScissorRect& scissor, depth_stencil_cache& depth_cache);
 }
 

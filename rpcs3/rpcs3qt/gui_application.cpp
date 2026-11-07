@@ -762,7 +762,7 @@ void gui_application::create_callbacks()
 			const bool no_gui = !m_main_window;
 
 			// Don't let CoreMIDI init race with app termination (e.g. Cocoa calling exit() on macOS)
-			midi_creator::wait_for_init();
+			midi_creator::join_init_thread();
 
 			if (m_main_window)
 			{
