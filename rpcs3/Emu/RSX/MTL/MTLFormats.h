@@ -63,6 +63,36 @@ namespace mtl
 		u32 dst_pitch, u32 dst_bpp, rsx::surface_depth_format2 format,
 		const void* stencil_src = nullptr, u32 stencil_pitch = 0);
 
+	// True when the guest packed 16-bit colour pack is not in the Metal packed
+	// format's field order, so a raw row copy exchanges channels (REVIEW-RSX-NATIVE.md,
+	// R2).  The colour counterpart of depth_format_needs_decode.
+	bool packed_format_needs_convert(rsx::surface_color_format format);
+
+	// Decode guest packed 16-bit colour words into the Metal packed plane: the inverse
+	// of encode_packed16_plane.  dst rows are width * 2 bytes; src rows are src_pitch
+	// bytes apart with 2 bytes per texel.  r5g6b5 (B5G6R5Unorm) trades the five-bit red
+	// and blue fields; x1r5g5b5_* (BGR5A1Unorm) repacks the whole word and carries the
+	// guest x1/o1 bit into the host alpha field.
+	void decode_packed16_plane(void* dst, const void* src, u32 width, u32 height,
+		u32 src_pitch, rsx::surface_color_format format);
+
+	// Encode the Metal packed plane back into the guest pack: the inverse of
+	// decode_packed16_plane.  dst rows are dst_pitch bytes apart with 2 bytes per texel.
+	// The x1/o1 bit keeps its stored value; the guest read of the alpha channel is
+	// governed by the surface's component layout either way.
+	void encode_packed16_plane(void* dst, const void* src, u32 width, u32 height,
+		u32 dst_pitch, rsx::surface_color_format format);
+
+	// Encode a host BGRA8 texture plane back into the guest r6g5b5 pack: the inverse
+	// of the Apple upload expand (TextureUtils.cpp convert_rgb655_to_bgra8, TX20).
+	// dst rows are dst_pitch bytes apart with one big-endian 16-bit word per texel,
+	// the same layout the packed-plane helpers write for the guest; src rows are
+	// width * 4 bytes, one BGRA8 texel per texel.  The expand's multiplies have no
+	// exact inverse, so the encode truncates each host channel to the guest width
+	// instead of inverting them; it is not the algebraic inverse of the expand
+	// (the VK-accepted lossy round trip).
+	void encode_r6g5b5_plane(void* dst, const void* src, u32 width, u32 height, u32 dst_pitch);
+
 	// The guest texture format (HLD-02 §2.7; LLD-texture §4).  A sampled texture is
 	// read through the unit's remap, so the packed colour formats expand to their
 	// natural channel count instead of a surface layout.  A device without BC

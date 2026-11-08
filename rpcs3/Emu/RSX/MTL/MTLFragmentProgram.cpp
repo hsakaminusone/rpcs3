@@ -24,12 +24,13 @@ namespace mtl
 		, m_shader(shader)
 	{
 #if MTL_DEBUG_LOGS
-		// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  The list is a comma
+		// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp.  The list is a comma
 		// separated set of compiled-program ids; the video program is named by the
 		// draw log ("fp id"), so one run forces exactly the draw under test and no
 		// other draw in the frame can produce the patch this diagnostic reads.
-		if (const char* value = std::getenv("MTL_PROBE_FORCE_FP"); value && *value && *value != '0')
+		if (const std::string force = probe::variant_arg("force-fp"); !force.empty())
 		{
+			const char* value = force.c_str();
 			usz start = 0;
 
 			while (start <= std::strlen(value))
@@ -53,20 +54,20 @@ namespace mtl
 
 			if (m_force_output)
 			{
-				MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta and its discard is cleared (MTL_PROBE_FORCE_FP)", id);
+				MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta and its discard is cleared (MTL_PROBE_VARIANT=force-fp)", id);
 			}
 		}
 
-		// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP_TEXTURES.  The compiled id
+		// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp-tex.  The compiled id
 		// shifts with the play sequence, so a selector that names the video by the
 		// number of textures its state enables survives a different route into the
 		// frame.  The video overlay is the only program of the title frame that
 		// enables three.
 		if (!m_force_output)
 		{
-			if (const char* value = std::getenv("MTL_PROBE_FORCE_FP_TEXTURES"); value && *value && *value != '0')
+			if (const std::string force = probe::variant_arg("force-fp-tex"); !force.empty())
 			{
-				const unsigned long requested = std::strtoul(value, nullptr, 10);
+				const unsigned long requested = std::strtoul(force.c_str(), nullptr, 10);
 				u32 enabled = 0;
 
 				for (u32 unit = 0; unit < 16; ++unit)
@@ -80,7 +81,7 @@ namespace mtl
 				if (requested && enabled == requested)
 				{
 					m_force_output = true;
-					MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta because its state enables %u textures and its discard is cleared (MTL_PROBE_FORCE_FP_TEXTURES)", id, enabled);
+					MTL_WARN(1, "Metal 4: diagnostic, the colour output of fp id %u is forced magenta because its state enables %u textures and its discard is cleared (MTL_PROBE_VARIANT=force-fp-tex)", id, enabled);
 				}
 			}
 		}
@@ -136,7 +137,7 @@ namespace mtl
 
 		if (m_force_output)
 		{
-			// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP; RSXROPEpilogue.glsl
+			// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp; RSXROPEpilogue.glsl
 			// carries the two sites this switches on.
 			OS << "#define _FORCE_OUTPUT 1\n\n";
 		}
@@ -364,7 +365,7 @@ namespace mtl
 		m_shader_props.ROP_alpha_to_coverage_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE);
 
 #if MTL_DEBUG_LOGS
-		// TODO(excise): diagnostic.  MTL_PROBE_NO_ALPHA_TEST=1 compiles every
+		// TODO(excise): diagnostic.  MTL_PROBE_VARIANT=no-alpha-test=1 compiles every
 		// fragment program without the alpha test.  A draw that leaves its target
 		// at the clear colour is then decided by one look at the pixel probe: a
 		// fragment that appears was discarded by the test, whose input is the
@@ -373,7 +374,7 @@ namespace mtl
 		// so a run needs a cold pipeline archive; MTLDevice.cpp names that run's
 		// archive separately so the real cache is not poisoned.  It changes
 		// rendering on purpose and is for diagnosis only.
-		if (m_shader_props.ROP_alpha_test && probe::diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+		if (m_shader_props.ROP_alpha_test && probe::variant("no-alpha-test"))
 		{
 			m_shader_props.ROP_alpha_test = false;
 
@@ -382,14 +383,14 @@ namespace mtl
 			if (!noted)
 			{
 				noted = true;
-				MTL_WARN(1, "Metal 4: diagnostic, the alpha test is compiled out of every fragment program (MTL_PROBE_NO_ALPHA_TEST)");
+				MTL_WARN(1, "Metal 4: diagnostic, the alpha test is compiled out of every fragment program (MTL_PROBE_VARIANT=no-alpha-test)");
 			}
 		}
 #endif
 #if MTL_DEBUG_LOGS
 		if (m_force_output)
 		{
-			// TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  The forced output sits
+			// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp.  The forced output sits
 			// after the epilogue, so the tests that discard before it are off as
 			// well; the inline kills are cleared in the epilogue itself.
 			m_shader_props.ROP_alpha_test = false;

@@ -9,38 +9,61 @@
 // MTLSurface.cpp and MTLTextureCache.cpp.
 
 /*
- * The graded diagnostic facility of the Metal 4 backend.  One runtime switch and
- * two compile switches control every probe of the backend.
+ * The graded diagnostic facility of the Metal 4 backend.  One runtime switch,
+ * one experiment switch, and the rest are compile-time decisions.
  *
- * One runtime switch.  MTL_PROBE is the level:
- *   - unset, empty or "0": nothing runs, nothing is formatted.
- *   - "1": the counters, the aggregate report and the mandatory lines.  Level 1
- *     is the performance level and it prints no per-event text.
- *   - "2": levels 1 and 2.  Level 2 adds the coverage latches, the histograms and
- *     the coverage table.
- *   - "3": levels 1 to 3.  Level 3 adds the per-event verbose log, and the MTL
- *     channel rises to the trace level.
- *   - "4": levels 1 to 4.  Level 4 adds the stall probe, the layer walk, the
- *     heartbeat, the residency churn and the display-latency stamps.
- *   - "5": every level.  Level 5 adds every dump, every shader source and every
- *     byte block.
- * A number above 5 clamps to 5.  A value that is not a number turns the facility
- * off and prints one warning.  MTL_PROBE_INTERVAL (frames between reports, default
- * 300) and MTL_PROBE_STALL_MS (acquire stall threshold in ms, default 16) tune two
- * probes; both are read once.  MTL_PROBE_AT_SEC (default off) arms one level-5
- * capture window after that many seconds, and MTL_PROBE_FRAME_COUNT (default 1)
- * is its length in frames.  The window is how a run reaches the draw state of a
- * specific menu, video or race without keeping a bounded prefix of the whole run.
- * The same count sets how many frames after the key press keep their CPU rings,
- * so a race scene is dumped as a whole instead of one frame at a time.
- * MTL_PROBE_AUTO_CAPTURE=0 suppresses the automatic scene detectors, so F12 is
- * the only trigger; the detectors would otherwise spend the wide window (and the
- * disk) on the scene change before the press.
+ * The runtime switches:
+ *   MTL_PROBE            the level.  Unset, empty or "0": nothing runs.  "1":
+ *                        the counters, the aggregate report and the mandatory
+ *                        lines.  "2": adds the coverage latches, the histograms
+ *                        and the coverage table.  "3": adds the per-event
+ *                        verbose log and the trace level.  "4": adds the stall
+ *                        probe, the layer walk, the heartbeat, the residency
+ *                        churn and the display-latency stamps.  "5": every dump.
+ *                        A number above 5 clamps to 5; a non-number turns the
+ *                        facility off and prints one warning.
+ *   MTL_PROBE_LOG        the probe's own file; everything except a warning and
+ *                        an error goes there instead of the shared log.
+ *   MTL_PROBE_DUMP_DIR   where every dump lands (default /tmp; a run that
+ *                        matters names a path inside the repository).
+ *   MTL_PROBE_FRAME_COUNT  frames an F12 capture window covers (default 1).
+ *                        Rings for that many frames after the press are kept
+ *                        too, so a race scene is dumped as a whole.
+ *   MTL_PROBE_ONLY_DRAW  the bisection filter, <n> or <lo>-<hi> of the draw ids
+ *                        printed by the per-draw trace; every other draw is
+ *                        counted and dropped.
+ *   MTL_PROBE_PIXELS     the fixed-patch readback after every draw of a
+ *                        capture window (on/off).  The patch list comes from
+ *                        MTL_PROBE_PIXELS ("x,y,w,h;x,y,w,h").
+ *   MTL_PROBE_VARIANT    the experiment arms, semicolon separated.  State-only
+ *                        arms never touch the shipping archive; the shader arms
+ *                        build into their own archive suffix.  The arms:
+ *                          replace-textures=red|uv|checker  (every fragment
+ *                                                            unit samples the
+ *                                                            diagnostic image)
+ *                          replace-units=0,2,5              (...narrowed)
+ *                          no-alpha-test                   (ROP alpha test out; own archive)
+ *                          no-depth                        (depth test off)
+ *                          no-cull                         (cull off)
+ *                          sentinel                        (passes clear magenta)
+ *                          poison                          (fresh allocations filled with a diagnostic word)
+ *                          heaps                           (hazard-tracked argument heaps)
+ *                          serialise                       (one command per encoder, wait-idle per draw)
+ *                          force-fp=<ids>                  (colour output of the listed compiled fp ids is forced magenta; own archive)
+ *                          force-fp-tex=<count>            (same, for fps enabling <count> textures; own archive)
+ *                          lod0                            (force min LOD 0)
+ *                          dump-tex=<hex>                  (every upload and every sample of that guest address dumps its bytes; bypasses the dedupe and the run budgets; 16 files, 64 MB per run)
+ *                          dump-draw=<id>                  (the named draw's raw persistent and volatile vertex streams dump; 16 MB per run)
+ *
+ * With the level at 5 a per-address upload/sample census is kept for the whole
+ * run and printed when a capture window closes (the Metal 4: census lines, plus
+ * the Metal 4: census never-uploaded lines for allocations sampled with zero
+ * uploads this run).
  *
  * Two compile switches remove the facility.  MTL_DEBUG_LOGS=0 removes the text
- * family.  MTL_PERF_ENABLED=0 removes the numeric family.  MTL_DIAGNOSTICS=0 forces
- * both off in one place.  A build with both off carries no code, no string and no
- * cost.
+ * family.  MTL_PERF_ENABLED=0 removes the numeric family.  MTL_DIAGNOSTICS=0
+ * forces both off in one place.  A build with both off carries no code, no
+ * string and no cost.
  *
  * The macros.  The level is the first token and it is a literal.
  *   Text:     MTL_NOTE(level, ...), MTL_WARN(level, ...), MTL_ERROR(level, ...),
@@ -75,6 +98,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
+#include <vector>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -156,15 +181,109 @@ namespace mtl::probe
 		return level() >= need;
 	}
 
-	// TODO(excise): a diagnostic switch that changes what the backend emits, not
-	// only what it logs.  It is read once per caller, so a run has to set it
-	// before launch.  A switch of this kind must also keep its output out of the
-	// on-disk pipeline archive, or a later run would load it as the real program:
-	// MTLDevice.cpp gives such a run its own archive name.
-	inline bool diagnostic_switch(const char* name)
+	// TODO(excise): level 5; the experiment arms of one run, one string.  Every
+	// arm is a diagnostic; none changes gameplay when off, and the shader arms
+	// build into their own archive suffix.  The arms, semicolon or comma
+	// separated (see the file header):
+	//   replace-textures=red|uv|checker   replace every fragment unit's image
+	//   replace-units=0,2,5               ...narrowed to the listed units
+	//   no-alpha-test no-depth no-cull sentinel poison heaps serialise lod0
+	//   dump-tex=<hex> dump-draw=<n> force-fp=<ids> force-fp-tex=<count>
+	// Read once.
+	inline std::vector<std::string> variant_tokens()
 	{
-		const char* value = std::getenv(name);
-		return value && value[0] && value[0] != '0';
+		static const std::vector<std::string> value = [] {
+			std::vector<std::string> tokens;
+			const char* text = std::getenv("MTL_PROBE_VARIANT");
+
+			if (!text)
+			{
+				return tokens;
+			}
+
+			std::string token;
+
+			for (const char c : std::string(text))
+			{
+				if (c == ',' || c == ';' || c == ' ' || c == '\t')
+				{
+					if (!token.empty())
+					{
+						tokens.push_back(std::move(token));
+						token.clear();
+					}
+
+					continue;
+				}
+
+				token += c;
+			}
+
+			if (!token.empty())
+			{
+				tokens.push_back(std::move(token));
+			}
+
+			return tokens;
+		}();
+
+		return value;
+	}
+
+	inline bool variant(const char* name)
+	{
+		const std::string needle(name);
+
+		for (const std::string& token : variant_tokens())
+		{
+			if (token == needle)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	inline std::string variant_arg(const char* name)
+	{
+		const std::string prefix = std::string(name) + "=";
+
+		for (const std::string& token : variant_tokens())
+		{
+			if (token.rfind(prefix, 0) == 0)
+			{
+				return token.substr(prefix.size());
+			}
+		}
+
+		return {};
+	}
+
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=poison.  A texture created under this
+	// switch is filled with a word that encodes its creating guest address; a
+	// shared buffer is filled with a word derived from an allocation index, and the
+	// log line carries it with the size and the format.  An unwritten resource
+	// therefore samples as the word itself and the log names the allocation.
+	// Read once per caller; state-only, the archive name does not change.
+	// TODO(excise): level 5; the poison fill the two writers share.  A partial
+	// trailing word is filled a byte at a time from the same word, so no byte of
+	// a fresh allocation is left undefined.
+	inline void fill_words(void* output, u64 size, u32 word)
+	{
+		u8* out = static_cast<u8*>(output);
+
+		for (u64 index = 0; index < size;)
+		{
+			const u32 chunk = static_cast<u32>(std::min<u64>(size - index, sizeof(word)));
+			std::memcpy(out + index, &word, chunk);
+			index += chunk;
+		}
+	}
+
+	inline u32 poison_word(u32 address)
+	{
+		return 0xff000000u | ((address * 2654435761u) & 0x00ffffffu);
 	}
 
 	// The clock the diagnostics stamp, in nanoseconds.  One home, so the text and
@@ -190,31 +309,20 @@ namespace mtl::probe
 		return hash;
 	}
 
-	// Frames between two reports.  The value is read once.
+	// Frames between two reports.  A compile constant: the report cadence is
+	// not something a run tunes.
 	inline u64 interval()
 	{
-		static const u64 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_INTERVAL");
-			const u64 parsed = text ? std::strtoull(text, nullptr, 10) : 0;
-			return parsed ? parsed : static_cast<u64>(MTL_PROBE_INTERVAL);
-		}();
-
-		return cached;
+		return static_cast<u64>(MTL_PROBE_INTERVAL);
 	}
 
-	// The acquire stall threshold in milliseconds.  The value is read once.
+	// The acquire stall threshold in milliseconds.  A compile constant.
 	inline f64 stall_ms()
 	{
-		static const f64 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_STALL_MS");
-			const f64 parsed = text ? std::strtod(text, nullptr) : 0.0;
-			return parsed > 0.0 ? parsed : static_cast<f64>(MTL_PROBE_STALL_MS);
-		}();
-
-		return cached;
+		return static_cast<f64>(MTL_PROBE_STALL_MS);
 	}
 
-	// The optional deep-capture trigger.  MTL_PROBE_AT_SEC starts one capture
+	// The optional deep-capture trigger.  the time arm (removed) starts one capture
 	// window after that many seconds, and MTL_PROBE_FRAME_COUNT is how many
 	// consecutive frames the window covers (default one).  The same count is the
 	// forward half of the ring dump, so a wide window keeps every frame's rings,
@@ -325,17 +433,6 @@ namespace mtl::probe
 		return value.c_str();
 	}
 
-	inline f64 capture_after_seconds()
-	{
-		static const f64 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_AT_SEC");
-			const f64 parsed = text ? std::strtod(text, nullptr) : -1.0;
-			return parsed >= 0.0 ? parsed : -1.0;
-		}();
-
-		return cached;
-	}
-
 	inline u64 capture_frame_count()
 	{
 		static const u64 cached = [] {
@@ -364,13 +461,366 @@ namespace mtl::probe
 	// widened for one run.  The cost is one queue round trip per probe.
 	inline u32 pixel_probe_limit()
 	{
-		static const u32 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_PIXEL_LIMIT");
-			const unsigned long parsed = text ? std::strtoul(text, nullptr, 10) : 0;
-			return parsed ? static_cast<u32>(parsed) : 64u;
+		// Race frames run past 600 draws; the per-window probe limit is a
+		// compile constant large enough to cover the failing band's draw even
+		// in a season-2 frame (INVESTIGATION-2026-10-22 §10.6).
+		return 512u;
+	}
+
+	// TODO(excise): level 5; the RCA pack.  One host-side census of every texture
+	// the backend uploads or samples in a run, so a frame's draws can be
+	// attributed without a memory forensics session and a never-uploaded or
+	// flat-zero allocation reads out of the capture instead of volunteering a
+	// theory.  The upload path notes (bytes, BC-zero blocks), the draw path
+	// notes (samples, unit-as-target hazards); the window-close site prints
+	// the table.  Bounded at 384 addresses and hashed into the note budget, so a
+	// hostile run reports the overflow as one count, never a flood.  The never-uploaded
+	// list (sampled this run, zero uploads) prints first.
+	struct census_entry
+	{
+		u64 first_frame = ~0ull;
+		u64 last_frame = 0;
+		u64 upload_bytes = 0;
+		u64 samples = 0;
+		u64 hazard_target = 0;
+		u64 bc_blocks = 0;
+		u64 bc_zero_blocks = 0;
+		u32 uploads = 0;
+		u32 bc_block_bytes = 0;
+		u32 gcm_format = 0;
+	};
+
+	inline std::mutex& census_guard()
+	{
+		static std::mutex value;
+		return value;
+	}
+
+	inline u64& census_frame()
+	{
+		static u64 value = 0;
+		return value;
+	}
+
+	inline std::unordered_map<u32, census_entry>& census_map()
+	{
+		static std::unordered_map<u32, census_entry> value;
+		return value;
+	}
+
+	inline u64& census_suppressed()
+	{
+		static u64 value = 0;
+		return value;
+	}
+
+	inline void census_note_frame(u64 frame)
+	{
+		std::lock_guard<std::mutex> guard(census_guard());
+		census_frame() = frame;
+	}
+
+	constexpr u32 census_address_limit = 384u;
+
+	// The per-BC-block zero scan of one converted upload.  A flat-zero DXT payload
+	// is what an allocation nobody uploaded looks like at the sample; counting the
+	// blocks at the upload edge catches it before any screenshot shows black.
+	// Only the three DXT formats have whole blocks; the scan walks 8 or 16 bytes
+	// at a time and is bounded to the upload size.
+	inline u64 bc_zero_block_scan(const u8* converted, u64 size, u32 block_bytes)
+	{
+		if (!converted || !block_bytes)
+		{
+			return 0;
+		}
+
+		u64 zero = 0;
+
+		for (u64 offset = 0; offset + block_bytes <= size; offset += block_bytes)
+		{
+			u32 word = 0;
+			for (u32 byte = 0; byte < block_bytes; ++byte)
+			{
+				word |= converted[offset + byte];
+			}
+
+			zero += (word == 0u) ? 1ull : 0ull;
+		}
+
+		return zero;
+	}
+
+	inline void census_note_upload(u32 address, u64 bytes, u32 gcm_format, u64 bc_blocks, u64 bc_zero_blocks, u32 bc_block_bytes)
+	{
+		if (!address)
+		{
+			return;
+		}
+
+		std::lock_guard<std::mutex> guard(census_guard());
+
+		if (census_map().size() >= census_address_limit && !census_map().count(address))
+		{
+			++census_suppressed();
+			return;
+		}
+
+		census_entry& entry = census_map()[address];
+		const u64 frame = census_frame();
+		entry.first_frame = std::min(entry.first_frame, frame);
+		entry.last_frame = std::max(entry.last_frame, frame);
+		++entry.uploads;
+		entry.upload_bytes += bytes;
+		entry.bc_blocks += bc_blocks;
+		entry.bc_zero_blocks += bc_zero_blocks;
+		entry.bc_block_bytes = bc_block_bytes;
+		entry.gcm_format = gcm_format;
+	}
+
+	inline void census_note_sample(u32 address)
+	{
+		if (!address)
+		{
+			return;
+		}
+
+		std::lock_guard<std::mutex> guard(census_guard());
+
+		if (census_map().size() >= census_address_limit && !census_map().count(address))
+		{
+			++census_suppressed();
+			return;
+		}
+
+		census_entry& entry = census_map()[address];
+		const u64 frame = census_frame();
+		entry.first_frame = std::min(entry.first_frame, frame);
+		entry.last_frame = std::max(entry.last_frame, frame);
+		++entry.samples;
+	}
+
+	// The bound-unit-as-target flag: a unit that samples an address the same
+	// draw is rendering into is the paint/reflection identity-split class.
+	inline void census_note_hazard(u32 address)
+	{
+		if (!address)
+		{
+			return;
+		}
+
+		std::lock_guard<std::mutex> guard(census_guard());
+
+		if (census_map().size() >= census_address_limit && !census_map().count(address))
+		{
+			++census_suppressed();
+			return;
+		}
+
+		census_entry& entry = census_map()[address];
+		const u64 frame = census_frame();
+		entry.first_frame = std::min(entry.first_frame, frame);
+		entry.last_frame = std::max(entry.last_frame, frame);
+		++entry.hazard_target;
+	}
+
+	// The report a capture window prints when it closes: the never-uploaded list
+	// first (the smoking gun), then every address with a zero BC block, then the
+	// hazard flags, then the totals.  Fixed order, one line each, bounded.
+	inline void census_print(const char* reason)
+	{
+		if (!at_least(5))
+		{
+			return;
+		}
+
+		std::lock_guard<std::mutex> guard(census_guard());
+
+		u64 uploads = 0, upload_bytes = 0, samples = 0, hazards = 0, addresses = 0;
+		u64 bc_blocks = 0, bc_zero = 0, never = 0;
+
+		for (const auto& pair : census_map())
+		{
+			const census_entry& entry = pair.second;
+			uploads += entry.uploads;
+			upload_bytes += entry.upload_bytes;
+			samples += entry.samples;
+			hazards += entry.hazard_target;
+			bc_blocks += entry.bc_blocks;
+			bc_zero += entry.bc_zero_blocks;
+
+			if (entry.samples && !entry.uploads)
+			{
+				++never;
+				sink().write("Metal 4: census never-uploaded 0x%x, samples %llu, frames %llu..%llu",
+					pair.first, static_cast<unsigned long long>(entry.samples),
+					static_cast<unsigned long long>(entry.first_frame == ~0ull ? 0 : entry.first_frame),
+					static_cast<unsigned long long>(entry.last_frame));
+			}
+		}
+
+		sink().write("Metal 4: census %s: %zu entries, uploads %llu, bytes %llu, samples %llu, bc zero %llu/%llu blocks, hazards %llu, suppressed %llu",
+			reason, census_map().size(),
+			static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(upload_bytes),
+			static_cast<unsigned long long>(samples),
+			static_cast<unsigned long long>(bc_zero), static_cast<unsigned long long>(bc_blocks),
+			static_cast<unsigned long long>(hazards), static_cast<unsigned long long>(census_suppressed()));
+
+		std::vector<u32> keys;
+		keys.reserve(census_map().size());
+
+		for (const auto& pair : census_map())
+		{
+			keys.push_back(pair.first);
+		}
+
+		std::sort(keys.begin(), keys.end());
+
+		for (const u32 key : keys)
+		{
+			const census_entry& entry = census_map()[key];
+
+			if (!entry.samples && !entry.bc_zero_blocks && !entry.hazard_target)
+			{
+				continue;
+			}
+
+			sink().write("Metal 4: census 0x%x, uploads %u, bytes %llu, samples %llu, fmt 0x%x bc zero %llu/%llu (%uB), hazards %llu, frames %llu..%llu",
+				key, entry.uploads, static_cast<unsigned long long>(entry.upload_bytes),
+				static_cast<unsigned long long>(entry.samples), entry.gcm_format,
+				static_cast<unsigned long long>(entry.bc_zero_blocks),
+				static_cast<unsigned long long>(entry.bc_blocks), entry.bc_block_bytes,
+				static_cast<unsigned long long>(entry.hazard_target),
+				static_cast<unsigned long long>(entry.first_frame == ~0ull ? 0 : entry.first_frame),
+				static_cast<unsigned long long>(entry.last_frame));
+		}
+
+		sink().write("Metal 4: census end %s", reason);
+	}
+
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=dump-tex=<hex>.  The catch-all for the
+	// one texture the other budgets can starve: every upload of that address and
+	// every sample of it writes its bytes, bypassing the dedupe keys and the run
+	// budgets, with its own budget (16 files, 64 MB per run).  Hex, with an optional
+	// 0x.  A run that names nothing takes the fast path (one compare, zero).
+	inline u32 dump_tex_address()
+	{
+		static const u32 value = [] {
+			const std::string arg = variant_arg("dump-tex");
+
+			if (arg.empty())
+			{
+				return 0u;
+			}
+
+			const char* text = arg.c_str();
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(text + (text[0] == '0' && (text[1] == 'x' || text[1] == 'X') ? 2 : 0), &end, 16);
+			return (end && *end == '\0' && end != text) ? static_cast<u32>(parsed) : 0u;
 		}();
 
-		return cached;
+		return value;
+	}
+
+	inline std::atomic<u32>& dump_tex_file_count()
+	{
+		static std::atomic<u32> value{0};
+		return value;
+	}
+
+	inline std::atomic<u64>& dump_tex_byte_count()
+	{
+		static std::atomic<u64> value{0ull};
+		return value;
+	}
+
+	inline bool dump_tex_match(u32 address)
+	{
+		return address != 0 && address == dump_tex_address();
+	}
+
+	inline std::mutex& dump_tex_guard()
+	{
+		static std::mutex value;
+		return value;
+	}
+
+	// Atomic claim: at most 16 files and 64 MB per run, however many sites match.
+	inline bool dump_tex_take(u64 bytes)
+	{
+		if (!dump_tex_address())
+		{
+			return false;
+		}
+
+		std::lock_guard<std::mutex> guard(dump_tex_guard());
+
+		if (dump_tex_file_count().load(std::memory_order_relaxed) >= 16u)
+		{
+			return false;
+		}
+
+		if (dump_tex_byte_count().load(std::memory_order_relaxed) + bytes > 64ull * 1024u * 1024u)
+		{
+			return false;
+		}
+
+		dump_tex_file_count().store(dump_tex_file_count().load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+		dump_tex_byte_count().store(dump_tex_byte_count().load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+		return true;
+	}
+
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=dump-draw=<id>.  The isolated-draw
+	// capture: when the per-draw trace finds that draw, its raw persistent and
+	// volatile vertex streams are dumped (bypassing every other budget), the
+	// record every isolated-draw analysis starts from.  Decimal or 0x hex.  One
+	// draw, 16 MB per run.
+	inline u64 dump_draw_id()
+	{
+		static const u64 value = [] {
+			const std::string arg = variant_arg("dump-draw");
+
+			if (arg.empty())
+			{
+				return ~0ull;
+			}
+
+			const char* text = arg.c_str();
+			const bool hex = text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+
+			if (hex)
+			{
+				char* end = nullptr;
+				const unsigned long long parsed = std::strtoull(text + 2, &end, 16);
+				return (end && *end == '\0') ? static_cast<u64>(parsed) : ~0ull;
+			}
+
+			char* end = nullptr;
+			const unsigned long long parsed = std::strtoull(text, &end, 10);
+			return (end && *end == '\0') ? static_cast<u64>(parsed) : ~0ull;
+		}();
+
+		return value;
+	}
+
+	inline std::atomic<u64>& dump_draw_byte_count()
+	{
+		static std::atomic<u64> value{0ull};
+		return value;
+	}
+
+	inline bool dump_draw_match(u64 draw)
+	{
+		return dump_draw_id() != ~0ull && draw == dump_draw_id();
+	}
+
+	inline bool dump_draw_take(u64 bytes)
+	{
+		if (!bytes || dump_draw_id() == ~0ull)
+		{
+			return false;
+		}
+
+		return dump_draw_byte_count().fetch_add(bytes, std::memory_order_relaxed) + bytes <= 16ull * 1024u * 1024u;
 	}
 
 	// TODO(excise): level 5; a deferred texture is materialised in the texture
@@ -397,35 +847,17 @@ namespace mtl::probe
 	// only: it raises a limit, it never changes what is measured.
 	inline u32 site_line_cap()
 	{
-		static const u32 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_SITE_CAP");
-			const unsigned long parsed = text ? std::strtoul(text, nullptr, 10) : 0;
-			return parsed ? static_cast<u32>(parsed) : 4096u;
-		}();
-
-		return cached;
+		return 4096u;
 	}
 
 	inline s64 interval_line_budget()
 	{
-		static const s64 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_INTERVAL_BUDGET");
-			const long long parsed = text ? std::strtoll(text, nullptr, 10) : 0;
-			return parsed ? static_cast<s64>(parsed) : 40000ll;
-		}();
-
-		return cached;
+		return 40000ll;
 	}
 
 	inline s64 run_line_budget()
 	{
-		static const s64 cached = [] {
-			const char* text = std::getenv("MTL_PROBE_RUN_BUDGET");
-			const long long parsed = text ? std::strtoll(text, nullptr, 10) : 0;
-			return parsed ? static_cast<s64>(parsed) : 200000ll;
-		}();
-
-		return cached;
+		return 200000ll;
 	}
 
 	inline std::atomic<s64>& interval_budget()
@@ -513,18 +945,61 @@ namespace mtl::probe
 		// is on, so the fact is stated once, before any frame, where the run's own
 		// log carries it (the archive name alone is not read by a reader of the
 		// probe log).
-		if (diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+		if (variant("no-alpha-test"))
 		{
 			mtl_log.warning("Metal 4 probe: diagnostic, the alpha test is compiled out of every fragment "
-				"program (MTL_PROBE_NO_ALPHA_TEST); a fragment the guest would discard is drawn instead, and "
+				"program (MTL_PROBE_VARIANT=no-alpha-test); a fragment the guest would discard is drawn instead, and "
 				"this run's pipeline archive is kept apart.");
 		}
 
-		if (diagnostic_switch("MTL_PROBE_TRACKED_HEAPS"))
+		if (variant("heaps"))
 		{
-			mtl_log.warning("Metal 4 probe: diagnostic, every heap tracks hazards (MTL_PROBE_TRACKED_HEAPS); the "
+			mtl_log.warning("Metal 4 probe: diagnostic, every heap tracks hazards (MTL_PROBE_VARIANT=heaps); the "
 				"driver orders conflicting accesses, so a defect that goes is a missing edge and a defect that "
 				"stays is content.");
+		}
+
+		if (variant("sentinel"))
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, every pass clears its colour attachments to the sentinel "
+				"(MTL_PROBE_VARIANT=sentinel); a pass that does not write a pixel leaves it magenta, so a delivered "
+				"image that keeps a magenta block is a surface no draw painted and a delivered image that keeps a "
+				"non-magenta block in that position is one this run's draws painted.");
+		}
+
+		if (variant("poison"))
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, every freshly allocated texture and shared buffer is filled "
+				"with a word (MTL_PROBE_VARIANT=poison); textures' words encode the creating guest address and buffers' "
+				"words an allocation index, with a log line per allocation.  An unwritten resource samples as the "
+				"word itself, and the log line with the same word names the allocation.");
+		}
+
+		if (variant("serialise"))
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, the GPU is serialised (MTL_PROBE_VARIANT=serialise); one "
+				"command buffer per flush and wait-idle per draw, so a fault that goes is a missing GPU edge and a "
+				"fault that stays is content.");
+		}
+
+		if (dump_tex_address() != 0)
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, every upload and every sample of 0x%x dumps its bytes to the "
+				"dump directory (MTL_PROBE_VARIANT=dump-tex=0x%x); 16 files and 64 MB per run, bypassing the "
+				"dedupe keys and the run budgets.", dump_tex_address(), dump_tex_address());
+		}
+
+		if (dump_draw_id() != ~0ull)
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, the draw named by MTL_PROBE_VARIANT=dump-draw dumps its raw "
+				"persistent and volatile vertex streams to the dump directory (16 MB per run).");
+		}
+
+		if (const char* only = std::getenv("MTL_PROBE_ONLY_DRAW"); only && *only && *only != '0')
+		{
+			mtl_log.warning("Metal 4 probe: diagnostic, only the draws named by MTL_PROBE_ONLY_DRAW are encoded "
+				"(<n> or <lo>-<hi>, draw ids are the 'draw <n>' ids in the log); every other draw is counted and "
+				"dropped, so the isolated draw's contribution to the target can be read on its own.");
 		}
 	}
 }

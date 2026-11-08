@@ -581,8 +581,8 @@ instrumentation, but it is masked by the normal quit path and was not chased
 while capture work was in flight. The main-thread `.ips` abort at `0x18` is
 secondary Qt teardown and not the primary fault.
 
-**Resolved** in the commit that landed `buffer_open` tracking (`open_copy_encoder` and `open_pass`
-re-enter a closed slot): the fault was an `on_exit` invalidation readback encoded on an
+**Resolved** in c55593a9b (`buffer_open` tracking; `open_copy_encoder` and `open_pass` re-enter a
+closed slot): the fault was an `on_exit` invalidation readback encoded on an
 `endCommandBuffer`-ed slot, not a released device. Two consecutive clean quits with
 `RPCS3_TRACE_ON_SIGNAL=1` and no backtrace. See `LOG-FINDINGS.md` L159/L165.
 

@@ -538,7 +538,7 @@ TEST(MTLMapTextureFormat, TextureFormatFollowsTheGcmTextureFormat)
 	// Each row is checked against the Vulkan format for the same target
 	// (VKFormats.cpp:195-241; the packed rows are platform-dependent, as below) and the
 	// RSX component map (VKFormats.cpp:124-193; GLTexture.cpp:214-269).  The uploader and
-	// the Vulkan format choice use the same predicate (TextureUtils.cpp:950,
+	// the Vulkan format choice use the same predicate (TextureUtils.cpp,
 	// VKFormats.cpp:200).
 	using row = mapping_row<u32, MTL::PixelFormat>;
 
@@ -547,16 +547,21 @@ TEST(MTLMapTextureFormat, TextureFormatFollowsTheGcmTextureFormat)
 		{ CELL_GCM_TEXTURE_A8R8G8B8,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x85 (gcm_enums.h:138); VKFormats.cpp:217
 		{ CELL_GCM_TEXTURE_D8R8G8B8,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x9E (gcm_enums.h:159); VKFormats.cpp:232
 #if !defined(__APPLE__) || !defined(ARCH_X64)
-		// The uploader keeps a packed format packed here (TextureUtils.cpp:950), so the
+		// The uploader keeps a packed format packed here (TextureUtils.cpp), so the
 		// host format is the packed one that matches the guest bits.
 		{ CELL_GCM_TEXTURE_R5G6B5,                    MTL::PixelFormat::PixelFormatB5G6R5Unorm },         // 0x84 (gcm_enums.h:137); VKFormats.cpp:201
 		{ CELL_GCM_TEXTURE_A1R5G5B5,                  MTL::PixelFormat::PixelFormatA1BGR5Unorm },         // 0x82 (gcm_enums.h:135); VKFormats.cpp:205
 		{ CELL_GCM_TEXTURE_A4R4G4B4,                  MTL::PixelFormat::PixelFormatABGR4Unorm },          // 0x83 (gcm_enums.h:136); VKFormats.cpp:206
 		{ CELL_GCM_TEXTURE_R5G5B5A1,                  MTL::PixelFormat::PixelFormatBGR5A1Unorm },         // 0x97 (gcm_enums.h:152); VKFormats.cpp:203
 		{ CELL_GCM_TEXTURE_D1R5G5B5,                  MTL::PixelFormat::PixelFormatA1BGR5Unorm },         // 0x9D (gcm_enums.h:158); VKFormats.cpp:204
-		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatB5G6R5Unorm },         // 0x8F (gcm_enums.h:145); VKFormats.cpp:202
+#if defined(__APPLE__)
+		// Apple arm64 expands the upload to BGRA8, like the Intel build (TextureUtils.cpp).
+		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x8F (gcm_enums.h:145)
 #else
-		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015).
+		{ CELL_GCM_TEXTURE_R6G5B5,                    MTL::PixelFormat::PixelFormatB5G6R5Unorm },         // 0x8F (gcm_enums.h:145); VKFormats.cpp:202
+#endif
+#else
+		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp).
 		{ CELL_GCM_TEXTURE_R5G6B5,                    MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x84 (gcm_enums.h:137)
 		{ CELL_GCM_TEXTURE_A1R5G5B5,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x82 (gcm_enums.h:135)
 		{ CELL_GCM_TEXTURE_A4R4G4B4,                  MTL::PixelFormat::PixelFormatBGRA8Unorm },         // 0x83 (gcm_enums.h:136)
@@ -615,11 +620,12 @@ TEST(MTLMapTextureFormat, CompressedFormatsFallBackWhenTheDeviceHasNoBc)
 
 TEST(MTLMapTextureFormat, PackedFormatsUseTheGuestBitOrderWithAPermutedRead)
 {
-	// The uploader keeps a packed format packed on this target (TextureUtils.cpp:950),
+	// The uploader keeps a packed format packed on this target (TextureUtils.cpp),
 	// so the host texture holds the guest bits unchanged.  Vulkan names the guest bit
 	// order on the same target (VKFormats.cpp:200-205).  Metal names its packed format
 	// from the most significant field, so the host channel order differs and the
-	// component layout must permute the read back to the guest channels.
+	// component layout must permute the read back to the guest channels.  R6G5B5 is
+	// the exception on Apple: it expands to BGRA8, like the Intel build.
 	EXPECT_EQ(CELL_GCM_TEXTURE_R5G6B5, 0x84u);   // gcm_enums.h:137
 	EXPECT_EQ(CELL_GCM_TEXTURE_R6G5B5, 0x8Fu);   // gcm_enums.h:145
 	EXPECT_EQ(CELL_GCM_TEXTURE_R5G5B5A1, 0x97u); // gcm_enums.h:152
@@ -639,17 +645,28 @@ TEST(MTLMapTextureFormat, PackedFormatsUseTheGuestBitOrderWithAPermutedRead)
 	// Guest R4G4B4A4 against host ABGR4 moves every field one place.
 	constexpr std::array<MTL::TextureSwizzle, 4> rotate = {
 		MTL::TextureSwizzleRed, MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen };
+#if defined(__APPLE__)
+	// Apple arm64 expands the R6G5B5 upload to BGRA8, like the Intel build below.
+	constexpr std::array<MTL::TextureSwizzle, 4> argb = {
+		MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+#endif
 
 	const packed_row packed[] = {
 		{ CELL_GCM_TEXTURE_R5G6B5,   MTL::PixelFormat::PixelFormatB5G6R5Unorm, one_bgr },   // VKFormats.cpp:201
+#if defined(__APPLE__)
+		// Apple arm64 expands the upload to BGRA8, like the Intel build (TextureUtils.cpp);
+		// the guest channels already sit in the A-R-G-B order.
+		{ CELL_GCM_TEXTURE_R6G5B5,   MTL::PixelFormat::PixelFormatBGRA8Unorm, argb },
+#else
 		{ CELL_GCM_TEXTURE_R6G5B5,   MTL::PixelFormat::PixelFormatB5G6R5Unorm, one_bgr },   // VKFormats.cpp:202
+#endif
 		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGR5A1Unorm, alpha_bgr }, // VKFormats.cpp:203
 		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, alpha_bgr }, // VKFormats.cpp:205
 		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, one_bgr },   // VKFormats.cpp:204
 		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm,  rotate },    // VKFormats.cpp:206
 	};
 #else
-	// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015),
+	// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp),
 	// so the guest channels already sit in the A-R-G-B order.
 	constexpr std::array<MTL::TextureSwizzle, 4> argb = {
 		MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };

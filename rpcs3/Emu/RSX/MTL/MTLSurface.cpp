@@ -433,6 +433,30 @@ namespace mtl
 				stencil_init_flags |= (1 << 9);
 			}
 		}
+		else if (!m_depth && packed_format_needs_convert(get_surface_color_format()))
+		{
+			// The host stores blue in the high field, so the image
+			// cannot take the guest bytes as-is (and the x1/o1 bit would move).  The decode
+			// is the inverse of the depth upload above: decode into a shared staging
+			// buffer, then fill the image from it.
+			const u32 plane_pitch = width() * 2;
+			MTL::Buffer* staging = m_resources->new_buffer(static_cast<u64>(plane_pitch) * height(), MTL::StorageModeShared);
+
+			if (!staging)
+			{
+				rsx_log.error("Metal 4: the packed colour background staging buffer could not be created");
+				return;
+			}
+
+			decode_packed16_plane(staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
+				width(), height(), rsx_pitch, get_surface_color_format());
+
+			encoder->copyFromBuffer(staging, 0, plane_pitch, plane_pitch * height(),
+				MTL::Size::Make(width(), height(), 1),
+				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+
+			cmd.resources().defer_release(staging);
+		}
 		else
 		{
 			// The guest address is the offset into the guest window (HLD-02 §3.5).
@@ -616,6 +640,39 @@ namespace mtl
 			{
 				m_resources->defer_release(stencil);
 			}
+			return;
+		}
+
+		// m_depth guard first: the format union aliases the depth enum, so a depth
+		// surface would compare equal to a packed colour format.
+		const rsx::surface_color_format color_format = get_surface_color_format();
+
+		if (!m_depth && packed_format_needs_convert(color_format))
+		{
+			// The Metal packed word stores blue in the high field, so a raw row copy
+			// exchanges the red and blue fields (and misaligns every x1r5g5b5 field).  The
+			// depth decode above is the model: the blit copies to a shared staging buffer,
+			// and the frame is committed and waited for, because the CPU encode that
+			// follows is the read-back itself.
+			const u32 plane_pitch = copy_width * 2;
+			MTL::Buffer* plane = m_resources->new_buffer(static_cast<u64>(plane_pitch) * rows, MTL::StorageModeShared);
+			if (!plane)
+			{
+				rsx_log.error("Metal 4: the packed colour read-back staging buffer could not be created");
+				return;
+			}
+
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(column, row, 0),
+				MTL::Size::Make(copy_width, rows, 1),
+				plane, 0, plane_pitch, plane_pitch * rows);
+
+			cmd.flush_for_readback();
+
+			u8* const dst = static_cast<u8*>(target->contents()) + dst_offset;
+			encode_packed16_plane(dst, plane->contents(), copy_width, rows, rsx_pitch, color_format);
+
+			m_resources->defer_release(plane);
 			return;
 		}
 

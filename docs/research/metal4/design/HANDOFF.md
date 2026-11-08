@@ -282,7 +282,7 @@ before a commit; the variant switches get their own archive suffix (`-noalpha`, 
 | the probes were **blind to the link** | read-ahead, jump-past-PUT and rewind are all numeric against `put`, and here the buffer being read has the lower address, so a jump from A down into B satisfies `target <= put`. The discriminator is a slab test, `(addr ^ put) & ~0xffff`, logged as `jump cross-buffer` (L130). |
 | Metal parked the parser **because of the label drain** | VK/GL write the label GPU-side and keep work in flight; Metal drained the GPU on the RSX thread, which held the RSX at the GPU's rate. The park/catch-up cadence itself is normal on all three backends; the drain is why the race is reachable here, and L131 removes it (L129). |
 | the boot stall was **the unsubmitted label** | `release_GCM_label` staged the back-end write in the open frame, and the batch was committed only from `on_semaphore_acquire_wait`; this guest parks in `run_FIFO` and never calls it, so the write never reached the GPU and the producer stayed at `0xcb09d4` (L134). VK's immediate secondary CB and GL's host DMA writer both submit without a frame commit. The fix commits the back-end batch at the release. |
-| the remaining gaps vs VK/GL are **enumerated and ordered** | `GAP-PLAN.md` (2026-10-25) re-reads every deviation row in the code: D1–D3, D5–D7, D9, S1–S9/S11–S13, TX3/TX7/TX9, SY1–SY5/SY9 are fixed and the audit rows were stale. The open work is DR10 (pass per clause), SY10, VX4, SF14, TX10/TX11/TX20, F12, E7, the parked D4 and the capture-gated SY7/SY8/SY11. |
+| the remaining gaps vs VK/GL are **enumerated and ordered** | `GAP-PLAN.md` (2026-10-25) re-reads every deviation row in the code: D1–D3, D5–D7, D9, S1–S9/S11–S13, TX3/TX7/TX9, SY1–SY5/SY9 are fixed and the audit rows were stale. The open work is DR10 (pass per clause), SY10, VX4, TX10/TX11, F12, E7, the parked D4 and the capture-gated SY7/SY8/SY11. SF14 and TX20 were fixed on 2026-11-11 (L194); TX14 is partial (bounded report + latch, draw proceeds). |
 | `0x00010000` **is** non-method | `0x00010000 & 0xa0030003 = 0x10000`; L37's older claim was wrong. It is the argument of `reg 0x75C`, not a header (L37, L84, L118). |
 | the parser now **stops at the published end** | `fetch_u32` refuses `addr >= frontier`; the word at the frontier is consumed only as a flow-control link, and the method packet must be fully published. This includes `addr == put`, where the link is the one published exception (L132, L133). |
 | the black video is **not** an upload or format problem | the three B8 planes carry picture (L95), `B8 → R8Unorm` matches Vulkan (L96), and the video draw's state is complete (L101). With the alpha test compiled out it still leaves the target at `(0,0,0,0)` (L110), so the remaining split is "wrote black" versus "never ran" (L111, L114). |
@@ -635,8 +635,8 @@ the F12 screenshot holds one, so the probe coordinates depend on which layout th
 
 ### 7.4 The open TODO rows
 
-Order: SF8, SF9, TX5, TX7, TX10, TX11, TX12, TX14, DR9, DR10, PF8, PF12, S5, S6, F2, F3, F5, F7–F12,
-F14, SY4, SY6–SY8, SY10, SY11, Q7, VX4, SF14, TX20. The live list and severity are in
+Order: SF8, SF9, TX5, TX7, TX10, TX11, TX12, DR9, DR10, PF8, PF12, S5, S6, F2, F3, F5, F7–F12,
+F14, SY4, SY6–SY8, SY10, SY11, Q7, VX4. The live list and severity are in
 `METAL4-TODO.md`; this section does not duplicate them.
 
 ### 7.5 Coverage and dials
@@ -768,9 +768,10 @@ fix only makes it non-fatal. Verify a clean window close, then treat the start f
 14. Typeless/scaled copies are refused rather than emulated (I5); TX9 now stages the equal-texel
     typeless case.
 15. `supports_multidraw` is inert (G2).
-16. `R6G5B5` needs a format expansion (TX20).
-17. A 16-bit surface uses an identity layout; raw write-back swaps R/B. An output permutation or a
-    32-bit staging path is planned (R2).
+16. `R6G5B5` needs a format expansion (TX20) — done (L194): Apple expands the upload to BGRA8
+    in the shared uploader; VK/GL Apple stay consistent.
+17. A 16-bit surface uses an identity layout; raw write-back swapped R/B. **Fixed (L194):** the
+    write-back repacks the plane on the way in and out (R2's 4-site unification stays unimplemented).
 
 ---
 
