@@ -1,4 +1,5 @@
 #include "MTLSamplerState.h"
+#include "MTLInstrumentation.h"
 
 #ifdef RSX_ENABLE_METAL4
 
@@ -146,18 +147,14 @@ namespace mtl
 
 	namespace
 	{
-		// TODO(excise): level 5; MTL_PROBE_FORCE_LOD0 pins every sampler to level
-		// zero, with no bias and no filtering.  A one-texel replacement texture
-		// removes UV and LOD together, so it cannot tell a wrong mip level from a
-		// wrong coordinate.  This switch changes only sampler state: the shader
-		// programs and the pipeline archive are untouched.
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=lod0 pins every sampler to
+		// level zero, with no bias and no filtering.  A one-texel replacement
+		// texture removes UV and LOD together, so it cannot tell a wrong mip
+		// level from a wrong coordinate.  This arm changes only sampler state:
+		// the shader programs and the pipeline archive are untouched.
 		bool diagnostic_force_lod0()
 		{
-			static const bool enabled = [] {
-				const char* value = std::getenv("MTL_PROBE_FORCE_LOD0");
-				return value && *value && *value != '0';
-			}();
-
+			static const bool enabled = probe::variant("lod0");
 			return enabled;
 		}
 

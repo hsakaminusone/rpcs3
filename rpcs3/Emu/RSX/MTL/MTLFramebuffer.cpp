@@ -156,8 +156,19 @@ namespace mtl
 		// The caller's mask says whether a clear was asked for at all: a partial
 		// clear is a scissored fill and passes 0 here, and a load action would wipe
 		// everything outside that scissor (MTLFramebuffer.h:27-31).
-		const bool clear_color = (clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0 &&
-			state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0;
+		//
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=sentinel.  Every colour attachment of
+		// every pass loads as a clear of the sentinel instead of loading its
+		// content.  A pixel that reaches the presented image therefore comes from
+		// some draw of this frame, and a pixel that is not reached by any draw stays
+		// the sentinel: this is the only way to separate "content is stale" from
+		// "content is absent", which is the first fork of the glitch triage.  The
+		// value is magenta, which no scene surface is, and the run is not a
+		// shipping frame.  Depth and stencil are not touched.
+		const bool sentinel_passes = probe::variant("sentinel");
+		const bool clear_color = sentinel_passes ||
+			((clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0 &&
+				state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0);
 		const bool clear_depth = (clear_mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
 		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0 && state.clear_stencil_fast;
 
@@ -177,7 +188,11 @@ namespace mtl
 				attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
 			}
 
-			if (clear_color)
+			if (sentinel_passes)
+			{
+				attachment->setClearColor(MTL::ClearColor::Make(1.0, 0.0, 1.0, 1.0));
+			}
+			else if (clear_color)
 			{
 				attachment->setClearColor(state.clear_color);
 			}

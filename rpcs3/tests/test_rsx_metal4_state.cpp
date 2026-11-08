@@ -552,16 +552,21 @@ TEST(MTLFormatsTexture, TextureFormatMatchesTheBackendTable)
 		{ CELL_GCM_TEXTURE_A8R8G8B8, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_D8R8G8B8, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 #if !defined(__APPLE__) || !defined(ARCH_X64)
-		// The uploader keeps a packed format packed here (TextureUtils.cpp:950), so the
+		// The uploader keeps a packed format packed here (TextureUtils.cpp), so the
 		// host format holds the guest bits; the read permutes its field order.
 		{ CELL_GCM_TEXTURE_R5G6B5, MTL::PixelFormat::PixelFormatB5G6R5Unorm },
 		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm },
 		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGR5A1Unorm },
 		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm },
-		{ CELL_GCM_TEXTURE_R6G5B5, MTL::PixelFormat::PixelFormatB5G6R5Unorm },
+#if defined(__APPLE__)
+		// Apple arm64 expands the upload to BGRA8, like the Intel build (TextureUtils.cpp).
+		{ CELL_GCM_TEXTURE_R6G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 #else
-		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp:966-1015).
+		{ CELL_GCM_TEXTURE_R6G5B5, MTL::PixelFormat::PixelFormatB5G6R5Unorm },
+#endif
+#else
+		// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp).
 		{ CELL_GCM_TEXTURE_R5G6B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatBGRA8Unorm },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatBGRA8Unorm },
@@ -619,7 +624,13 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 		// A4R4G4B4 is stored R4G4B4A4, so every field moves one place.
 		{ CELL_GCM_TEXTURE_A1R5G5B5, { a, b, g, r } },
 		{ CELL_GCM_TEXTURE_R5G5B5A1, { a, b, g, r } },
+#if defined(__APPLE__)
+		// Apple arm64 expands the upload to BGRA8, like the Intel build below;
+		// the guest channels already sit in the A-R-G-B order.
+		{ CELL_GCM_TEXTURE_R6G5B5, { a, r, g, b } },
+#else
 		{ CELL_GCM_TEXTURE_R6G5B5, { o, b, g, r } },
+#endif
 		{ CELL_GCM_TEXTURE_R5G6B5, { o, b, g, r } },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, { r, a, b, g } },
 		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, b, g, r } },
@@ -631,7 +642,7 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 		{ CELL_GCM_TEXTURE_R6G5B5, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_R5G6B5, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_A4R4G4B4, { a, r, g, b } },
-		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, r, g, b } },
+		{ CELL_GCM_TEXTURE_D1R5G5B5, { a, r, g, b } },
 #endif
 		{ CELL_GCM_TEXTURE_A8R8G8B8, { a, r, g, b } },
 		{ CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT, { a, r, g, b } },

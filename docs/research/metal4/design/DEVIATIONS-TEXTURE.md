@@ -55,11 +55,12 @@ technique that only satisfies Vulkan semantics is rejected, with the reason stat
 | TX11 | The surface compatibility test requires the exact host pixel format. Vulkan and OpenGL accept a set of host formats for one guest format, including depth formats for `A8R8G8B8`. | `MTLTextureCache.h:517-520` | `VKTextureCache.cpp:1379-1417`; `GLTextureCache.h:880-925` | performance | M | yes (code) | Implement the per-format set. Include the depth-as-colour cases. |
 | TX12 | The texture-cache read-back copies the host depth plane into the guest pack. `Depth32Float` writes four bytes per texel into a two-byte row, and a combined format loses the stencil. | `MTLTextureCache.cpp` | `MTLSurface.cpp` (the same defect, SF9); `VKTexture.cpp:118-229` | wrong result | M | fixed | Reuse `encode_depth_plane` and copy both planes. This is the texture-cache site of SF9. Both sites are fixed. |
 | TX13 | An unsupported 2-sample request folds up to 4 samples. The guest lattice and `get_spp()` stay at 2. | `MTLResourceManager.cpp:285-295`; `MTLSurface.cpp:36-40` | `VKRenderTargets.h:241-249,290-292` | performance | L | yes (code) | Keep the guest lattice for the address paths and use the host count only for the Metal descriptor. Record the mismatch. |
-| TX14 | An unknown guest texture format logs an error and becomes `BGRA8Unorm`. Vulkan and OpenGL fail the lookup. | `MTLFormats.cpp:308-311` | `VKFormats.cpp:237-240` | diagnostic | L | yes (code) | Fail the lookup and skip the draw with a clear message. Do not sample a wrong format. |
+| TX14 | An unknown guest texture format used to log an error and become `BGRA8Unorm`. Vulkan and OpenGL fail the lookup. **Fixed (2026-11-11, partial):** the lookup still yields `BGRA8Unorm` (a behavioural break was rejected — `VKFormats.cpp` throws, which this backend does not do), but the report is bounded to one error line per distinct value (32 values, then one warning) and a `texture/unknown format` coverage latch counts every event. | `MTLFormats.cpp:462-490` | `VKFormats.cpp:237-240` | diagnostic | L | partial | The bounded report and latch are in. Whether to fail the draw was deferred, not taken. |
 | TX15 | Not a deviation. The texture component layout matches the OpenGL map for every supported guest format. | `MTLFormats.cpp:314-364` | `GLTexture.cpp:214-269` | not a deviation | L | yes (code) | None. |
 | TX16 | Not a deviation. The LOD range, the bias quantisation and the clamp match Vulkan. | `MTLSamplerState.cpp:108-117,155-161` | `VKDraw.cpp:499-517` | not a deviation | L | yes (code) | None. |
 | TX17 | Not a deviation. The resolve uses `StoreAndMultisampleResolve` for colour, depth and stencil. The unresolve no-op follows the Metal rule that an image copy needs equal sample counts. | `MTLSurface.cpp:403-461`, `:463-469` | KK `kk_cmd_buffer.c:895-985`; `kk_cmd_copy.c:263-293` | not a deviation | L | yes (code) | None. Keep the depth-resolve sync check in the surface audit (SF K7). |
 | TX18 | Not a deviation. The 2D engine does not sample a texture. It is a memory copy, and it falls back to the CPU path. | `MTLGSRender.cpp:3302-3330` | `NV47/HW/nv3089.cpp:592-598`; SF16 | not a deviation | L | yes (code) | None. SF8 tracks the missing GPU blit. |
+| TX21 | The deferred gather (cube, 3D, atlas, 2D-mipmap, 2D) never clears the fresh temporary before the copies. Any level or face the copies do not cover kept heap garbage, and the draw sampled it. Vulkan clears to black first with an explicit layout transition and a clear→copy barrier (cube `VKTextureCache.cpp:815-822`, 3D `:864-870`, atlas `:909-921`, mipmaps `:964-970`). OpenGL also does not clear (`GLTextureCache.cpp:125-182`), so Metal matches the GL reference and violates the VK one. **Fixed** (2026-11-10): each `generate_*` now runs `clear_texture(cmd, image, gcm_format, 0, image->mipmapLevelCount(), 0)` on the temporary before the copies when `force_bg_load` is off, which handles cube slices, 3D depth and compressed blocks. 560/560 GPU-free tests pass. | `MTLTextureCache.h:414-472` (all `generate_*`) | `VKTextureCache.cpp:815-970`; GL `GLTextureCache.cpp:125-182` | wrong result | H | fixed | done |
 
 ## KosmicKrisp technique table
 
@@ -127,8 +128,10 @@ remap are lost (TX7). A cube texture that needs a view gets a 2D view with six s
 The cube case is a type mismatch: the shader slot is a cube. The 3D case is a lost map:
 this path creates no 3D view, so the only correct option is a shader-side decode.
 
-An unknown format silently becomes `BGRA8Unorm` (TX14). That turns a data error into a
-wrong image. The reference fails the lookup instead.
+An unknown format still reaches `BGRA8Unorm` (TX14), which turns a data error into a wrong
+image. The report is now bounded to one error line per distinct value and a `texture/unknown
+format` coverage latch counts every event, but the draw still proceeds instead of failing.
+The reference fails the lookup.
 
 The surface format map is separate from the texture map. It is correct for the common
 formats, but a surface never sets a native layout. That is SF7 and this file does not repeat
@@ -257,17 +260,14 @@ now use `encode_depth_plane` after a bounded read-back wait.
 
 | id | resolution |
 |---|---|
-| TX1 | Fixed. `capture_vertex_sampler` forces nearest min and mag filters and no mip chain, as `VKDraw.cpp:606-619` does. |
-| TX2 | Fixed. `sampler_state` carries `unnormalized_coords`, filled from `CELL_GCM_TEXTURE_UN`. `create_sampler_state` calls `setNormalizedCoordinates`, and R is clamp-to-edge in that mode. The field is in the equality and the hash. |
-| TX4 | Fixed. `get_max_anisotropy` rounds up to the Metal powers of two: 6 becomes 8, and 10 and 12 become 16. |
-| TX6 | Fixed. `convolution_min` returns `SamplerMipFilterNotMipmapped`. |
-| TX19 | Fixed earlier; see `REVIEW-RSX-NATIVE.md` R1. |
-| TX3, TX5, TX7–TX14 | Open. |
-| TX20 | Open (planned: the `R6G5B5` expansion). |
+| TX1, TX2, TX3, TX4, TX6, TX7, TX9, TX12, TX19, TX21 | Fixed (TX21 on 2026-11-10: gather temporaries cleared). |
+| TX14 | Partial (2026-11-11). The unknown-format report is bounded (one line per distinct value, 32 values then one warning, plus a `texture/unknown format` coverage latch); the draw still proceeds with `BGRA8Unorm`. Failing the draw was deferred, not taken. |
+| TX20 | **Fixed (2026-11-11).** Apple expands the `R6G5B5` upload to BGRA8 in the shared uploader; the Apple format map binds `BGRA8Unorm` + identity swizzle; VK's Apple arm now selects `B8G8R8A8_UNORM` on all Apple archs and Apple GL's table maps this format to `GL_BGRA8`. |
+| TX5, TX8, TX10, TX11 | Open. |
+| TX13 | No action. |
 
-Updated 2026-10-25: TX3, TX7 and TX9 are fixed (TX7's view path now keeps the source type,
-3D and cube included, and applies the composed layout). The open rows are TX5, TX8, TX10, TX11,
-TX13 (no action), TX14 and TX20. See `GAP-PLAN.md`.
+Updated 2026-11-11: TX12 and TX21 were fixed earlier in the Metal 4 work. TX19 was fixed first.
+The open rows are TX5, TX8, TX10, TX11; TX14 is partial and TX20 is fixed. See `GAP-PLAN.md`.
 
 Build and tests: 143/143 MTL, 490/490 full.
 
@@ -278,3 +278,9 @@ Mesa contribution, and it is not published to the Mesa project. The Mesa `AGENTS
 reference clone asks for a marker when prose is generated; biblioklept.
 
 <!-- doc-end -->
+
+Intel Apple is not a Metal 4 target (macOS 27 has no Intel).  The `upload_texture_data`
+staging sizing covers only the R6G5B5 Apple expand (TX20) and leaves the other packed
+formats at guest pitch, while the Intel-Apple uploader expands those to BGRA8 as well, so
+stetches of prepared data there would be under-pitched.  Recorded as known-wrong,
+out of scope, and unreachable on shipping machines.

@@ -7,6 +7,8 @@
 #include "util/logs.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 
 namespace mtl
 {
@@ -49,7 +51,7 @@ namespace mtl
 		// access completes, so a run with this on answers one question: is a visual
 		// defect a missing edge (the defect goes) or content (the defect stays)?  It
 		// changes what the backend emits, so the boot states it.
-		descriptor->setHazardTrackingMode(probe::diagnostic_switch("MTL_PROBE_TRACKED_HEAPS")
+		descriptor->setHazardTrackingMode(probe::variant("heaps")
 			? MTL::HazardTrackingModeTracked
 			: MTL::HazardTrackingModeUntracked);
 		descriptor->setSize(size);
@@ -319,6 +321,31 @@ namespace mtl
 
 		track(buffer, pool, heap, offset, required.size);
 		check_residency(heap);
+
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=poison.  A shared buffer is CPU
+		// reachable, so a never-written allocation is filled here with the word of
+		// its own creation index, and the log line carries the word; the GPU-side
+		// allocations are filled in the texture cache instead.  A buffer whose
+		// supposedly dead region keeps the fill was never written, which is the
+		// other half of the unwritten-resource question.
+		if (probe::variant("poison") && storage == MTL::StorageModeShared)
+		{
+			static std::atomic<u32> diagnostic_buffer_index{0};
+			const u32 index = diagnostic_buffer_index.fetch_add(1, std::memory_order_relaxed);
+			const u32 word = probe::poison_word(index + 1u);
+
+			if (void* bytes = buffer->contents())
+			{
+				probe::fill_words(bytes, length, word);
+
+				static std::atomic<u32> diagnostic_buffer_logs{0};
+				if (diagnostic_buffer_logs.fetch_add(1, std::memory_order_relaxed) < 64)
+				{
+					MTL_NOTE(2, "Metal 4: poison buffer %u, %llu bytes, word 0x%08x",
+						index + 1u, static_cast<unsigned long long>(length), word);
+				}
+			}
+		}
 		return buffer;
 	}
 

@@ -349,7 +349,7 @@ capture and the texture-cache copy path.
 | TX11 | The surface compatibility test is too strict. | Implement the per-format accepted set, including depth-as-colour. |
 | TX12 | The texture-cache depth read-back copies the host plane. | The same fix as S9 (Cluster C). Fix both sites in one change; do not do one only. |
 | TX13 | A 2-sample request folds up to 4. | Keep the guest lattice for the address paths; record the host-count mismatch. |
-| TX14 | An unknown texture format becomes `BGRA8Unorm`. | Fail the lookup and skip the draw with a clear message. |
+| TX14 | An unknown texture format becomes `BGRA8Unorm`. | Partial (L194): bounded to one line per distinct value (32 max) + a coverage latch; the draw still proceeds. Fail the draw was deferred, not taken. |
 
 ---
 
@@ -375,7 +375,7 @@ The order is by risk and effort, correctness before performance.
 13. **F10** — the overlay text.
 14. **PF8, PF9** — present recovery, validated with the run.
 15. **F2, F3, F11/S8** — the output chain.
-16. **TX5, TX7, TX8, TX13, TX14** — the remaining texture rows; TX8 and TX13 need a run.
+16. **TX5, TX7, TX8, TX13** — the remaining texture rows; TX8 and TX13 need a run. (TX14 is partial and TX20 is fixed since 2026-11-11; see `L194`.)
 17. **DR10, DR9** — performance, after a capture.
 18. **SY7, SY8, SY11, SY6** — after a capture.
 

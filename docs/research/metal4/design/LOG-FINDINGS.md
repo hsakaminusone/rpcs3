@@ -1,396 +1,371 @@
 # Metal 4 run-log findings — Ridge Racer 7 (`BLUS30001`)
 
-**What this document is.** The objective results of the Metal 4 investigation, open items first.
-`L<n>` ids are stable because other documents cite them; resolved rows are compressed, not deleted.
-
-**Current state at a glance.**
-
-- The backend renders the game end to end. The intro FMV, the Xevious panel, the road, the sky,
-  the HUD and the early upload/present paths are correct (L116, L95, L96, L22).
-- **The remaining visual defect is intermittent black patches on cars and environment during races,
-  plus per-glyph loss in menu text and a smeared rear window.** None is root-caused yet. The menu
-  text is the sharpest lead. A pixel diff between the F12 surface at frame 2493 and the next
-  presented frame shows the loss is **real and one frame wide**, not a readback tear; the F12 path
-  reproduces a good frame exactly (shot 1521 = presents 1522–1526, 2009 bright px each). The left
-  list panel **is** drawn — a 9-slice plus atlas glyph quads; the earlier "no draw covers the panel"
-  was a decoder y-flip, not a missing draw. The loss is *inside* three glyph quads: the surviving
-  pixels are a subset of the correct glyph, and the affected glyphs **move between frames and
-  between cells** (present 2494 loses a right-panel glyph that frame 2493 draws correctly), so this
-  is a sampling or visibility fault, not a lost draw (L153, L155).
-- **The L145 FIFO class is closed** (GET is an acknowledgement; per-stream frontier; run V: zero
-  `Dead FIFO`, zero desync, zero `FIFO error`, six redirects).
-- **A second, distinct FIFO class is closed (L149):** the guest's semaphore-wait trampoline is entered by
-  `CALL`, then `JUMP`s into a command chunk that itself `CALL`s a static routine. Hardware has one
-  return-address register and overwrites it; RPCS3 rejected the nested `CALL`, replayed the stale
-  outer return, and tripped the Dead-FIFO guard (21 recoveries in 2 s → main-thread fault). A `CALL`
-  now overwrites `fifo_ret_addr` and `stream_tracker::on_call` saves the newest caller's stream, so
-  `add()` cannot recycle the stream the parser is in. Upstream `master` has the same single-level
-  restriction; the fix is a deliberate, spec-correct divergence.
-- **The level-5 capture now reaches back in time** (in-RAM ring, per-draw records, all 18 rings,
-  texture bytes at bind). The second probe run produced captures at frames 182/1416/1814/1932/2956.
-  The 3950 F12 press hit the five-window limit, so the race defect frame itself is not captured
-  (L151).
-- **Current status (2026-11-07).** The ordering class is measured out: `MTL_PROBE_SERIALISE=1` +
-  `MTL_PROBE_TRACKED_HEAPS=1` at ~4 fps still glitched, so frame overlap, missing GPU edges, TBDR
-  visibility and cross-frame hazards are exonerated. Metal API validation (load/store actions,
-  unretained resources) reported zero errors; `MTL_SHADER_VALIDATION=1` still crashes at launch
-  (L78/L79), so GPU validation is unavailable. The red-texture run is **requalified**: it proves the
-  bind path reaches the shader, not that content, UV, LOD, wrap, filter or aliasing are innocent
-  (L160). The nested-CALL crash (L149) is fixed, so a normal race run can proceed; the teardown
-  fault (L159/B25) still ends every run [fixed 2026-11-08, L165]. Most captures and logs were cleared on 2026-11-07
-  (27 GB); `dumps-capture-20261107-132727` is the surviving level-5 capture. A code audit of the
-  texture path found three real defects (C1-C3, §1.1.1); all three are fixed with GPU-free tests
-  (L161-L163). None touches the CPU-uploaded BC atlases that carry the visible defect, so the next
-  work is measurement: the replacement-texture probe now has UV and block-checker patterns, and
-  `MTL_PROBE_FORCE_LOD0` pins every sampler to level zero (§1.1.2 P1).
-
-**Method.** Probe log, RPCS3 log and crash reports; bounded captures. Probe levels: 2 = counters,
-3 = per event, 5 = per draw + dumps. A window is armed by a cubemap bind, a large B8 bind, a
-present-gap watchdog, a content trigger, or `MTL_PROBE_AT_SEC`, and probes at most 64 draws (L113).
-Every number is measured unless the row says *hypothesis*.
-
-**Artifacts.** `build/probe/run.log` and `build/probe/run-flicker.log` (probe),
-`~/Library/Caches/rpcs3/RPCS3.log` (emulator). **`build/probe/dumps-capture-20261107-132727/` is
-the surviving level-5 capture** (F12 windows at frames 4166/6150/6189; 6189 carries the draw
-records); the older `dump/` and `dump-flicker/` captures and most raw logs were cleared on
-2026-11-07. Decoded evidence is kept in `build/probe/tex/`, `crops/`, `shots/` and `reference/`.
-Validation launchers: `build/probe/run-validate.sh` (`MTL_VALIDATE=1` is API only; `MTL_VALIDATE=full`
-adds GPU validation, which crashes at launch) and `run-capture.sh`, `run-red.sh`, `run-red-units.sh`,
-`run-noalpha.sh`, `run-dumppipes.sh`.
-Analysis: `build/probe/capture.py`, `diff.py`, `texture.py`, `png.py`, `fifo-ring-decode.py`,
-`flicker.py`, `transient.py`, `montage.py`.
-
-**Projection convention.** `capture.py:project()` returns **viewport-space** coordinates. The UI
-viewport is `[0,720,1280,-720]`, so a dumped image row is `image_y = height − projected_y`
-(L155). Panel and glyph intersections must use that mapping.
+**What this document is.** The objective results of the Metal 4 investigation: the live problem first,
+in detail, then everything closed, compressed. `L<n>` ids are stable because other documents cite
+them; a resolved row is compressed, never deleted. Every number is measured unless the row says
+*hypothesis*.
 
 **States.** `open` · `fixed` (code changed) · `fixed (device-confirmed)` · `settled` (measured, no
-action) · `superseded` · `removed`.
+action) · `superseded` · `withdrawn`.
+
+## Where the investigation stands (2026-11-09)
+
+The backend renders the game end to end — FMV, Xevious panel, road, sky, HUD and the early upload and
+present paths are correct (L116, L95, L96, L22). **One defect family remains and it is frequent: black
+rectangular blocks on the car's livery/sponsor band, spoiler lid and rear window, grey translucent
+blocks in the same places, per-glyph loss in menu text, and a black minimap.** The blocks appear and
+clear within one to three frames of each other (L185), so a single screenshot only ever shows part of
+it.
+
+The two questions that used to block this ("is the failing frame even captured?" and "is a draw
+missing?") are both answered. The failing frame *is* captured in the 2026-11-07 run: the F12 shot is
+byte-identical to the presented image, and the ring that painted it is `frame-<shot>-m1` (L183, L189).
+No draw class is dropped between a clean and a failing frame (L184), and the ring "fingerprint"
+alternation that looked like two fault states is a scene ramp (L187). Every CPU-visible input — draw
+state, pipeline, video sampler/image ids, ROP/blend/raster/depth hashes, fragment constants, ring bytes
+— is identical between clean and failing frames (L169), and every sampled texture is byte-identical
+(L168). The black is painted by the car's own passes, before the HUD (L174). So the wrong pixels are
+produced *by the GPU at dispatch time*, not by a wrong draw or a wrong upload.
+
+Two mechanisms are measured and distinct. **(a)** The reflection probe cube is always one frame stale:
+the gather materialises at the frame's first `t3` bind, before that frame's `fp-128` face pass runs
+(L171). That is the rear-window smear. **(b)** The livery/sponsor black is *not* located yet (L188).
+The strongest structural finding is that one guest address is bound as several mismatched host images
+in the same frame — `0x50110000` is at once a 512x512 render target, its 512x512 sampled copy, a flat
+`0x808080` 1280x720 image and an all-zero 1408x768 image, and the sampled copies never receive the
+render target's content (L172, L173).
+
+The ordering class is closed: `MTL_PROBE_SERIALISE=1` plus `MTL_PROBE_TRACKED_HEAPS=1` at ~4 fps still
+glitched, so frame overlap, missing GPU edges, TBDR visibility and cross-frame hazards are exonerated
+(L176). API validation reports zero errors; `MTL_SHADER_VALIDATION=1` crashes Apple's debug compiler
+(L78/L79), so GPU validation is unavailable (L77). The nested-`CALL` FIFO crash (L149) and the
+teardown fault (L159/L165) are fixed, so long race runs are possible again.
+
+**Method.** Probe log, RPCS3 log and crash reports; bounded captures. Probe levels: 1 = block timers,
+2 = counters, 3 = per event, 5 = per draw + dumps. A window is armed by a cubemap bind, a large B8
+bind, a present-gap watchdog, or F12; a window covers at most 64 draws (L113). The knob surface is
+deliberately small: `MTL_PROBE` (level), `MTL_PROBE_LOG`, `MTL_PROBE_DUMP_DIR`,
+`MTL_PROBE_FRAME_COUNT` (window frames), `MTL_PROBE_ONLY_DRAW` (the bisect filter), `MTL_PROBE_PIXELS`
+and `MTL_PROBE_VARIANT` (the experiment arms: `replace-textures=red|uv|checker`, `replace-units=…`,
+`no-alpha-test`, `no-depth`, `no-cull`, `sentinel`, `poison`, `heaps`, `serialise`,
+`force-fp=<ids>`, `force-fp-tex=<n>`, `lod0`, `dump-tex=<hex>`, `dump-draw=<id>`; the shader arms build
+into their own archive suffix). Every other limit is a compile-time constant (L199). With the level
+at 5 a per-address upload/sample/hazard census is kept and printed at the window close and at
+teardown (`Metal 4: census …`), and DXT uploads are scanned for flat-zero BC blocks at the upload edge
+(L200). The full inventory of what each level records, the audit findings (A1–A8), the six gaps closed
+and the end-to-end failing-frame recipe live in `RCA-INSTRUMENTATION-2026-11-08.md`.
+
+**UPDATE (2026-11-08).** The crash that used to block the probe bisect — a `SIG` on the first draw after
+the FMV — is closed. It was an instrument bug, not an RSX, guest or backend defect: the level-3
+"overlay shortlist" added by `9a0fa8652` called `draw_call.get_elements_count()` before `draw_call.begin()`,
+inside the post-`compile()` window where the clause holds `current_range_index == ~0u`, so the range
+query ensured on `~0u < ranges.size()` and the run died on the first RSX draw whenever `MTL_PROBE>=3`
+(L197, L198). `MTL_PROBE`-unset and `MTL_PROBE<=2` runs were never affected. The level-3 instruments
+(quad shortlist, capture trace) are usable again. The two 2026-11-08 `.ips` crash reports are the
+orthogonal Qt main-thread teardown cascade inside `emergency_exit` (`createPlatformIntegration`), not
+this defect and not a shader crash.
+
+**Artifacts.** The 2026-11-07 and 2026-11-08 raw captures were deleted on 2026-11-10 (both runs were
+idempotent or redundant: the Nov-8 capture held no failing frame, and every finding it produced is
+decoded). What survives, in `build/probe/evidence-20261107/` (~88 MB, SHA-256 verified): the
+`frame-6189-m1/m2` and `frame-6150-m1/m2` ring captures (draw records, index/persistent/manifests),
+the byte-identical `host-present`/`host-shot` pairs for frames 6189 and 6150 (L183/L189), the
+livery/sponsor/font atlases and the `0x50110000` samples from the failing window, the F12 shot
+decodes (`s1658…s4967.png`), the atlas decodes (`tex/`), and the crops (L168, L183, L184, L185,
+L189, L191). Decoded evidence: `build/probe/crops/`. Validation launchers: `run-validate.sh`
+(`MTL_VALIDATE=1` API only;
+`MTL_VALIDATE=full` crashes at launch), `run-capture.sh`, `run-red.sh`, `run-red-units.sh`,
+`run-noalpha.sh`, `run-dumppipes.sh`. Analysis: `capture.py` (record decoder + vertex projection),
+`diff.py`, `texture.py`, `png.py`, `fifo-ring-decode.py`, `flicker.py`, `transient.py`, `montage.py`,
+`drawdiffer.py` (structural draw-class diff), `fpscan.py` (per-age program histogram), `buildsheet.py`
+(bulk BC decode into a contact sheet). All other invocations produced new deliveries; the probe log
+format is documented in `MTLInstrumentation.h` and its switch list there.
+
+**Projection convention.** `capture.py:project()` returns **viewport-space** coordinates. The UI
+viewport is `[0,720,1280,-720]`, so a dumped image row is `image_y = height - projected_y` (L155).
+Panel and glyph intersections must use that mapping.
+
+**Capture safety.** `MTL_PROBE_DUMP_DIR` points inside the repo, never `/tmp`. One emulator instance at
+a time, tracked through `build/probe/rpcs3.pid`; never `pkill -f rpcs3`. Diagnostic shader variants
+carry an archive suffix and never touch the real archive; state-only switches do not.
 
 ---
 
-# 1. Open
+# 1. Live — the black / grey glitch family
 
-## 1.1 The remaining visual defects
+## 1.1 What is on screen
 
-The FMV, the Xevious panel and the early car silhouette are closed (L116, L95, L96). What remains is
-a family of black or missing pixels that appears in every scene:
+Two failure scales, in the same pass family, in every scene (L178):
 
-| id | finding | state |
-|---|---|---|
-| L147 | **Menu text loses individual glyphs; the title-screen line is correct.** The 2026-10-31 screenshot reads `S art Race`, `P e-race Confirmation`, `ON_INE BATTLE`, `R dg e St te G AND PRIX`: uppercase glyphs survive and single letters disappear inside words. A null or invalid bind would black the whole string, and a stale atlas would still show glyphs, so the atlas is bound and mostly correct; individual cells are black. Candidates, in order: the glyph atlas is partially uploaded and the missing cells were never written; a per-frame atlas update races the sample; the atlas texture is aliased by another guest surface at the same address. **First measurement:** at a failing menu draw, dump the bound atlas (level-5 `guest-*`/`host-sample-*`) and compare the missing cells with guest memory. **Measured 2026-11-06 (L155g):** the cells that lose ink decode full in the guest, and all six host copies are byte-identical, so a partial upload and a stale atlas are excluded; the surviving candidates are per-frame visibility or a sampler-read hazard (L160). | open |
-| L146 | **The rear window is smeared.** Reported by the user; not yet captured. Consistent with a content-transfer hazard on a render target that is resolved or copied before the write is visible (the unconfirmed `MTLSurface.cpp` barrier fix is the first candidate), but no draw, pass or surface has been identified. Needs a level-5 capture at the car/rear-window scene and a pass/surface census. | open |
-| L98 | **The car is drawn and then shaded black.** Mid-frame dumps at draws 207 000/207 200/207 400 showed the menu, text and background normal and the car as a correct **silhouette** filled with black plus a few coloured speckles. Geometry, cull and depth accepted it; the colour is lost in the fragment inputs or their math. The current report is intermittent black patches rather than a full silhouette, and the car has not been re-captured since L116; L97/L105/L99 remain the last measurements of the colour path. **Measured 2026-11-07:** `MTL_PROBE_REPLACE_UNITS=0` removes the car and environment patches, so unit 0 carries them; the uniform-red run cannot separate UV/mip from content (L160). | open |
-| L97 | **The car's paint texture is one BC1 block repeated** (`lf 84 1f 84 00 00 00 00`, `c0 == c1 == 0x841f`, indices 0) in guest and conversion alike. Faithful copy; whether that colour is the intended paint is a shader/constant question. | open |
-| L105 | **The car-select probes are not on the car.** The patch goes 115,78,44 → 108,74,44 → 102,71,43 under the car draws, then `fp 21 vp 15` darkens it to 48,32,20 and `fp 67 vp 31` to 40,28,18: it is background that a later draw overwrites. L99 is a prerequisite. | open |
-| L99 | **The presented surface holds three panels while the screenshot holds one.** `host-present-1800-*` is 1280×720 with three menus at x = 0/427/853 (77 % of bytes differ, so three renders); the F12 screenshot is one full-size panel. The Metal viewport and scissor are the full 1280×720, so the thirding is guest-side. Decides where a car probe must sit. | open |
-| L89 | **No referenced unit is lost and the numbering agrees** (`texture/resolved` 471 712, `retained` 616 234; `bind null`/`dropped` never fire; `[[texture(12+i)]]` = `texture_slot_base + i`). Unmeasured: the content of the image bound at the car draw, and whether the car program samples that unit. | open |
-| L49 | **A texture is bound at guest address `0x00000000`** — DXT1 8×8, all-zero content, and `texture/bind null` stayed 0, so the descriptor carried a handle. | open |
-| L50 | **The video surface is allocated at screen size and sampled at video size** (host 1280×720 at `0xc0880000`, guest descriptor 1408×768). Unclear whether L41/L43 closed it. | open |
-| L153 | **The per-glyph loss is a real one-frame surface defect.** Shot 2493 (the F12 surface) and present 2494 differ in the left list panel; the largest component is the `a` of `Transmission`, where 2493 shows the panel background and 2494 shows the glyph. `flush_for_readback()` commits and re-enters the slot, so this is not a readback tear, and the screenshot path reproduces a good frame exactly (shot 1521 and presents 1522–1526 all measure 2009 bright px in the panel), so the 2493 loss is in the frame. **Correction:** the earlier "no recorded draw covers the list panel" was a decoder y-flip artifact — the panel *is* drawn, 487209–487235, and the loss is a partial quad rather than a missing draw. See L155 for the corrected census. | corrected (L155) |
+- **Whole-quad blackout** — a complete quad turns black: the rear window, the sponsor band, an
+  environment facade.
+- **Partial blocks** — sub-quad groups of blocks of near-black inside the trunk livery/sponsor band,
+  the spoiler lid, and the wheel arch trim.
 
-The working hypothesis is no longer a single mechanism. The menu-text loss is per-cell and the race
-patches are block-shaped and vary per frame, so the two may share a surface-cache or partial-upload
-cause rather than a shader cause. The glyph evidence narrows it further: the quad is rasterised and
-the atlas is bound, but part of the sample comes back transparent, and the affected cells change
-from frame to frame. That is the signature of a **read hazard on data the draw depends on**, not of
-a wrong draw or a wrong texture. Both discriminators have now run: serialise plus tracked heaps
-still glitched, so the hazard is not frame overlap and not a missing GPU edge.
-L148 (scissored clear) was a real correctness defect but its visual
-attribution is **measured false**: the device run after the fix kept the same patches, and the
-`clear/scissored fill` latch stayed at zero. L148 stays a correctness fix only.
+The affected region moves slightly inside the band from frame to frame and changes every frame or two
+(L185). The grey translucent patches are the same shape with partial alpha rather than full black.
+The menu loses individual glyph cells in the same one-frame-wide way (L147, L155, L175), and the
+minimap is black (L49).
 
-### 1.1.1 Code-audit status and plan (2026-11-07)
-
-The audit covered `MTLTextureCache`, `MTLHandles`, `MTLSamplerState`, `MTLArgumentBinds`,
-`MTLPassScheduler`, `MTLSurface`, `MTLResourceManager`, `MTLFormats` and the shared
-`TextureUtils` upload. It found three real defects, and all three are fixed (`L161`-`L163`) with
-GPU-free tests in `rpcs3/tests/test_rsx_metal4_state.cpp`. None is shown to be the visible defect:
-all three sit on paths that the race patches and the glyph loss do not obviously use (C1 is the
-reused, non-shader-read clear path; C2 is the GPU-to-CPU readback; C3 is 3-D reuse). The rows keep
-their original hypotheses and now record the fix and the test that covers it.
-
-| id | defect | mechanism | fit to the symptom | next test |
-|---|---|---|---|---|
-| C1 | **`clear_texture` computes compressed mip extents with floor division.** `MTLTextureCache.cpp:310-322`: `row_bytes = (level_width / 4) * block_size`, `rows = level_height / 4`, and a level whose computed size is zero is skipped. | A level below 4 texels, or a non-multiple-of-4 extent, is under-covered or not written at all. The texture is `StorageModePrivate`, so a skipped level keeps undefined contents; the `copyFromBuffer` size is the texel extent while the staging row is the floored block extent, so the copy can read past the staging allocation. | The host chain is only cleared for a reused section whose context is not `shader_read`. The race atlases and the glyph atlas are uploaded once and never take that path, so this is not the primary path; it would matter for a framebuffer-storage BC section and for any `max_lod` that reaches an undefined level. | **Fixed (L161).** `get_texture_level_extent` rounds up to whole blocks with a minimum of one, shrinks 3-D depth per level, and drives both the staging size and the copy size; the clear also takes its base extent from the host image and its face count from the texture type. Tests: `MTLTextureLevelExtent.*`. |
-| C2 | **`copy_texture` uses a block index as a texel origin for compressed formats.** `MTLTextureCache.cpp:410-415`: `transfer_x = (offset % rsx_pitch) / block_size`, then `Origin::Make(transfer_x, …)` and `transfer_width -= transfer_x`. | Byte offset divided by block size yields blocks, but the origin and the width are in texels, so a partial compressed readback starts and ends at the wrong place. | Readback only (F12, screenshots, CPU reads). It cannot corrupt on-screen sampling; it can corrupt the evidence used to diagnose it. | **Fixed (L162).** `get_texture_readback_region` converts the byte offset to a block origin and scales by the block edge, keeps the raw byte offset as the staging destination, and scales the tail row count the same way. Tests: `MTLTextureReadbackRegion.*`. |
-| C3 | **The reuse test ignores depth and array length.** `MTLTextureCache.h:487-493` compares type, pixel format, width, height and `mipmapLevelCount() == mipmaps`, but not `depth`. | A 3-D section re-created at the same address with another depth reuses the old allocation, and the upload/copy then uses the new depth/slices against it. It also compares the raw guest mip count with the clamped host count, so a legal request whose chain was capped is rebuilt every time. | The unit-0 objects seen so far are 2-D or cube, so this is not the race path; it is a correctness and performance issue for 3-D titles. | **Fixed (L163).** The reuse test compares against `normalize_texture_extent(...)`: host depth is checked and a capped chain is accepted. Tests: the `MTLTextureExtent.*` cases cover the normalisation the predicate now uses. |
-| C4 | **Aliasing is ordered but not invalidated.** `MTLPassScheduler` inserts the barriers; `MTLGSRender.cpp:1831`/`1915` call `notify_surface_changed(range)` at a framebuffer bind. | If the range handed to the texture cache is narrower than what the GPU will later write (AA factors, depth range, pitch), a sampled section keeps stale bytes while the barrier only orders access. | Matches "moves per frame", but the captured atlas samples were byte-identical to the guest, so any staleness would have to live in the texture object or in a missed *later* write, not in the bytes at bind. | **Checked; dismissed as a code defect.** The read range is the texture's guest footprint (`get_texture_size`, all mips and faces); the write range is the surface's level-0 footprint. Both cover every guest byte the draw can touch, and the same Metal object matches by identity even when the footprints differ. A read of mip levels beyond a surface write is stale by contract (the guest never wrote them through that surface), not an ordering miss. The remaining evidence need is the capture intersection, not a code change. |
-| C5 | **The fragment alpha test is a per-pixel kill and the glyph loss is a subset of the glyph.** `MTLFragmentProgram.cpp:363-415`, `612-615`. | A kill is exactly the shape of "the quad rasterised, only some pixels survive". The glyph draws share program, constants and sampler, so a moving loss would need a per-draw state difference or a race. | The one run with the test compiled out was inconclusive (black from boot, audio and logic alive). | A menu-only run with the alpha test off, booted to the menu before the switch takes effect, and the alpha function/ref logged per subdraw. |
-| C6 | **`max_lod` is clamped to the guest mip count, not the host count.** `MTLSamplerState.cpp:168-176` uses `texture.get_exact_mipmap_count()`. | If `normalize_texture_extent` capped the host chain, `max_lod` can name a level the image does not have. Metal clamps to the last resident level, so this is only unsafe when that level is undefined (C1). | Not a cause on its own; it is the route by which C1 could reach the sampler. | Open hypothesis. C1 now defines every level it clears, and `MTL_PROBE_FORCE_LOD0` (state-only, no archive suffix) pins the sampler to level zero so a run can tell a mip/LOD fault from a post-sample one. |
-| C7 | **The readback and upload copy only slice 0 and level 0.** `MTLTextureCache.cpp:copy_texture` copies one `copyFromTexture` with slice 0 and level 0; `upload_texture_data` loops the shared subresource layouts. | A section with several faces or levels would read back only the first subresource. | Not a defect against the reference: the shared cache flushes one section at a time and the Vulkan backend also copies only the base image/level (`VKTextureCache.h:212-300`). A section that the GPU wrote is a surface and has one level; guest-mip textures are uploaded, not read back. | **Checked; dismissed.** The cube clear and upload already repeat per face/level; readback keeps the reference's single-subresource contract. |
-
-The suspects the audit did **not** find are as important as the ones it did: the bind path
-writes every changed argument-table slot and resets both binders per frame (L107), the view cache
-keys on the composed swizzle, and the format map matches VK/GL for every guest format in the
-census. C4 and C7 were re-read against the core and the Vulkan reference and dismissed as code
-defects (`L164`). The live hypotheses are a sampling-side fault that the red texture masked (L160)
-and the visibility of a later write that only a capture intersection can settle.
-
-### 1.1.2 Next steps and plan
-
-**P0 — make a long run possible.**
-1. **Done (L165; 2026-11-08).** The `0x98` fault was not a device-lifetime bug: it was an
-   `on_exit` invalidation readback encoded on a command buffer that had already been ended. Audit
-   the release order produced nothing; the backtrace did. `frame_slot` now tracks `buffer_open`
-   and the encoder-open paths re-enter a closed slot first. Two consecutive clean quits, no fault.
-2. **Done.** The uncommitted range-scheduler redesign was kept: it is what §1.1.1 C4 relies on
-   (aliased guest ranges ordered through the hazard records), it passed the state tests, and it was
-   committed in `144e57624` rather than reverted. The instrumentation and the aliasing tests stay.
-3. Every run follows the one-instance rule (`build/probe/rpcs3.pid`, never `pkill -f rpcs3`).
-
-**P1 — discriminate sampling from content from visibility (cheap, decisive).**
-4. **Ready to run.** `MTL_PROBE_REPLACE_TEXTURES` now takes `1` (one-texel red), `uv` (a red/green
-   coordinate gradient with a blue parity grid) or `checker` (a four-by-four-block index encoded
-   in colour). Run one race window with `MTL_PROBE_REPLACE_TEXTURES=uv MTL_PROBE_REPLACE_UNITS=0`.
-   If the patches become the *wrong part of the pattern* in place, the fault is UV/mip/sampling;
-   if the patches stay black and rectangular regardless of the pattern, the fault is after the
-   sample (blend, ROP, visibility).
-5. **Ready to run.** `MTL_PROBE_FORCE_LOD0=1` is a state-only switch (point filter,
-   `max_lod = min_lod = 0`, bias 0) that pins every sampler to level zero; it needs no archive
-   suffix. If the splotches vanish, the mip/LOD/filter path is implicated and C1/C6 move up; if
-   they remain, mips are exonerated.
-6. Decode the surviving capture (`dumps-capture-20261107-132727`, window at frame 6189): compare
-   the unit-0 atlas guest bytes with the host upload, read the per-draw `texture_id`/`sampler_id`,
-   and intersect every sampled range with the colour/depth target ranges of the glitch frames.
-   Acceptance: a row stating whether any overlap exists and whether the Metal texture is shared.
-
-**P2 — fix the confirmed code defects and add tests.**
-7. **Done (L161-L163).** `get_texture_level_extent` computes compressed extents in whole blocks
-   with `ceil` and a minimum of one block, shrinks 3-D depth per level, and drives both the staging
-   size and the copy size; the cube clear repeats over all six faces. `get_texture_readback_region`
-   converts a byte offset to a block origin and keeps the raw byte offset for the staging
-   destination. `fits` compares depth and the clamped mip count through `normalize_texture_extent`.
-   GPU-free tests are in `rpcs3/tests/test_rsx_metal4_state.cpp`; the filtered suites pass.
-8. Re-run API validation and one race window after C1-C3. Expected: no visual change unless C1 is
-   on the path; record the result either way, because a null result raises the sampling-side
-   rank.
-
-**P3 — only if P1 and P2 do not close it.**
-9. Split the menu defect from the race defect: menu-only run, alpha test off (C5), then single-mip
-   and point sampling. A menu-only fix is a separate finding from the race patches.
-10. Audit the shared `texture_cache` upload, partial-flush and section-invalidation path against
-    VK/GL using the capture's actual sections rather than a static read. A metal-cpp harness can
-    drive `copy_transfer_regions` and the compressed sizing without the emulator.
-
-**Docs and commit.**
-11. Append each device result to §1.1 and §1.1.1, changing a state rather than deleting a row; keep
-    `L` ids permanent.
-12. Commit the L149 fix, tests and docs with `hsaka -1.0 <340957754+hsakaminusone@users.noreply.github.com>`;
-    keep C1-C3 in their own commit if they change behaviour.
-
-## 1.2 FIFO: the nested-CALL desync
-
-The L145 class — GET publishing a prefetched block end, so the guest recycled a chunk the parser was
-still in — is closed and device-confirmed. The capture run exposed a **different** desync at 6:54.9,
-after 21 recoveries in 2 s tripped the `Dead FIFO` guard and the main thread segfaulted.
+## 1.2 What is measured
 
 | id | finding | state |
 |---|---|---|
-| L149 | **A nested `CALL` is a legitimate hardware tail call; RPCS3 rejected it.** The guest enters the wait trampoline with `CALL 0x1544` from `0x10d1ffc` (return address `0x10d2000`); `0x1544` is `NV406E_SEMAPHORE_ACQUIRE`; `0x154c` is `JUMP 0xcb0000`. The parser walks command buffer A (18-command dispatch history `0xcb05c8…0xcb07dc`) to the genuinely aligned header `0x00c9a982` = `CALL 0xc9a980`, a mapped static routine. Hardware has one return-address register: the inner `CALL` overwrites the outer return, which is dead because A ends in a `JUMP`, not a `RET`. RPCS3 (and upstream) rejected the second `CALL` with `CALL found inside a subroutine`; `recover_fifo` restored the stale outer return and failed identically (21 recoveries in 2 s → `Dead FIFO` → fault at `IOGPUDeviceGetNextTraceID`, and the same desync halted the all-probes run at 139 s in the race). **Fix:** `RSXFIFO.cpp` — a `CALL` overwrites `fifo_ret_addr` (nested calls are legal, as on hardware), and `stream_tracker::on_call` saves the newest caller's stream unconditionally, so `on_return` restores the chunk the parser actually occupies and `add()` cannot recycle it mid-parse. The outer frame is dead in both models. Verified by `FifoStreams.NestedCallKeepsTheChunkItReturnsInto` (fails pre-fix, passes with it). Deliberate divergence from upstream's single-level guard. | fixed |
-| L150 | **The 507 ms acquire stall was the timing trigger, not a cause.** `acquire stall 483` was logged at `0:06:54.702` (507.3 ms, one drawable in flight); the producer then rewound PUT `0x10d1ffc -> 0xce3434` at `0:06:54.733`, the trampoline jump ran at `0:06:54.765`, and the nested `CALL` failed at `0:06:54.765`. Larger stalls (654.831 ms, 630+ ms) ran without a desync, so the stall alone was not sufficient: it only selected the `CALL`-to-trampoline path. The class is closed by the L149 fix; the parser state is correct either way. | superseded (L149) |
-| L115 | **The two early FIFO fixes did not remove the old desync.** Run 2 still hit one at 53.451 s: `get=0x1490000 put=0x10a588c get_guest=0x51590000 restore_point=0x10a5814 code_start=0x10a5478`. Superseded by L145 for the old class; kept as the pre-L145 baseline. | superseded (L145) |
-| L20 | The 0:00:52 desync re-walks one word (`0x2fd53cc`, then `0x3f800000`) and exhausts the 20-in-2-s limit: GET is reading data, not commands. | superseded (L145) |
-| L35 | The FMV handoff stops the RSX thread: `stop_audio`, `NV3089_IMAGE_IN` NOPed, `possible desync (0xbf800000)`, then no further work (recovery absorbs it and waits on an empty FIFO). The FMV itself now renders (L116); the handoff desync is folded into the L145 class. | superseded (L145) |
-| L52 | The words in the error window are **all data**: as headers they name undefined methods 0x69A–0x69F. | superseded (L145) |
-| L54 | **Recovery makes no progress**: `restore_point == get`, so `set_get` re-runs the same word; after seven retries GET reaches the end of the iomap and the error becomes fatal. | settled (see L121) |
-| L57 | The data words are the guest's vertex attribute data and format registers (`10030303`, four undefined 0x1A00–0x1BFF indices). | superseded (L145) |
-| L58 | In 3 of 4 captures the error is exactly `0x39c` bytes (231 words) after `code_start`, the last jump target — the same block is mis-parsed at the same word. | superseded (L145) |
-| L64 | `cmd=0x3f48c8ca` passes the call test (`& 3 == 2`, target `0x1f48c8c8`), 300 MB past PUT and outside the ring → `get_guest=0xffffffff`; recovery walks into it again. | superseded (L145) |
-| L82 | `get=0x10b4e00 cmd=0x1d3`: neither method, call, return nor legal jump (`ret_addr=0x3`); the stream resumes five words later. | superseded (L145) |
-| L86 | **Self-sustaining loop, then a self-call**: `restore_point == get` for five captures, then a call to its own address; `restore_point` is only refreshed at sync points. | settled (see L121) |
-| L118 | **GET is one word past a correct boundary, always `0x39C` (231 words) after `code_start`.** Both episodes of the last `Atomic` run walk exactly 231 words from the last jump and die on the 232nd: A `get=0xcb0e20 code_start=0xcb0a84 cmd=0x10030303`, B `get=0x10a28cc code_start=0x10a2530 cmd=0x00010000`. The last six dispatches are the same block in both (`reg 0x19=0x10`, `0x1A=0`, `0x75B=0x800`, `0x75C=0x10000`, `0x19=0x800`, `0x1A=0`), and the parser's 256-entry history is internally consistent throughout (`d=+8` for one-arg commands, `d=+4` inside multi-argument groups), so the slip is upstream of the bookkeeping. | superseded (L145) |
-| L120 | **`fetch_u32` had no guard for GET at or past PUT.** Only `put == addr` was treated as EMPTY; the `addr < put` trim never applied when GET was ahead, so the cache was filled to the end of the 128-byte line holding PUT and every word past PUT was served from unpublished memory. One mis-parse that stepped over PUT was therefore unrecoverable, and 4.07 MB of walking is what L83 saw. The consumer of the same state is visible in `nv4097.cpp`: `fifo_read_limit` says "if put is behind get it will result in a number ignored by min". The per-stream frontier (L132) and honest GET (L145) close the state. | fixed (L145) |
+| L185 | **The defect is intermittent across consecutive presents, not one bad frame.** Over presents 6184–6200 (`crops/tunnel-trunk-6184-6200.png`, `crops/montage3-6184-6192.png`) blocks are present in 6184/6185/6186, absent in 6187/6188, present in 6189/6191/6192, at slightly different positions inside the same band. `host-target-*` dumps show the region black before any HUD pass. | measured |
+| L183 | **The failing frame's ring is `frame-<shot>-m1`, not `p1`.** `frame-6189-m1` records frame 6189 and the image presented at 6189 equals the shot, SHA-256 `2c56e1113a628dea…`; `frame-6150-m1` likewise (`1def0afb2ef1020e…`). `p1..pN` are simply the following frames. | measured |
+| L193 | **The failing sponsor-band pixels belong to the trunk-livery clause group, not the world pass.** Projecting every 1408x768 scene-pass primitive into the failing rect (x 682..703, y 576..580 target space -> viewport y 188..192) in `frame-6189-m1` names fp-42 / fp-7 / fp-33 (env geometry) and the trunk draw group fp-119 / fp-40 / fp-113 (livery clause). The car draws that cover the rect bind the same five units in both windows (u0 `c68d5080` 512x512 DXT45 paint, u1 `c1a00000` 512x128/mip-1 reflection lookup, u2 `ca443280` 256x512, u3 `ca17a280` 128x64, u4 `c19b0000` 32x32) with identical tids/sampler-hashes/constants/fragment-program ids — the failing and clean windows differ on no field of those draws. The host-sample bytes for u0/u2/u3 are identical in both windows; no sponsor text atlas bound by those draws was archived after the 2026-11-10 cleanup (the 2026-11-07 folder was deleted; `build/probe/evidence-tmp/` holds frame-6189-family samples, so the failing window's u1 `c1a00000` bytes survive — see L195; the 2026-11-08 run showed the sponsor atlas `c89d6780` was byte-identical in clean and failing windows). | measured |
+| L192 | **The deferred gather never cleared the temporary on Metal; Vulkan does (TX21).** VK cube/3D/atlas/mipmap gathers clear to black with an explicit clear→copy barrier before the copies; Metal (matching the GL reference) left uncovered faces/levels as heap garbage. **Fixed 2026-11-10**: each `generate_*` clears the temporary to black before the copies (`clear_texture`, level 0..all, cube/3D/compressed covered). Not the pre-present car-band black (L174); in scope for the fp-128 reflection chain (L171) and any LOD>0 sample of a cube. Metal also follows the GL lead unprobed in one more way worth stating plainly: nobody had read VK/GL code for this bug before 2026-11-10, and nothing records whether VK/GL ever rendered this title here. | fixed |
+| L195 | **`build/probe/evidence-tmp/` survived and holds the failing frame's 1408×768 target.** `host-sample-618900-addrc0880000-1408x768-fmt50.bin`, 4,325,376 B, SHA-256 `6594be167e46b8c7…` — tied to frame 6189 by the shot hash (`2c56e1113a628dea…`, identical to `host-shot-6189-addr0-1280x720-fmt50.bin`). The 2026-11-10 cleanup log's "every finding produced is decoded" and "the dump holds no bytes for frame 6189's binding" (L191/L193) are therefore wrong: the failing frame's `0x50110000` 512×512 binding (`host-sample-618900-addr50110000-512x512-fmt50.bin`, SHA-256 `9ef2df55…`) and the failing window's u1 `c1a00000` bytes (`host-sample-618901-addrc1a00000-512x128-fmt50.bin`, SHA-256 `cc90653a…`) also survive there. Exact-match component inventory of the target: (i) the documented 32×8 tile-aligned block at x 672..703, y 576..583 (240 px, all `(8,8,8,255)`; the 137 changed px of the older diff sit inside it); (ii) a sheared 17×38 band at x 867..883, y 558..595 (330 px, taillight outer-pillar area), and (iii) a mirror sheared 17×38 band at x 524..540, y 558..595 (329 px) — both uniform `(8,8,8,255)` like (i) and not yet classified (car trim painted constant dark vs the defect family). The 1280×720 presents cannot carry this signature (2 px of `(8,8,8)` in present-6189, none `a=255`). | measured |
+| L189 | **The failing frame is in the 2026-11-07 dump.** The shot is byte-identical to `host-present-6189`/`host-present-6150`, and the painting ring is captured with all 18 rings. This retires L180 for that run; L180's "not captured" claim stands only for the 2026-11-08 run. | measured |
+| L184 | **No draw class is dropped.** `frame-6189-m2` (clean) → `m1` (failing): 544 → 537 draws, 11 classes only in m2 and 4 only in m1, all decal/program churn (fp-98 vs fp-109 on identical geometry, two 3-vertex draws). `frame-6150`: 1148 → 1136, same shape. The fp-128 reflection pass runs in both. | measured |
+| L187 | **The ring fingerprint alternation is a scene ramp.** All 6189 ages grow monotonically m1→m12 (537, 544, 589, 646, 672, 674, 678, 710, 734, 733, 734, 724; fp-128 49→86; fp33 57→95; fp44 24→38) and decline across the p-ages, with identical program-class proportions at every level. Not two fault states. | measured |
+| L169 | **All per-draw CPU-visible state is identical between failing and clean frames** — pipeline handles, sampler ids, image tids, ROP/blend/raster/depth hashes, persistent and volatile ring bytes, fragment-constant hashes. `host-target-*` mid-frame dumps (before HUD/present passes) already show the black in the target. | measured |
+| L168 | **Every car/font/sponsor host-sample is byte-identical across all windows including failing ones** — `c8b76780`, `c8a86780`, `c8ad6780`, `c8b26780`, `c89d6780`, `c441e080`. GPU image contents are not the defect. | measured |
+| L174 | **The failing region comes from the car-paint passes on the GPU.** Trunk body `fp-47`, rear sponsor/decal band `fp-140` (alpha-test), glass/interior decals `fp-39`/`fp-9`, wing/decals `fp-28`, all into the 1408x768 scene target. Painted after the world pass and before the HUD. | measured |
+| L172 | **One guest address, several host images.** `0x50110000` is bound in one frame as a 512x512 RT (shadow/probe pass), a 512x512 sampled image (`fp-128`'s `t0`), a 1280x720 `fmt 0xa5` image (`fp-19`/`fp-7`/`fp-57`/`fp-73`'s `t1`) and a 1408x768 all-zero image (menu windows). The race's sampled image is flat `0x808080` boot fill and never receives the RT's content; only the RT carries live pixels. | measured |
+| L173 | **`0xc0000000`/`0xc0880000` are bound at several extents in one run** — 1408x768 scene RT, 1280x720 backbuffer and 1280x720 flat-gray composite input. The manifest's extent comes from the surface, the dump label from the Metal image, so one address is labelled at two extents. No mis-size bind to an object was observed. | measured |
+| L171 | **The probe cube is always one frame stale.** The gather materialises at the first `t3` bind of each frame (the first `fp-19` draw), before that frame's `fp-128` face pass. Every frame reflects the previous frame's probe. This is the rear-window smear (L146); it is not the black blocks. | measured |
+| L186 | **`c1a50000` is re-rendered every frame and the one captured face carries no black rectangle.** Ten distinct hashes, 62.7–73.3 % nonzero, 0.0–3.7 % pure black (0.0 in 6187/6188/6189). Only one 256x256 subresource per address per frame is captured, so the other five faces are unseen. | measured |
+| L170 | **The reflection chain is structurally coherent** — six faces re-render every frame (`vp-123 fp-128` into `0xc1a50000..0xc1b90000`), `fp-128` samples the shadow RT at `t0`, the gather copies faces into a cube at the same address, and the dump is always valid and distinct per frame. | measured |
+| L191 | **P1 whole-frame overlay scan (2026-11-09) exonerates every large draw.** Decoded both rings' 537/544 subdraw records and ranked every draw by union coverage; 43 large draws match 1:1 between the failing (m1, `6189`) and the clean (m2) frame on `(fp_id, vertex_count, scissor, viewport, primitive, target)`. The five tail composite draws are the only texture-field differences: gid `1158314` (fp-64 fullscreen, writes `0x50110000` 1280x720), `1158315` (fp-58) and `1158318` (fp-73, fullscreen) both sample `0x50110000 1280x720 fmt 0xa5` (tid `0x190` m1 / `0x77` m2, sid `0x6`), and the two `fp-28` 256x128 triangles sample `0xc0880000`; all five carry `blend_hash 0x2dabc779`, unique to these five in both frames. The `0x50110000` union is bound by every scene and HUD draw at u1 (`tid 0x244 sid 0x7`, 207/211 draws), by the six `fp-128` reflection faces at u0 (`tid 0xf3 sid 0x6`), and is the colour target of the shadow/probe pass and `gid 1158314`; the composite's own u0 twin image is the only frame-varying bind. No large draw differs on any other texture axis (38 of 43 pairs are byte-identical in every texture/sampler field; the remaining 5 pairs differ only in the documented address alternations L172/L173). Ring generations are successive generations of the same frame recording. The dump holds no bytes for frame 6189's binding of that address (completed by L195: `host-sample-618900-addr50110000-512x512-fmt50.bin` in `build/probe/evidence-tmp/` carries the failing frame's 512×512 binding); the only present-image dump of `0x50110000` 1280x720 is `host-sample-619800-…-fmt50.bin` (frame 6198) and it carries a full rendered frame, not a flat fill — the flat-`0x808080` description in L172 is the 2026-11-08 run's sample. As of 2026-11-10 the capture's sampled-image dedupe keys on the host image pointer (L190), so the next level-5 capture of a failing window will dump the failing frame's binding. The car-band defect is not in the large-draw set at all; it predates the composite chain. | measured |
+| L167 | **The defect persists for whole stretches, and identical content does not fix it.** In 4636/4637 the RSX stream differs by two draws and nothing else, and both frames show the same blocks; 4639–4646 all show it. Window 3 (city) shows clean 3852–3862 and one failure at 3851. | measured |
+| L178 | **Two failure scales coexist** — whole-quad blackout (4638, 4821, 4967) and partial blocks (3849, 4501). The same two scales appeared in the 2026-11-07 run. | state |
+| L188 | **Honest state of the root cause.** Per-draw state and sampled bytes are identical; draw classes are present; the car passes paint the black; the defect is per-frame and per-cell. The wrong texels must therefore arise at sample time or in alpha/discard with the sampled alpha. L171 is the only measured in-frame ordering gap, and it explains the glass only. No code line is yet identified for the livery path. | open |
+| L166 | **The 2026-11-08 run is fully decoded** (data row, not a finding): 8 F12 presses — 1658/1850 menu (glyph loss), 3849/4288/4501/4638/4821/4967 race (trunk splotches at the city, mountain and tunnel tracks), 3.8 GB, 15943 files, every present frame, ring and per-draw record. The livery auto-arm `MTL_PROBE_ARM_TEXTURE=0xca3fb280` never armed because that is the 2026-11-07 car atlas; in this run the four car atlases are `c8b76780/c8a86780/c8ad6780/c8b26780` (fmt 0x88/0x86, 512x256), the sponsor/rear atlas `c89d6780` (1024x512 BC3) and the font atlas `c441e080` (2048x2048 BC3); the world renders at 1408x768 and the backbuffer at 1280x720. The armed trigger must use a per-run address. | data |
 
-**Why the nested call is not a parser bug.** The two command buffers are `0xcb0000` and `0x10a0000`,
-exactly `0x3F0000` apart (L122). In the normal cycle the parser walks one buffer from its base to a
-`JUMP` at the tail, follows it to the other base, and repeats (L123). The `CALL`-to-trampoline path is
-the guest's wait idiom: it is used when the producer must wait for a label before continuing. The
-parser's position bookkeeping is exact throughout (L124); the only thing that changes is that the
-return-address register is already occupied when the chunk's own `CALL` arrives.
+## 1.3 The only pixel diff in the failing frame (2026-11-09)
 
-**Probe audit (2026-11-03 run).** `RPCS3.log`: 1778 parked, 38 FIFO redirect, 1733 PUT move, 1729 PUT
-rewind, 3444 jump cross-buffer, 3 jump high-water, 4 chunk tail, 142 label, 16 watchdog, 484 present
-gap, 16 cubemap, 125 failed, 1 skipped, 487 stall, 268 device, 5 archive, 6 timeout, 40 hang, 15 dead.
-`build/probe/run.log`: 252 desync lines (21 captures × 12), 4096 `redirect` are the per-draw geometry
-field (not FIFO), 21 label, 1 watchdog, 135 present gap, 27 refused, 2 skipped, 162 stall, 27 device,
-53 archive, 1 dead. The 38 redirects are the producer abandoning chunks mid-command; the word at the
-frontier is often a valid method or `0`, not a link. They do not by themselves explain the nested
-call, but they are the same producer-restart behaviour that makes the `CALL` path reachable.
+The clean and failing targets use different guest addresses per frame, so they were compared directly
+(`host-sample-618800-addrc0000000-1408x768-fmt50` vs `host-sample-618900-addrc0880000-1408x768-fmt50`,
+both BGRA8, 1408x768).
 
-## 1.3 Presentation and performance
+- The FIERA/sponsor band region (x 611..845, y 520..583) differs in **137 pixels only**.
+- Every changed pixel is exactly `(8,8,8)` in the failing frame; the clean frame holds the band's
+  normal dark grey `(43,50,52)` or the lighter `(17,20,20)`.
+- The largest component is 90 px at **x 682..703, y 576..580**; the rest are 1–12 px fragments in the
+  same rows. Neighbouring columns (x >= 720) are byte-identical between the two frames.
+- The changed columns are 32-px aligned in x (672..703 = tile column 21), and the edges are hard — the
+  failing content is a flat near-black write, not a resampled texture.
 
-| id | finding | state |
-|---|---|---|
-| L14 | **Cold boot stalls at the title video** (frame 306, 75 pipeline misses; 302 of 306 flips refuse the compose because no display buffer is configured). Warm boot renders. | open |
-| L31 | **10.1 % of flips present a clear** (`compose ran` 3 420 + `refused` 383). Run 1: 7 042 flips, 6 219 composed, 823 refused; run 2: 535 refused. | open |
-| L40 | **The video plane comes from a path that almost never runs**: the 1408×768 A8R8G8B8 surface is sampled with `upload_context = framebuffer_storage` on 223 of 669 binds, but only 2 readbacks in 300 frames, so the sampler sees whatever the last readback left. | open |
-| L47 | **836 guest faults per run**, all handled, 600 µs average, **136.5 ms maximum**; the RSX-thread case flushes in place. Run 1: 1 059 "writing 1" lines in the 100 s pause. | open |
-| L48 / L30 | **The semaphore wait is a spin**: 65 297 798 iterations in 300 frames (218 k/s, 1.93 s CPU), ~190 k per frame. | open |
-| L39 | **One texture readback blocked the RSX thread for 134.8 ms** to move 6 291 456 bytes. | open |
-| L143 | **`nextDrawable` is a tail, not a 20 ms average.** Run Q's `present/acquire/next drawable` is 4.30 ms over 300 calls, but 922 ms of that is one call; without it the mean is ~1.2 ms. `present/flip` is 7.32 ms avg / 923 ms max and `recorder/present drawable wait` is 267 µs avg / 71.9 ms max. The recurring RSX-thread cost is `frame/gpu wait` 9.14 ms avg and `recorder/begin frame/wait feedback` 2.50 ms avg / 750 ms max. The 922 ms sample is the CAMetalLayer drawable timeout: `nextDrawable` returns nil and the frame is dropped (`MTLPresenter.cpp:172`). VK does not block here: `VKGSRender::present` is a non-blocking `vkQueuePresentKHR`, and its acquire is a 100 ms bounded wait followed by a 0-timeout spin and drop (`VKPresent.cpp:592`). Metal's acquire and `MTL4CommandQueue::wait(drawable)` are both CPU blocks on the FIFO thread, so a dry pool stops the parser for the whole timeout. | open |
+Two consequences. First, the defect in *target* space is far smaller than the visible band in the
+*present*, so part of what the eye sees is present-side scaling/placement of a small target artefact;
+that discrepancy is still unexplained. Second, the flat `(8,8,8)` over an aligned rectangle is the
+signature of a constant-colour write (clear, blend-to-black, or a decal whose sample returned black
+alpha) rather than of a scrambled UV — which agrees with L160 (replacing unit 0 with a pattern removes
+the patches) and disagrees with a UV/LOD fault.
 
-The correct comparison is not "Metal acquire is slow"; it is "Metal has an unbounded CPU wait on the
-FIFO thread and VK does not". The parser is the FIFO consumer, so any window-server stall on the RSX
-thread shows up as a guest command-buffer stall, and in RR7 a stalled parser is also what turns a
-normal buffer switch into a producer restart. The fix is to take the window server off that thread,
-not to make `nextDrawable` faster. Two designs preserve the current renderer:
-
-1. **Offscreen compose plus a present thread (recommended).** The RSX thread composes the frame into
-   a small ring of offscreen textures, signals a shared event, and returns from `flip` immediately.
-   A dedicated present thread owns `nextDrawable`, `waitForDrawable`, the final blit and `present`;
-   if the drawable pool is dry it drops the oldest composed frame instead of stalling. The RSX
-   thread's only new cost is an atomic publish, and the FIFO never waits on the window server. This
-   is the same split VK gets for free from `vkQueuePresentKHR`, made explicit.
-2. **Bounded acquire on the RSX thread.** Set `allowsNextDrawableTimeout` and skip the acquire when
-   the in-flight drawable count is at `maximumDrawableCount`, so `nextDrawable` is never called on a
-   dry pool; move `m_queue->wait(drawable)` to a GPU timeline event or to the present path. This is a
-   much smaller change but still couples the parser to the pool, and the frame-drop policy becomes
-   visible as judder.
-
-Until either lands, the measured steady-state cost is dominated by `frame/gpu wait` and the feedback
-wait, not by the acquire; optimizing `nextDrawable` alone would not move the parser.
-
-## 1.4 Instrumentation and capture coverage
-
-| id | finding | state |
-|---|---|---|
-| L151 | **The level-5 capture reaches back in time, but the defect frame was not captured.** The recorder keeps a 12-frame in-RAM ring of every CPU ring plus one `draw_record` per subdraw, and dumps on F12, a present-gap watchdog, a content trigger, a cubemap bind, a large B8 bind or `MTL_PROBE_AT_SEC`. The 2026-11-03 run captured frames 182/1416/1814/1932/2956 (6/230/234/234/234 files) and `host-shot-3950`. The 3950 F12 press hit `diagnostic_capture_window_limit = 5`, so only the shot image was written; the race defect frame has no ring/draw capture. Raise the limit or reset the budget before the next defect run. `MTL_PROBE_SERIALISE=1` (`wait_idle()` after `open_frame()`) separates a data defect from an overlapping-frame hazard. | open |
-| L152 | **The capture decoder was out of sync with `draw_record`.** `capture.py` zipped 62 field names onto the 298 scalars `struct.unpack` returns, so every array field after `pipeline_key` desynchronized and the tool failed with `'int' object is not iterable`; an earlier phantom `_pad` entry had hidden the same class of error. The decoder now carries an explicit `(name, count)` layout, asserts the counts sum to the unpacked scalar count, and regroups the arrays. Record size (`1200`) and the C++ `static_assert` are unchanged. All five captures decode (78 frame/age entries). | fixed |
-| L103 | **(a)** the unit trace printed the format's declared layout, not the view swizzle; it now prints the composed swizzle. **(b)** the MSL declares each ring at block size (`vc[1]`, `fc[7]`, `fs_contexts[1]`) but indexes it with the ring index; real UB, proven benign (744 working draws, GPU validation silent), deferred until a shader-codegen change is justified. | (a) fixed / (b) deferred |
-| L154 | **The defect frame's inputs are not in the capture.** `host-target-*` is written only at `diagnostic_draws < 24` or every 200 draws while a window is active; the window is armed at the present of 2493 and covers 2494..2509, so frame 2493 has no intermediate target and `host-sample-*` starts at 249400. The defect frame's sampled textures cannot be recovered from this run: a press must arm before the frame, or the window must include one pre-roll frame with samples. Also `record.global_id` is `diagnostic_global_draw_id` (per subdraw), not the log's `diagnostic_draws`, so log draw numbers and record ids are not directly comparable. | open |
-| L155 | **The per-glyph loss is a partial quad, and it moves between frames.** **(a) The decoder's y is flipped.** `capture.py:project()` returns viewport-space y; the UI viewport is `[0,720,1280,-720]`, so `image_y = height − projected_y`. Two independent anchors confirm it: the `a` quad of `Transmission` projects to y 519..551 = image 169..201, and the `Machine Select` row 487255–487268 projects to 620..653 = image 67..99. This is why the earlier census concluded "no draw covers the panel". **(b) The panel is drawn.** Frame 2493 p1: 487209–487211 are the panel 9-slice (`c5b4a480`, `c5b46480`, `c5b36480`), 487212–487235 are atlas glyph quads (`c441e080`), and the `Transmission` row is 487215–487226 (12 quads). The only later draws over the `a` cell are 487244/487245 (`c5b5b480`, x 162..272), which reach x 271–272 of the 271..288 cell — they cannot explain the loss. **(c) Three of the 12 quads lose pixels, and only pixels the glyph covers.** Bright-pixel counts (>200 on every channel) per cell, shot 2493 vs present 2494: `a` 18/93, first `s` 47/82, first `i` 4/30, `T` 64/68, and the other eight cells exact. The surviving pixels are a **subset** of the correct glyph — `a` keeps only its bottom serif (rows 192–193), `s` keeps rows 179–183 and 192–193, `i` keeps the dot (174–175) and rows 192–193. A lost draw, a wrong transform or a wrong UV would not produce a subset, so the quad rasterised and the atlas sample returned alpha 0 for part of it. **(d) It is not the cell, the texture or the sampler.** All 12 quads carry identical recorded state (command 1, primitive 8, 4 verts / 6 indices, flags, blend/depth/raster hashes, `pipeline_state` 518034583552, `pipeline_key` 723067336, fragment constants, sampler hash 122444642, atlas `c441e080` 2048×2048 BC2, mip 1, lod 0..15); only `global_id`, the ring offsets (`attrib_offset`, `vs_context_offset`, `fs_context_offset`, `fs_texture_base_index` 1920..2096 step 16, `fs_stipple_offset`) and `hash_persistent` differ. The same `s` and `i` cells render correctly at 487222/487223/487224 in the same frame. 487217's vertex bytes and transform are identical between m1 (486890) and p1 (487217); only `color_target` (`0xC0000000` vs `0xC0880000`) and `hash_sampler` differ. **(e) The loss moves, and it is one frame wide.** The right-panel cell 487290 (x 990..1010, y 523..556) measures 127 bright px in shot 2493 and in presents 2495..2509, and **32 in present 2494** — a single-frame loss in a cell that is otherwise identical in the other 16 samples (shot 2493 and presents 2495..2509). The failing frame is captured: present 2494 is `p2` (frame 2494), and its corresponding quad 487617 differs from p1's 487290 and p3's 487943 only in `global_id`, `frame_id`, `color_target` and `hash_sampler`. `hash_sampler` hashes the whole 48-byte `sampler_info` array for *every* bound unit (`MTLGSRender.cpp:4351`), so it moves whenever any unit's sampler registers move and is not a cross-frame discriminator. **(f) A raw shot-vs-present diff is not a defect mask.** The panel is translucent over an animated glow/noise blob (the 2493-vs-2494 density map differs across an ellipse of roughly x 175..355, y 90..195), so only the static glyph cells are comparable. The left-panel cells are constant at their full count in presents 2494..2508 and drop to 0 at 2509, which is the scene transition, not a loss. **(g) The frame-1506 census reproduces (c) exactly and proves the inputs are identical.** Shot 20:15:07 reads `Tr n m.ssion`; host-present-1507 is correct. The missing draws are `200888` (`a`, x271), `200890` (first `s`, x303) and `200892` (first `i`, x343, dot only); the other nine glyphs are present. All twelve glyph draws record identical state; p1:200888 and p2:201248 are identical in vertex context, fragment context, stipple, fragment constants, transform constants, persistent vertex bytes and index bytes — **only `color_target` differs**. The atlas is correct: `0xc441e080` decoded BC2 cells for `a` (x758..782), `i` (x950..960) and `s` (x1156..1179) contain full ink, and all six `host-sample-*` copies of the atlas are byte-identical. The atlas was uploaded once at t=27.251 and never again. **Next:** the final run records the Metal `texture_id`/`sampler_id` per unit per draw, per-frame sampled images, and a 150-frame forward window (`MTL_PROBE_FRAME_COUNT`), so the recorded CPU state and the bound objects can be compared across every frame that shows the defect. | open |
-| L158 | **The forward capture was one frame wide while the ring burst was six.** `MTL_PROBE_FRAME_COUNT` set only `diagnostic_capture_last_frame`, so the per-frame sampled images and the present readback were captured for the single frame after the press, while `continue_dump()` wrote a hard-coded six-frame burst. The 2026-11-06 run therefore has 21 trigger windows but only 28 `host-present-*` files: 21 active frames plus seven periodic ones. The forward burst is now `dump_frame_count()` = `max(6, capture_frame_count() + 1)`, so `MTL_PROBE_FRAME_COUNT=150` keeps 151 forward ring frames and 150 active frame reads, joined to the trigger frame as `p1`. Each `draw_record` also carries the Metal `texture_id[16]`/`sampler_id[16]` the argument table held (record 1200 → 1456 bytes; `capture.py` decodes and prints them). The atlas/environment images are captured once per frame per address, because `diagnostic_reset_frame_state()` already cleared the dedupe list per frame; this is what makes a multi-frame window meaningful. | fixed |
-| L159 | **The RSX thread faults inside IOGPU during teardown.** Every run ends with `Segfault reading location 0x98` on the RSX thread, PC in `IOGPU.framework` at `IOGPUDeviceGetNextTraceID + 40` (`__TEXT 0x1adb45000–0x1adb81000`). A clean run with the probes off (`build/probe/run-clean-3.log`) reproduces it, so it is not probe-induced. The main-thread `.ips` fault at `0x18` is secondary Qt teardown after that. The fault is after `Stopping emulator...`, so it does not affect a captured frame, but it is a real backend defect. | fixed (L165) |
-| L160 | **The red-texture run exonerates the bind path, not the content or the sampler.** `MTL_PROBE_REPLACE_TEXTURES=1` turned the whole run red and removed the glitches, but a one-texel uniform red image also removes UV, mip/LOD, wrap, filter, format and aliasing, so the result only proves that the resolved unit reaches the shader. With `MTL_PROBE_REPLACE_UNITS=0` the car and environment corruption is gone while the menu glyph loss and the black minimap remain: unit 0 carries the race patches, the menu glyph unit is distinct, and the minimap is a separate null or zero bind (L49). A patterned replacement (UV gradient, block-indexed checker) and a forced LOD-0/point sampler on unit 0 are the discriminators. | open |
-| L161 | **C1 fixed: the clear sized compressed levels with floor division.** `clear_texture` now calls `get_texture_level_extent`, which rounds a DXT level up to whole four-by-four blocks with a minimum of one, shrinks a 3-D level in depth, and drives the staging allocation, the zeroing and the `copyFromBuffer` size from one extent. The clear takes its base extent from the host image and repeats over all six faces of a cube. The old code floored a 2×2 or 1×1 level to zero and skipped it, leaving it undefined in a private texture, and cleared only face 0. Tests: `MTLTextureLevelExtent.*`. | fixed |
-| L162 | **C2 fixed: the readback used a block index as a texel origin.** `get_texture_readback_region` converts the guest byte offset into a block row and block column, multiplies both by four for a compressed format, sizes the texel region from that origin, and keeps the raw byte offset as the staging destination; the tail row count is scaled by the block edge too. The old arithmetic started a partial readback at the wrong texel and could shorten it twice. Tests: `MTLTextureReadbackRegion.*`. Readback only, so it changes evidence, not on-screen sampling. | fixed |
-| L163 | **C3 fixed: the reuse test ignored depth and compared the raw mip count.** `create_new_texture` now compares the host width, height, depth, pixel format and level count against `normalize_texture_extent(...)`, so a 3-D section re-created with another depth is rebuilt, a cube face stays square, and a legal request whose chain was capped is reused rather than rebuilt every time. Tests: the existing `MTLTextureExtent.*` cases cover the normalisation the predicate now uses. | fixed |
-| L164 | **C4 and C7 are not code defects.** C4: the read note carries the texture's full guest footprint (`get_texture_size`, every mip and face) and the write note the surface's level-0 footprint; both cover the bytes the draw touches, the same Metal object matches by identity regardless of range, and mip bytes a surface never wrote are stale by contract, not by a missed barrier. C7: `copy_texture` reads one subresource because the shared cache flushes one section and the Vulkan backend does the same (`VKTextureCache.h:212-300`); the cube and 3-D cases are covered by the upload and clear loops, not by readback. Both stay in §1.1.1 with their dismissal so a later run does not re-open them by accident. | closed |
-| L165 | **L159 root cause: the exit-time invalidation was encoded on an ended command buffer.** The fault chain was `on_exit → do_local_task(lock_wait) → handle_invalidated_memory_range → invalidate_range → copy_texture → command_recorder::open_compute → command_buffer->computeCommandEncoder → IOGPUMetal4ComputeCommandEncoder initWithCommandAllocator:+0x58`, fault reading `0x98`. `on_exit` drains the pending XDR-unmap invalidation after the frame was submitted, so `open_compute` touched a slot whose command buffer had already been `endCommandBuffer`-ed; the readback was the crash, not teardown of a released device. Fix: `frame_slot` tracks `buffer_open`; `begin_frame`/`reenter_slot` set it and the three `endCommandBuffer` paths clear it; `open_copy_encoder` and `open_pass` re-enter the slot first when its buffer is closed. Two consecutive clean quits, no fault. `Utilities/Thread.cpp` also gained the env-gated fatal-fault backtrace (`RPCS3_TRACE_ON_SIGNAL=1`) that made the chain readable. | fixed |
-
-**Capture contents.** Per captured frame: all 18 rings (`persistent`, `volatile`, `index`,
-`instructions`, `overlay-vertices`, `overlay-uniforms`, `vertex-context`, `draw-parameters`,
-`fragment-context`, `sampler-info`, `stipple`, `blend-values`, `fill-values`, `vertex-draw-params`,
-`fragment-constants`, `transform-constants`, `instancing-constants`, `instancing-lookup`), the
-`draws.bin` records, ring generations and `grew_mask`, retired buffers, target/present/shot images,
-and texture bytes at bind. `capture.py` projects vertices with the same frequency/modulo rules as
-`RSXVertexFetch.glsl`; `diff.py` diffs two frames; `texture.py` decodes the Metal format constants
-(`0x50` BGRA8, `0x46` RGBA8, `0x0a` R8, `0x82` BC1, `0x84` BC2, `0x86` BC3).
-
-**Capture safety.** `MTL_PROBE_DUMP_DIR` must point inside the repo, never `/tmp`. Run at most one
-emulator instance; track it through `build/probe/rpcs3.pid`, never `pkill -f rpcs3`. Diagnostic
-shader variants carry an archive suffix and never touch the real archive; state-only switches do not.
-
----
-
-# 2. Fixed by this investigation
-
-| id | defect | fix |
-|---|---|---|
-| L10 / L1 | Cube descriptor set `arrayLength = 6`; Metal requires 1, aborting inside `heapTextureSizeAndAlign`. | Legal extent (one texel minimum, square face, capped mips); the six faces ride the upload slice. |
-| L13 | The label release raced the FIFO. | `supports_host_gpu_labels = true`; the release waits its slot, then writes. |
-| L19 | The sampled-texture dump computed a DXT span 16× too large. | Block dimensions. |
-| L41 / L43 / L44 | **Metal never cleared a reused image**, and neither Metal nor GL checked extent/mip/format of the reused image. | Metal clears a reused image that was not fully uploaded and discards a non-fitting one. |
-| L60 / L66 / L71 | **63 consecutive draws were refused** because `begin()` never prepared the framebuffer. | `begin()` binds `context_draw`; the bind fast path tests context, `rtt_config_dirty`, `attachments.valid()` and `ignore_change`, like VK/GL. |
-| L70 / L55 / L58 | **The accurate FIFO retry was off by one**: it left the position on the argument, so the retry read the second argument as the first. | On the empty path the position rewinds to the header and `m_remaining_commands` clears. |
-| L72 | **Metal 4 captures the argument table per draw at encode time**; an unwritten slot keeps the previous draw's binding. | `argument_binder::address` writes whenever the value changes, zero included. |
-| L108 | **The FIFO word cache could serve a stale word**: the control-command shortcut set the cache bounds without storing the word. | The shortcut writes the fetched word back in guest byte order. |
-| L90 | The probe file opened with `"w"`, truncating every run. | Follows `MTL_PROBE_LOG`. |
-| L109 | **No diagnostic separated "discarded" from "never ran".** | `MTL_PROBE_NO_ALPHA_TEST` compiles the alpha test out (own archive). Its depth half was withdrawn (L112); the surviving discriminator is L114. |
-| L92 | **The diagnostics perturbed the frame they measured**: four sites read guest memory with `vm::read32`, faulting the `PROT_NONE` target and flushing it. | All four read through `vm::get_super_ptr`. |
-| L93 | **The pipeline archive suppressed every shader dump.** | The archive is moved aside before a capture run; dump limit 512. |
-| L33 / L34 | The probe could not see correctness; fourteen latches used a ternary name. | Per-draw id/format/readback records; plain latches. |
-| L78 | `MTL_SHADER_VALIDATION=1` crashes Apple's Metal 4 debug compiler. | Keep `MTL_DEBUG_LAYER=1`, drop shader validation (L79). |
-| L3 / L15 | `should_skip_draw` hid its reason. | Predicates logged for the first 64 refusals. |
-| L16 | Four `Resource was destroyed whilst holding a resource reference!` at shutdown. | Teardown only; the clean `rc=0` run proves it is not the fatal path. |
-| L107 | The binder's stage-only cache | **not a bug**: tables are per recorder slot and both binders reset in `begin()`. |
-| L116 | **The video quad was culled, not skipped.** All traced quads are CCW in NDC and `capture_front_face` inverted the guest's `cw` on top of the negated viewport height, so the winding test was inverted twice (DEVIATIONS-DRAW D5). | `MTL_PROBE_NO_CULL` proved the cull; the front-face derivation now matches the guest. The FMV, Xevious panel and early car silhouette render after the fix. |
-| L12 / L11 | **The intro FMV, course-select video, in-race FMVs and the Xevious panel were black.** | Fixed by L116 (cull); decode/upload were already faithful (L95, L96). |
-| L37 | **`0x00010000` is a non-method word and is reported.** It is the argument of the preceding `reg 0x75C` write; in every capture the breaking word is the last argument of the block before it, not a header. The earlier "not malformed" claim came from reading `0xa0030003` as if bits 16–17 were part of the method index. | Corrected; folded into the L145 class. |
-| L128 | **`sync_get()` could publish GET ahead of the parsed position.** | Closed by L145: `sync_get()` publishes `m_fifo_pos` alone. |
-| L129 | **VK/GL write the label GPU-side and keep work in flight; Metal drained the GPU on the RSX thread.** The park/catch-up cadence is normal on all three backends (L125); the drain was Metal-only. | L131 removes the drain. |
-| L131 | **The label release no longer drains the GPU.** `release_GCM_label` stages the guest word and emits one compute-encoder `copyFromBuffer` at the next encoder boundary, under one queue-scope `All → Blit` barrier per batch. The shared code skips its CPU store. A label outside the guest window, or one released before a frame exists, still takes the old drain + CPU store. | Fixed; run M confirmed the boot verify and 5,060 chunks. |
-| L134 | **The back-end label batch was not submitted.** `flush_label_writes` ran only at the next encoder boundary and `commit_pending_labels` only from `on_semaphore_acquire_wait`, which this guest never reaches. | `release_GCM_label` commits the batch immediately, without waiting. |
-| L135 | **A semaphore acquire could accept the pre-release word while the GPU label write was in flight.** | `sync_label(address)` commits the buffer carrying the write and waits only for that slot's feedback before the acquire re-reads the word. |
-| L136 | **A no-copy import over the guest window is fixed at creation; a page the CPU maps later is invisible to the GPU.** The Metal device imports `vm::g_sudo_addr` at 4.58 s, but the RSX reports block is mapped at 18.96 s; the GPU write landed in the old physical page. | Per-page import created after the page exists (L137). |
-| L137 | **Label writes get a per-page import created after the page exists.** `resource_manager::label_buffer` caches one 64 KiB no-copy import per label page, created at the first release and published to the residency set. | Fixed; run M confirmed `sudo=0x1000000 guest=0x1000000` and the boot park gone. |
-| L139 | **The label path is the setting's choice again, and the default has no FIFO reader wait.** | `MTLDevice::fill_backend_config` honours `g_cfg.video.host_label_synchronization`: off (default) is the host store, on is the GPU write with the per-page import (L137) and the acquire wait (L135). The enabled path polls a `MTLSharedEvent` timeline (`signaledValue`), so a completed commit costs one atomic load. |
-| L132 | **The desync was a cached word at or past PUT; the parser now follows the published frontier of its own stream.** `stream_tracker` keeps `{base, frontier, linear}` per stream; a PUT is attributed to the stream that contains it; a word at the frontier is consumed only if it is a jump/call/return. The cache is capped at the frontier and a method packet is dispatched only when fully published. | Fixed; tests, run U/V. |
-| L133 | **The `put == addr` early return bypassed the frontier rule.** | The equality now enters the frontier path; a link is consumed as one word and a data word returns `EMPTY`. |
-| L140 | **The L138 park was the guest's park area, and the frontier rule parked the parser on its first word.** `0x3020300` holds a count-0 NOP; the guest patches it later. A jump target above every stream that PUT does not name is now added unbounded, exactly as static code below the streams. | Fixed; test `FifoStreams.ParkAreaAboveStreamsIsReadUnbounded`. |
-| L141 / L144 | **The link a chunk publishes could be gone before the parser read it; the publish sample was one move too late.** | Superseded by L145: honest GET means the producer cannot recycle the link, so the sample layer is deleted. |
-| L142 | **A stream abandoned mid-command.** When the parser stands on a strict stream's frontier, the word is not a link, and PUT names a different known stream with a published chunk, `stream_tracker::redirect` marks the chunk stale and moves the parser to the published stream's base. `recover_fifo` keeps the known streams (`reset_at`). | Fixed; device-confirmed run S, six redirects in run V. |
-| L145 | **GET is an acknowledgement, not a read-ahead hint.** `sync_get()` published the prefetched block end, licensing the guest to recycle a chunk the parser was still in. Run T: PUT moved to `A+0x9d4`, the parser spent 188 ms in the label acquire, the guest reused the link with the next chunk's data, and the parser arrived on data. | `sync_get()` publishes `m_fifo_pos` only; `cellGcmCallback` writes the jump before publishing PUT; the frontier is enforced in fast mode too. Tests: 12/12 `FifoStreams`, 516/516 full suite. **Device-confirmed run U** (2,892 handovers, 0 desync) and **run V** (zero `Dead FIFO`, zero desync, zero `FIFO error`, six redirects). |
-| L148 | **A scissored colour clear became a whole-attachment clear.** `MTLFramebuffer::open_pass` chose the colour load action from `state.clear_color_fast` alone and ignored `clear_mask`; the partial path passes `clear_mask = 0` because Metal has no scissored clear and the fill shader draws the scissor, so the whole attachment became the clear colour. VK (`vkCmdClearAttachments`) and GL scissor the clear. | The colour load action now also requires `(clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK)`. Device run: `clear/scissored fill` zero. **Visual attribution measured false** — the patches survived the fix; this is a correctness fix only. |
-| L152 | **The capture decoder was out of sync with `draw_record`.** | The phantom `_pad` field is removed; `capture.py` now decodes the 1200-byte record correctly. |
-| L156 | **Mega Man 9 crashed the RSX thread on its first interleaved draw**, two minutes into boot. Symbolication put the fault at `rsx::interleaved_range_info::calculate_required_range` reading address `0x8`; `rsx::context::register_state` sits at offset 8, so the block's `ctx` was null. The rebase moved this shared function from `rsx::method_registers` to `REGS(ctx)` and `MTLGSRender::on_bind_context` never bound `frame_resources::vertex_layout`; the pre-port Metal tree did not need the binding because the function was thread-global. | `on_bind_context` now calls `vertex_layout.set_context(ctx)`. Test `MTLContract.VertexLayoutMustCarryTheBoundContext`. |
-| L157 | **The renderer was replaced after every flip, so the shader preload ran in an endless loop.** `create_renderer` and `reset_renderer` stored `m_renderer_info = logical_id()` *before* `on_init()`. Metal opens its device in `on_init`, so the stored id was `Metal | NULL` while `configured_logical_id()` became `Metal | Apple A18 Pro`; `display_engine::flip` saw the mismatch and requested a replacement on every frame. Each replacement re-ran the full preload, rewrote the archive from a partial set, and showed the loading dialog again (run log: replace → init → replaced every ~1.5 s; 12 cycles in 18 s). VK was immune because it creates its device in the constructor. | `m_renderer_info` is assigned after `on_init()` in both `on_task` and `reset_renderer`. |
-
----
-
-# 3. Settled — measured, not a cause
+## 1.4 Exonerated
 
 | id | result |
 |---|---|
-| L87 | **The device samples BC exactly** (BC1/BC3/cubemap, with and without mips). |
-| L88 / L94 | **Every upload is faithful**: `guest-*`/`conv-*` byte-identical for 156 DXT1 and 263 DXT45; no large upload all-zero across 2 026 + 4 108. |
-| L95 | **The video is three B8 planes and they carry picture**: 1280×720 luma + two 640×360 chroma, luma up to 210 distinct bytes, only 7 of 378 luma uploads flat (fades). |
-| L96 | **B8 sampling agrees with Vulkan**: `B8` → `R8Unorm` with `{ONE, RED, RED, RED}` as a view swizzle, same as VK. |
-| L22 / L21 | The upload and present paths are correct early (BC3 logo, Xevious panel, ESRB notice). |
-| L25 / L26 / L27 | Compilation is not the visible-bug path: 97 async links, none failed; `skipped pipeline pending / failed` and `bind dropped` never fire. |
-| L28 / L24 | Format census: guest DXT45 396 544, DXT1 171 588, A8R8G8B8 129 696, DXT23 8 530, B8 2 852; host BC3 802, BC1 528, BGRA8 259, R8 13, D32S8 12, BC2 1. |
-| L51 | Level-2 texture probes clean: `create` 3, `reuse` 0, `partial upload` 0. |
-| L73 | A **null texture** samples 0; a **null sampler** falls back to a default; `setAddress(0)`/`setTexture(null)` are legal. |
-| L74 | `setRenderTargetWidth/Height` is a hard clip: an oversized viewport drops the whole draw, an oversized target is safe. |
-| L75 | The 1920×1080 scissor with a 4096×4096 guest viewport is not a mismatch: the host viewport is the surface clip; the RSX transform lives in the vertex env. |
-| L76 | The texture binding contract agrees on both sides, so a black object is not a slot-map mismatch. |
-| L23 | Superseded by L95: the "dark flat luma" of the 52 s window was a fade. |
-| L67 / L69 | Run-depth and log-census baselines; nothing Metal-specific in the shared log (54 `lock sudo`, 21 desync reports, 819 SPU `MFC_*`, 71 `ROP reads from rN`). |
-| L68 | All 65 faults in the 02:5x run were on guest threads and handled. |
-| L43a / L45 / L46 | Metal ignoring Vulkan's create flags, `create_nul_section` arguments and `on_section_destroyed` **matches OpenGL**. |
-| L53 / L56 / L63 | The label address `0x60300800` is **outside** the ring (`0x50100000..0x53200000`), so the label write cannot land in command data. |
-| L59 / L55 | Folded into L64 / L70. |
-| L4 / L5 / L7 | Upstream noise (ROP read-before-write, SPU channel loop, MFC warnings) with no wrong output. |
-| L77 | **Validation is the only debugger-class tool**: `MTL_DEBUG_LAYER=1` (with `MTL_DEBUG_LAYER_ERROR_MODE=nslog`) catches real errors; there is no Xcode 26, so no Metal Debugger, `.gputrace`, `xctrace` or offline `metal` compiler. |
-| L80 | **The post-draw colour probe works and is exercised**: it copies the patch from colour attachment 0 after every draw of a window and logs mean BGRA, per-channel non-zero counts, distinct bytes and the first pixel. Run 2: 3 984 probes, 3 568 with non-zero content. |
-| L81 | **The pixel probe works and the early video path writes**: at 25 s, draw 1242 is opaque white in all 4096 pixels and 1243 is textured (mean ~205, alpha 235). |
-| L100 | **Run 1 reached all four scenes**: frame 1067/32.1 s video (`vp 43 fp 93`), 2517/68.3 s car select (`fp 52` ×524, `fp 53` ×7), 4374/125.4 s video (`fp 54`), 5796/313.6 s video (`fp 91`), 6996/406.5 s (`fp 25/9/94`). 520 host dumps. |
-| L101 | **The video quad was encoded with every state field correct and still left the target untouched.** Draw 18896 (frame 1067): `primitive 8 count 4`, clip −0.9992/1.0008/−1.0014/0.9986, `scissor 0 0 1280x720`, `cull 2 winding 1`, `depth 515` LEQUAL `z=0` vs a 1.0 clear, `write mask 0xf`, `layout color 0xc0880000`, clear `(0,0,0,0)`. No `skipped` latch; `draw/record` = `recompiler` + `interpreter`. The probe read `(0,0,0,0)` after the draw and every later draw of the frame. **Resolved by L116:** the quad was culled. |
-| L102 | **The CPU-side constant path is not the discriminator.** `fp 93`'s output alpha is exactly `diff_color.a` (`r1.w = fc[6].y = 1.0`); its only discard is the alpha test (GREATER, ref 0); `diff_color` is `vs 43`'s `vc[0 + xform_constants_offset]`, the CPU block at index 468 reads `(1,1,1,1)`, and the ring index math has no double offset. |
-| L110 | **The alpha test is not the video's cause.** Run 2 compiled the alpha test out of every program and captured the same draw (frame 879, draw 12262, `fp 100`): full-screen quad, units 0/1/2 = B8 1280×720 + 2×640×360, guest planes non-empty (luma `230400/230400` nonzero, 71 distinct bytes), blend `770/771` = SRC_COLOR / ONE_MINUS_SRC_COLOR, clear `(0,0,0,0)`. All four colour patches stayed exactly `0x00000000`. Resolved by L116. |
-| L111 | **The colour probe cannot separate the two survivors.** "Fragment ran and wrote `(0,0,0,0)`" and "no fragment ran" are the same reading on a `(0,0,0,0)` target. L114's forced output and L116's cull answered it for the video. |
-| L114 | **The forced-output discriminator works and separates "never wrote" from "wrote black".** The selector is content-based (`MTL_PROBE_FORCE_FP_TEXTURES=<n>`, counting enabled 2-bit groups in `program.texture_state.texture_dimensions`) because fragment ids move with play order; the archive name carries the value (`…-forcefpt3.bin`). In run 5 the forced programs painted (tyres and track railings turned magenta) while the video quad did not, which pointed at the raster side and produced L116. |
-| L42 | **A black rectangle is not a texture-content problem.** The 8×8 DXT45 it samples is opaque white in the guest and converts byte-identically. The Xevious panel's blackness was the cull (L116). |
-| L32 | **The boot black screen was the intro FMV, not a missing shader.** Settled by L116. |
-| L91 | **The texture-replacement bisection is not decisive for one draw inside a frame.** `MTL_PROBE_REPLACE_TEXTURES=1` binds a one-texel red image to every referenced unit; every draw sampling that unit then turns red, so the patch may already be red before the draw under test. It answers "does sampling work at all", not "did *this* draw write". L114 answers it. |
-| L38 / L29 | **The label drain was the frame rate**: 57.9 ms average, 470 ms max, one per frame, against `frame/gpu us` 8.68 ms and `present/display gap` 82.8 ms — the GPU was idle 74 ms of every 83 ms. Fixed by L131. |
-| L104 | **The 100 s pause after the second video is the guest, not a GPU hang**: ~1 131 presents and ~1 059 guest "access violation … writing 1" with no new draws; the RSX thread works in `release_GCM_label`/`wait_idle`; the game resumes at 406 s. |
-| L36 | **The probe is exonerated**: a run with `MTL_PROBE` unset reproduced the desyncs and the `Dead FIFO`. |
-| L117 | **The desync came from the malformed-command branch, not the unmapped-page path.** Proof is the capture's own cache line: `addr=0x10a28cc size=0x4 next=0xffffffff`. Only the control-command shortcut in `fetch_u32` stores `m_cache_addr = addr` unaligned with `m_cache_size = 4`, and `next=umax` is written by the malformed branch. `sys_rsx_context_iomap(io=0x50100000, size=0x3100000)` happens once at init and there is no `iounmap`. |
-| L119 | **The producer rewrites the region while the parser walks it.** Episode A's history recorded `reg 0x19`/`0x6AB`-family commands at `0xcb0a84…0xcb0e1c`; the ring captured at those same addresses microseconds later holds the vertex-attribute block (`00041aac`, `00041ab4`, `00041ac8`, …). Episode B's dump changed between the 20 retries. This explains L85. |
-| L121 | **Recovery is a livelock and the 2 ms retry is what makes it fatal.** `recover_fifo` restores to `restore_point == get`, so the same malformed word is read again; the retry sleeps 2 ms, so 20 recoveries take ~50 ms and trip `Dead FIFO`. The 44.587 s episode repeats 7 times and the 85.450 s episode 21 times, each at one fixed address. |
-| L83 | The host executed 4.07 MB **ahead of PUT** for 0x39c bytes, then `0x3f800000` was a legal *old jump* off the iomap. See L120. |
-| L84 | **GET sat on an argument — confirmed at word level.** 256 words before it were a well-formed header/argument cadence; episode B landed on the argument `0x10000` of `reg 0x75C` at `0x10a28c8`, and episode A on the vertex-attribute value `0x10030303`. The parser stopped between a header and its argument in both. |
-| L85 | **The dispatch history did not match the ring at those offsets — because the guest rewrites the buffer while the parser walks it (L119)**, not because the 1 KB cache was parsed differently and not because a page was remapped: the iomap is created once and there is no `iounmap`. |
-| L122 | **The producer uses two command buffers, `0xcb0000` and `0x10a0000`, `0x3F0000` apart.** The only two jump targets are those bases. Every `put` lies above one of them, and the observed spans are at least `0x1F9DC` (A, to `0xccf9dc`) and `0x21BE0` (B, to `0x10c1be0`). `put` alternates between them, normally naming the buffer the parser is *not* reading. The `0x3F0000` spacing is allocation placement, not a ring. |
-| L123 | **`put` normally names the buffer the parser is *not* reading, at the same offset.** Every recorded sample shows the other buffer: `0x10a13bc`/`0xcb13bc`, `0x10a3d08`/`0xcb3d08`, `0x10a6264`/`0xcb6264`, with `get - put == +0x3F0000` and the low 16 bits equal. Numeric comparison across the pair is meaningless — the buffer being filled has the lower address. |
-| L124 | **The parser's bookkeeping never drifted in the whole run: no `header phase slip`, no `jump past PUT`.** Every header was where the previous command predicted. The desync was the parser reading a *word* that is not a command while its position bookkeeping stayed perfectly consistent. |
-| L125 | **The parser parks on `put` equality, and the app then moves `put` to the other buffer: 50 times in 6 idle seconds.** `prev=0x10a13bc put=0xcb13bc get=0x10a13bc` repeats from 36.26 to 42.58 s. It is benign because the word at the resume point is the app's own last command or a jump that re-parks the parser. |
-| L126 | **The failing frame: the resume led into the other buffer, and the parser walked `0x2B08` past anything ever published there.** After resuming at `A+0x6264` the parser consumed the chunk to `A+0xF0DC` (`0x8E78` bytes, no overrun), then went into B and walked to `B+0xF57C`; the fetch that broke it was `B+0xF580`, `0x2B0C` past the furthest B was published (`B+0xCA74`). The 11 KB it consumed in B was the buffer's pre-run content. The per-stream frontier stops both walks (L132). |
-| L127 | **The parser reached the bad word through zeros.** `last_cmd=0x0` with `next=0xcbf580` puts the previous header at `0xcbf57c` and makes it `0x00000000` — a count-0 NOP. The NOP path had no frontier check, so zeroed space parsed as an unbounded NOP stream. The frontier check now runs before every fetch (L132). |
-| L130 | **The probes hid the event, because every test in them assumes the frontier is numerically ahead.** `addr > put`, `target > put` and `prev_put - put > 0x10000` are all numeric, and here the buffer being read has the *lower* address. A run with 21 errors therefore produced 104 clean-looking diag lines and no chain. The discriminating test is a slab comparison, `(addr ^ put) & ~0xffff`, logged as `jump cross-buffer`. |
-| L138 | **The producer stall at a later frontier was the L140/L142 class, not the label path.** Run M parked at `addr=0xcbe890 frontier=0xcbe890 put=0x10ae994 word=0x0`; the guest kept running. Run O reproduced it in gameplay and showed the word at the parked frontier changing (`0x10000` → `0x4025`); the frontier link test then accepted a data word. Run P excluded the label path (host-store labels, same freeze). The park-area rule (L140) and `redirect` (L142) close it. Device-confirmed run V: zero desync. |
-| L141 | **The link a chunk publishes could be gone before the parser read it.** Superseded by L145. |
-| L144 | **The boot handover lost the link before PUT moved away.** Superseded by L145. |
+| L176 | Interpreter (never runs), frame overlap (`MTL_PROBE_SERIALISE=1` + tracked heaps still glitch), argument tables (contents identical at encode; the SoC captures tables at encode), pass attachments (Load or Clear, never DontCare), the resolution-scale clone, heap residency, conditional render (two tiny effect draws per window). |
+| L160 | `MTL_PROBE_REPLACE_TEXTURES=1` (uniform red) removes the patches but also removes UV, mip, wrap, filter, format and aliasing — it only proves the resolved unit reaches the shader. With `MTL_PROBE_REPLACE_UNITS=0` the car/environment corruption goes, so **unit 0 carries the race patches**; the menu glyph unit is distinct and the minimap is a separate null/zero bind (L49). |
+| L181 | `alpha_ref` in the whole 2026-11-08 capture is only 0.0 or 1.0 (97641 vs 12446); fp-75's font draws are always 0.0. The failing glyph draws cannot be failing a *changed* alpha test. |
+| L177 | The C1/C2/C3 fixes and the cube-face clear did not move the defect; they stay in for their own correctness. The recorded shape matches "after the sample or the alpha/ROP path", not "wrong texture" or "wrong draw state". |
+| L182 | Menu loss and race loss share the shape: same scene, same programs, identical inputs, one frame of wrong pixels. The remaining variable is the GPU's execution of that frame, or state the recorded draws do not carry. |
+| L164 | C4 and C7 are not code defects (see §3.2). |
+
+## 1.5 Withdrawn and superseded claims
+
+| id | claim and why it fell |
+|---|---|
+| L180 | "The failing frame did not survive capture." True only for the 2026-11-08 run; for 2026-11-07 it is false (L183, L189). |
+| L179 | The four ranked leads are superseded: the fp-class "missing draw" premise is withdrawn (L184), `alpha_ref` is constant in the draw set (L181), and the red-texture run is requalified (L160). Current ranking is §1.6. |
+| L153 | The glyph loss is a real one-frame surface defect, and the panel *is* drawn — the earlier "no draw covers the panel" was a decoder y-flip. Corrected by L155. |
+| L154 | "The defect frame's inputs are not in the capture" applied to the 2026-11-03 run only; the 2026-11-07 window contains the failing frame's full ring (L183). The `global_id` vs log-`diagnostic_draws` mismatch still holds. |
+| L151 | The 2026-11-03 F12 press hit `diagnostic_capture_window_limit = 5`, so that run had no ring for the defect frame. Fixed since (L158). |
+
+## 1.6 Open leads, ranked
+
+1. **Pin the painting draw.** The level-3 "quad" trace (§1.9, L190) lists every draw of at most six
+   vertices covering at least half the clip; start there, then project the candidates of
+   `frame-6189-m1` into the target bbox found in §1.3 (x 682..703, y 576..580). For hand-bisection,
+   `MTL_PROBE_ONLY_DRAW=<lo>-<hi>` isolates the one draw in a single run; the `MTL_PROBE_PIXELS`
+   readback names what that draw painted, fp/vp hash included. The
+   livery draw set is already identified: fp98/fp109/fp113/fp119/fp40 with vp21/vp92/vp102/vp112/vp105
+   and textures `c73dea00`, `c7576880`, `c68d5080`, `c7409500`, `c75cbe00`, `c73de480`, `c7721400`.
+   `capture.py:read_components` needs a bounds guard first (it throws `struct.error` on out-of-range
+   attrib offsets in some fp-128 records).
+2. **`MTL_PROBE_REPLACE_TEXTURES=uv|checker` on unit 0 in a race window.** If the patches become the
+   wrong part of the pattern the fault is UV/mip/sampling; if they stay flat black the fault is after
+   the sample. `MTL_PROBE_FORCE_LOD0=1` (state-only) separates mip/LOD in the same run.
+3. **The `0x50110000` identity split (L172).** Determine which of the four host images the livery and
+   glass draws bind, and whether that image is ever written this frame. The flat `0x808080` sample is
+   the strongest candidate for the grey translucent patches.
+4. **`C5` — the alpha test is a per-pixel kill** (`MTLFragmentProgram.cpp:363-415`, `612-615`). A kill
+   has exactly the shape of "the quad rasterised, some pixels vanished". Needs a menu-only run with the
+   test compiled out after boot.
+5. **`C6` — `max_lod` is clamped to the guest mip count, not the host count**
+   (`MTLSamplerState.cpp:168-176`). Only unsafe when the last resident level is undefined; C1 now
+   defines every level it clears, so this is a low-rank hypothesis.
+6. **Where in the code the evidence points** *hypothesis*: the sampled-image identity is decided in
+   `MTLTextureCache::resolve_texture_bind` (deferred gather creates a *new* image at the first bind,
+   `MTLTextureCache.cpp:848`), and the ordering of that image against the render targets and against
+   the current frame's face pass is recorded by `MTLGSRender::record_pass_hazards` (read set taken from
+   `referenced_textures_mask`, write set from the attachments) feeding `pass_scheduler`
+   (`MTLPassScheduler.cpp:103-244`). Both are worth an audit against the measured `0x50110000` split,
+   because the scheduler's hazard identity is the guest *range*, and a deferred image has no guest
+   bytes of its own.
+
+## 1.7 Menu text, rear-window smear, minimap
+
+| id | finding | state |
+|---|---|---|
+| L147 | **Menu text loses individual glyphs; the title line is correct.** `S art Race`, `ON_INE BATTLE`, `R dg e St te G AND PRIX` — uppercase survives, single letters vanish. A null bind would black the whole string and a stale atlas would still show glyphs, so the atlas is bound and mostly correct and individual cells are black. | open |
+| L155 | **The per-glyph loss is a partial quad and it moves between frames.** `a` keeps only its bottom serif, `s` rows 179–183 and 192–193, `i` the dot and rows 192–193 — a *subset* of the correct glyph, which a lost draw, wrong transform or wrong UV cannot produce. All 12 quads carry identical recorded state (pipeline, sampler hash, atlas `c441e080` 2048x2048 BC2, constants); only ring offsets differ. | measured |
+| L175 | **Reproduced in the 2026-11-08 run (shot 1658).** In "best time against rivals from around the globe…" the `be` of *best*, the `m` of *time* and the `n` of *around* are missing; each keeps a small fragment. Atlas byte-identical in every frame; the failing quads' state matches the passing ones. | measured |
+| L146 | **The rear window is smeared.** Explained by L171: the probe cube is one frame stale, so the reflection trails the moving world. The window also reads near-black because the retained 512x512 probe is mostly dark sky/shadow. | open (mechanism known) |
+| L49 | **A texture is bound at guest address `0x00000000`** — DXT1 8x8, all-zero content, `texture/bind null` stayed 0, so the descriptor carried a handle. The minimap's black is a separate null/zero bind from the car patches (L160). | open |
+
+## 1.8 Older car probes, still open, low priority
+
+| id | finding | state |
+|---|---|---|
+| L89 | Every referenced unit resolves (`texture/resolved` 471 712, `retained` 616 234; `bind null`/`dropped` never fire) and the slot numbering agrees with the MSL. Unmeasured: the content bound at the car draw. | open |
+| L97 | The car's paint texture is one BC1 block repeated (`c0 == c1 == 0x841f`, indices 0) in guest and conversion alike — a faithful copy; whether that colour is intended is a shader/constant question. | open |
+| L98 | **The car was once drawn and shaded black** (draws 207000/207200): correct silhouette filled with black. Not re-captured since L116; L97/L99/L105 remain the last colour-path measurements. Current report is intermittent patches, not a full silhouette. | open |
+| L99 | One presented surface held three menu panels side by side at x = 0/427/853 while the F12 shot held one full-size panel. Metal viewport and scissor are full 1280x720, so the thirding is guest-side. | open |
+| L105 | The car-select probe points are not on the car: they sit on background that a later draw overwrites (`fp 21 vp 15`, then `fp 67 vp 31`). L99 is a prerequisite. | open |
+| L50 | The video surface is allocated at screen size and sampled at video size (host 1280x720 at `0xc0880000`, guest descriptor 1408x768) — the same identity split as L172/L173. | open |
+
+## 1.9 Instruments added 2026-11-09 (deterministic bisection)
+
+| id | finding | state |
+|---|---|---|
+| L190 | **Deterministic instruments, added to the backend.** All are `TODO(excise)`, all are default-off, and the three that change execution are state-only (no shader is rebuilt, the pipeline archive is untouched). `MTL_PROBE_ONLY_DRAW=<n>\|<lo>-<hi>` encodes only the named draws (the `draw <n>` id) and silently drops the rest, so the target after the run holds exactly the named draws' contribution; `MTL_PROBE_PASS_SENTINEL=1` makes every pass clear its colour attachments to magenta instead of loading, which separates *no draw painted this* (sentinel survives) from *a draw painted this*; `MTL_PROBE_POISON=1` fills every freshly allocated texture and every shared buffer with a word derived from its creating guest address and logs `word 0x%08x` with it, so a frame that samples a resource no draw wrote carries the word and the log names the allocation; a level-3 "quad" trace logs every draw of at most six vertices whose scissor covers at least half the clip, with fp/vp ucode hashes, primitive, coverage, blend mask and every referenced unit's guest address and host image id; the per-draw `MTL_PROBE_PIXELS` readback now prints the fp/vp ucode hashes with the draw id, the patch coordinates and the means. Interpretation matrix: sentinel in an otherwise-clean region → coverage/alpha-test; sentinel blended with a dark colour → partial-alpha write in that pass; non-sentinel content in a place that should be untouched → a real draw wrote it (start the `MTL_PROBE_ONLY_DRAW` bisect from the quad trace). The only-draw mode answers "which one draw paints the grey block" in a single binary search by hand. The level-5 sampled-image dump dedupes on the **host image pointer**, not the guest address: one guest address names several images at once (L172), and the old key silently kept the first dump and dropped the rest — the reason the present-chain input of `0x50110000` 1280x720 (the `fp-58`/`fp-73` binds) never reached the dump. The sample dump now also prints the `image %p` of the written file, so a file in the capture directory resolves back to the draw's bind. | open (instrument crashed runs with MTL_PROBE>=3 until L197/L198; usable again) |
+| L198 | **The "Xevious-entry SIG" is an instrument bug, not an RSX, guest or backend defect.** Signature: `SIG: Thread terminated due to fatal error: Verification failed (object: 0x0) (in file …/draw_call.hpp:303[:4], in function 'const draw_range_t &rsx::draw_clause::get_range() const') (errno=60)`. Backtrace with `RPCS3_TRACE_ON_SIGNAL=1` (`build/probe/stdout-bt-20261108-164436.log`): `ensure → inlined IJLm1EEE visitor-dispatcher cold block → MTLGSRender::end_draw + 6728 → rsx::core_renderer::end → nv4097::set_begin_end → run_FIFO → on_task → cpu_task`. `draw_call.hpp:303` is `ensure(current_range_index < draw_command_ranges.size())` in `get_range()`. The clause is left with `current_range_index == ~0u` by `draw_clause::compile()` (that is the "clause is open, nothing scheduled yet" state, and it is also what `empty()` and the empty-range guards key off); only `draw_call.begin()` re-arms subdraw 0. The crashing call was the level-3 overlay-shortlist block's `draw_call.get_elements_count()` (added by `9a0fa8652`, gates on `probe::at_least(3)`), executed *before* `begin()` — `~0u < ranges.size()` never holds, so the ensure fired on the first non-inline RSX draw in the run. That is why every `MTL_PROBE>=3` launch today died at the same venue (draw 0, `command 1 (array), primitive 5 (triangles), 256x64 fmt 0xd`, the first RSX draw after the FMV; FMV flips carry no RSX draws), while `MTL_PROBE` unset ran to a manual quit and `MTL_PROBE<=2` cannot enable the block. Corroborated three ways: (1) source-level — that block was the *only* clause-index-relative query anywhere before `begin()` in `end_draw`; (2) binary-level — the crash PCs land in the shared outlined ensure-throw landing pad, ICF-merged across the `IJLm0`/`IJLm1` visitor-dispatcher cold blocks (identical vaddrs in `nm`), which is why the stack *appears* to fault inside the indexed-arm visitor; it does not — the ensure's source location pins it to `get_range()`, and the block is the call that reached it with `~0u`; (3) trigger-correlation — runs before `9a0fa8652` could not crash this way (the block does not exist), and the pre-instrument reference run `build/probe/probe-final-20261108-005622.log` encodes the same draw to `geometry 0, subdraw 0, first 0, count 3` and runs on. The 2026-11-08 `.ips` reports (12:41, 14:58) are the orthogonal Qt teardown crash on the main thread (`emergency_exit` inside `QGuiApplicationPrivate::createPlatformIntegration`), not the RSX thread, not this defect. Fixed by L197 (the block moved after `begin()`); GPU-free tests 560/560. | fixed (L197) |
 
 ---
 
-# 4. Environment and non-Metal
+# 2. Open — presentation and performance
+
+| id | finding | state |
+|---|---|---|
+| L143 | **`nextDrawable` is a tail, not a 20 ms average.** Run Q: 4.30 ms over 300 calls, 922 ms of it one call; without it ~1.2 ms. `present/flip` 7.32 ms avg / 923 ms max; `recorder/present drawable wait` 267 µs avg / 71.9 ms max. The 922 ms sample is the CAMetalLayer timeout returning nil (`MTLPresenter.cpp:172`), and it blocks the FIFO thread, while VK's `vkQueuePresentKHR` does not. Steady-state cost is dominated by `frame/gpu wait` (9.14 ms avg) and `recorder/begin frame/wait feedback` (2.50 ms avg / 750 ms max), not by the acquire. Two designs: offscreen compose plus a present thread (recommended), or a bounded acquire on the RSX thread. | open |
+| L14 | Cold boot stalls at the title video (frame 306, 75 pipeline misses; 302 of 306 flips refuse the compose because no display buffer is configured). Warm boot renders. | open |
+| L31 | 10.1 % of flips present a clear (`compose ran` 3420 + `refused` 383). Run 1: 7042 flips, 6219 composed, 823 refused; run 2: 535 refused. | open |
+| L40 | The video plane comes from a path that almost never runs: the 1408x768 A8R8G8B8 surface is sampled with `upload_context = framebuffer_storage` on 223 of 669 binds but read back only twice in 300 frames, so the sampler sees whatever the last readback left. Same family as L172. | open |
+| L47 | 836 guest faults per run, all handled, 600 µs average, 136.5 ms maximum; the RSX-thread case flushes in place. | open |
+| L48 / L30 | The semaphore wait is a spin: 65 297 798 iterations in 300 frames (218 k/s, 1.93 s CPU), ~190 k per frame. | open |
+| L39 | One texture readback blocked the RSX thread for 134.8 ms to move 6 291 456 bytes. | open |
+
+---
+
+# 3. Closed — code fixes from this investigation
+
+All of these changed code, carry GPU-free tests where noted, and are device-confirmed unless stated.
+They are compressed to one line each; the original hypotheses are in git history.
+
+## 3.1 Renderer and resource path
+
+| id | fix |
+|---|---|
+| L1 / L10 | Cube descriptor set `arrayLength = 6` (Metal requires 1, aborting inside `heapTextureSizeAndAlign`) → legal extent: one texel minimum, square face, capped mips; six faces ride the upload slice. |
+| L194 | **The surface/texture packed-16-bit boundary set is closed (TX20, TX14 partial, SF14).** The Apple `R6G5B5` host upload now expands to BGRA8 in the shared uploader (the same fold Intel took; `VKFormats.cpp`'s Apple arm maps all Apple archs to `B8G8R8A8_UNORM`, and Apple GL — never built on Apple — maps the format to `GL_BGRA8`); Metal's `R6G5B5` staging-buffer sizing follows the expanded pitch (it previously over-allocated 2 bytes/texel against a 4-byte/texel upload). The unknown-format report is bounded to one error per distinct value (32 values, then one warning) with a `texture/unknown format` coverage latch on both lookup arms; failing the draw was deferred, not taken. `r5g6b5` (5-6-5 field swap, involutive) and `x1r5g5b5_z1r5g5b5`/`_o1r5g5b5` (full repack, guest `x1/o1` bit carried through the host alpha field, kept — VK memory behaviour) surfaces now decode on the guest→surface leg and encode on the read-back leg (`MTLSurface.cpp` `load_background`/`write_to_memory`, and the texture-cache `framebuffer_storage` read-back, the colour counterpart of TX12). Inside-Metal rendering is untouched; the R2 4-site unification stays unimplemented. X32_FLOAT framebuffer/texture layouts match the upstream RR7 fix (#7727, GL/VK only) — Metal already returned `{Red, Red, Red, Red}` on both the surface and the texture paths. The ROP epilogue (`RSXROPEpilogue.glsl`) is byte-identical across VK/GL/Metal; `_DISABLE_EARLY_DISCARD` is set the same way on Apple in all three backends. The upstream `alpha test` fixes touch only fp-9/fp-8 (HUD); no livery/trunk draw compiles in the alpha test. **Backend comparison, completed this session:** VK/GL/MTL share the epilogue; MTL's X32 handling matches the upstream-fixed reference; the upstream RR7 graphic issue was the X32_FLOAT native-layout red tint (closed by #7727) and the NVIDIA fp16/precision trees issue (#5860) — neither is this defect; a local scan of all alpha/ROP commits and the GitHub history found nothing class-matched to the livery-clause black cells; `video`/`colour native layout` on Apple was already correct. **kosmickrisp** (in `.kk-mesa/`, Mesa 27.0.0-dev) is a Vulkan-conformant Vulkan→Metal 4 layer for Apple silicon, not an RSX implementation: it emits `discard_is_demote` + `msl_nir_fake_guard_for_discards` (helper-invocation guard), lowers A2C with `nir_lower_alpha_to_coverage` before MSL, and hands `VK_FORMAT_R6G5B5` raw to Apple via the expand arm only on Apple (same rule Metal now follows). It does not address this defect class either; nothing in it is ported. GPU-free tests 560/560. No device run yet; the instrumented bisect (L190, §1.6) remains the open experiment. |
+| L196 | **The TX20/TX14 neighbours closed in one pass.** (1) Surface-format loud-log: the three default arms in `MTLFormats.cpp` share `report_unknown_surface_format` — one error line per distinct value (32 cap, one warning after), plus a `surface/unknown format` latch per event; colour and depth namespaces share one set (bit overlap ≤ 4 values, by design). (2) Packed texture read-back: `shader_read` for `CELL_GCM_TEXTURE_R6G5B5` on Apple now encodes the BGRA8 plane back to the guest pack (`encode_r6g5b5_plane`, truncation inverse of the upload expand, the VK-accepted lossy round trip); the guest receives the exact bytes. Every other 16-bit packed texture read-back stays raw, as VK's own. (3) Apple GL (not built on Apple today) maps every remaining packed colour format to `GL_BGRA8` + BGRA/`UNSIGNED_INT_8_8_8_8_REV`, consistent with the shared-uploader fold. (4) The stale Intel row in `test_rsx_metal4_state.cpp` now expects identity for `D1R5G5B5`. (5) `get_present_source`'s flip-fallback packed16 case was proved impossible (`av_format` is only `A8R8G8B8`/`W16_Z16_Y16_X16_FLOAT`; packed16 surfaces take the SF14 encode leg above the fallback) and left untouched with evidence. GPU-free tests 560/560. Intel-Apple `upload_texture_data` staging sizing for the remaining packed formats was left alone (no Intel target on macOS 27; recorded in `DEVIATIONS-TEXTURE.md`). |
+| L197 | **The FMV/XMB-entry SIG at `draw_call.hpp:303` is closed (L198).** The level-3 overlay-shortlist block in `MTLGSRender::end_draw` called `draw_call.get_elements_count()` before `draw_call.begin()`, i.e. inside the `~0u`-index window the shared RSX clause is in after `draw_clause::compile()` (`current_range_index = ~0u`; only `begin()` re-arms subdraw 0). The range query enforced `~0u < ranges.size()`, threw `Verification failed (object: 0x0)` and aborted the run on the first non-inline RSX draw with `MTL_PROBE>=3` (introduced by `9a0fa8652`, 2026-11-08 11:00). The block — pure logging, no state — now runs after `draw_call.begin()`, which re-arms subdraw 0 and makes the count query land on a valid range. The same pattern was audited away everywhere else in the backend: the only other clause-index-relative reads are post-`begin()` (the emit-geometry diagnostic, the shared visitor) or index-independent (`pass_count()` after the subdraw loop). GPU-free tests 560/560. The crash was never a game defect; it was our own level-5 path. |
+| L198 | **The "Xevious-entry SIG" is an instrument bug, not an RSX, guest or backend defect.** Signature: `SIG: Thread terminated due to fatal error: Verification failed (object: 0x0) (in file …/draw_call.hpp:303[:4], in function 'const draw_range_t &rsx::draw_clause::get_range() const') (errno=60)`. Backtrace with `RPCS3_TRACE_ON_SIGNAL=1` (`build/probe/stdout-bt-20261108-164436.log`): `ensure → inlined IJLm1EEE visitor-dispatcher cold block → MTLGSRender::end_draw + 6728 → rsx::core_renderer::end → nv4097::set_begin_end → run_FIFO → on_task → cpu_task`. `draw_call.hpp:303` is `ensure(current_range_index < draw_command_ranges.size())` in `get_range()`. The clause is left with `current_range_index == ~0u` by `draw_clause::compile()` (that is the "clause is open, nothing scheduled yet" state, and it is also what `empty()` and the empty-range guards key off); only `draw_call.begin()` re-arms subdraw 0. The crashing call was the level-3 overlay-shortlist block's `draw_call.get_elements_count()` (added by `9a0fa8652`, gates on `probe::at_least(3)`), executed *before* `begin()` — `~0u < ranges.size()` never holds, so the ensure fired on the first non-inline RSX draw in the run. That is why every `MTL_PROBE>=3` launch today died at the same venue (draw 0, `command 1 (array), primitive 5 (triangles), 256x64 fmt 0xd`, the first RSX draw after the FMV; FMV flips carry no RSX draws), while `MTL_PROBE` unset ran to a manual quit and `MTL_PROBE<=2` cannot enable the block. Corroborated three ways: (1) source-level — that block was the *only* clause-index-relative query anywhere before `begin()` in `end_draw`; (2) binary-level — the crash PCs land in the shared outlined ensure-throw landing pad, ICF-merged across the `IJLm0`/`IJLm1` visitor-dispatcher cold blocks (identical vaddrs in `nm`), which is why the stack *appears* to fault inside the indexed-arm visitor; it does not — the ensure's source location pins it to `get_range()`, and the block is the call that reached it with `~0u`; (3) trigger-correlation — runs before `9a0fa8652` could not crash this way (the block does not exist), and the pre-instrument reference run `build/probe/probe-final-20261108-005622.log` encodes the same draw to `geometry 0, subdraw 0, first 0, count 3` and runs on. The 2026-11-08 `.ips` reports (12:41, 14:58) are the orthogonal Qt teardown crash on the main thread (`emergency_exit` inside `QGuiApplicationPrivate::createPlatformIntegration`), not the RSX thread, not this defect. Fixed by L197 (the block moved after `begin()`); GPU-free tests 560/560. | fixed (L197) |
+| L199 | **The level-5 deep dumps are disk-bounded and the log writer survives ENOSPC (L198's sequel; today's post-L197 run died from ENOSPC, not the emulator).** The 17:21 run wrote 13 GB in 188 s (46 122 `host-sample-*`, 416 `host-present-*`, one blob per drawn texture per frame), filled the volume, and the log writer's `ensure(written == size)` in `fs::unix_file::write` killed the run — reading as a game crash. Two device-confirmed defects, two fixes. (1) The deep image dumps are now compile-time bounded: at most **4 frames** of a capture window dump sampled images (the failing frame is the first captured frame), at most **384** image files per run reach the disk (384 is generous for the RR7 unit census), and at most **24** present-source blobs per run; the remaining dumps are counted, not written, and the run budget prints one notice when it runs out. A dump whose `fwrite` comes short of the declared size now prints a notice naming the file and the truncation instead of silently producing a corrupt capture. (2) `fs::unix_file::write` degrades on `ENOSPC`/`EDQUOT`/`EFBIG`/`EROFS`: it keeps the bytes already written and stops, instead of the ensure() that aborted the process. The log writer detects a short write and shuts its file sink down, so a full disk now degrades to a mute run, not a crash; a save writer sees a partial result, not an abort. GPU-free tests 560/560. The knob surface was also collapsed the same session (33 env vars → 7: `MTL_PROBE`, `MTL_PROBE_LOG`, `MTL_PROBE_DUMP_DIR`, `MTL_PROBE_FRAME_COUNT`, `MTL_PROBE_ONLY_DRAW`, `MTL_PROBE_PIXELS`, `MTL_PROBE_VARIANT`; all execution-changing experiments ride on `MTL_PROBE_VARIANT=<arm>[=<arg>]` — `replace-textures`/`replace-units`, `no-alpha-test`, `no-depth`, `no-cull`, `sentinel`, `poison`, `heaps`, `serialise`, `force-fp`/`force-fp-tex`, `lod0`; anti-flood and window limits are compile constants). | fixed |
+| L200 | **The RCA pack: the level-5 census and byte-bypass arms that make a failing-frame capture self-attributing (2026-11-08).** An audit of every logging/probing/dump surface found six gaps (A1–A6 in `RCA-INSTRUMENTATION-2026-11-08.md`) where the answer to a decisive question was not recorded anywhere. (1) A per-address census (uploads + bytes, BC flat-zero blocks for DXT, samples, never-uploaded list, unit-as-target hazard tally, frame ranges) is kept for the whole run and printed when a capture window disarms and at renderer teardown, as `Metal 4: census …` lines; 384-address cap, fixed order, sink anti-flood safe (not MTL_NOTE). (2) Every DXT upload is scanned for flat-zero BC blocks at the upload edge — "uploaded, content zero" now reads out of the report, not out of a disk blob. (3) `MTL_PROBE_VARIANT=dump-tex=<hex>`: every upload of that address (raw + converted, level 0) and every per-draw sample of it writes its full region, bypassing dedupe keys and run budgets; 16 files and 64 MB per run. (4) `MTL_PROBE_VARIANT=dump-draw=<id>`: the named draw's raw persistent and volatile vertex streams dump, bypassing the capture-window gate; 16 MB per run. (5) Per-draw hazard check: a fragment unit sampling an address this draw is also bound to write is counted into the census (the `0x50110000` identity-split class). (6) The census keys upload/sample against the frame counter (`census_note_frame` in `diagnostic_frame_opened`). Every arm rides the existing 7 knobs; no new env vars; every writer bounded. GPU-free tests 560/560. Device confirmation pending the next launch. | open (device-confirm pending) |
+| L13 | The label release raced the FIFO → `supports_host_gpu_labels = true`; the release waits its slot. |
+| L19 | The sampled-texture dump computed a DXT span 16× too large → block dimensions. |
+| L41 / L43 / L44 | Metal never cleared a reused image, and neither Metal nor GL checked extent/mip/format on reuse → clear a not-fully-uploaded image, discard a non-fitting one. |
+| L60 / L66 / L71 | 63 consecutive draws refused because `begin()` never prepared the framebuffer → `begin()` binds `context_draw`; the fast path tests context, `rtt_config_dirty`, `attachments.valid()`, `ignore_change`, like VK/GL. |
+| L70 / L55 / L58 | The accurate FIFO retry was off by one, reading the second argument as the first → rewind to the header and clear `m_remaining_commands` on the empty path. |
+| L72 | Metal 4 captures the argument table at encode time, so an unwritten slot kept the previous draw's binding → `argument_binder::address` writes on every change, zero included. |
+| L107 | The binder's stage-only cache was **not** a bug: tables are per recorder slot and both binders reset in `begin()`. |
+| L108 | The FIFO word cache could serve a stale word (control-command shortcut set bounds without storing) → the shortcut writes the fetched word back in guest byte order. |
+| L116 | **The video quad was culled, not skipped.** All traced quads are CCW in NDC and `capture_front_face` inverted the guest's `cw` on top of the negated viewport height, so the winding test was inverted twice (DEVIATIONS-DRAW D5). The FMV, Xevious panel and early car silhouette render after the fix. |
+| L12 / L11 | The intro FMV, course-select video, in-race FMVs and the Xevious panel were black → fixed by L116; decode/upload were already faithful (L95, L96). |
+| L148 | A scissored colour clear became a whole-attachment clear (`open_pass` chose the load action from `clear_color_fast` alone) → the colour load action also requires `(clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK)`. **Visual attribution measured false** — the patches survived; correctness fix only. |
+| L156 | Mega Man 9 crashed on its first interleaved draw: `calculate_required_range` read a null `ctx` because `on_bind_context` never bound `frame_resources::vertex_layout` → it now calls `vertex_layout.set_context(ctx)`. Test `MTLContract.VertexLayoutMustCarryTheBoundContext`. |
+| L157 | The renderer was replaced after every flip, re-running the shader preload in a loop (12 cycles in 18 s): `m_renderer_info` was stored before `on_init()`, so Metal's null-SoC id (`Metal`, no Apple A18 Pro suffix) never matched the configured `Metal-Apple A18 Pro`. Assigned after `on_init()` in `on_task` and `reset_renderer`. |
+| L159 / L165 | **The RSX thread faulted inside IOGPU during teardown** (`Segfault reading 0x98`, `IOGPUDeviceGetNextTraceID + 40`). Root cause: `on_exit` drained the pending XDR-unmap invalidation after the frame was submitted, so `open_compute` touched a slot whose command buffer had already been ended. `frame_slot` now tracks `buffer_open`; `open_copy_encoder`/`open_pass` re-enter a closed slot first. Two consecutive clean quits. Also added the env-gated fatal-fault backtrace (`RPCS3_TRACE_ON_SIGNAL=1`). |
+| L161 | **C1: `clear_texture` sized compressed levels with floor division** → `get_texture_level_extent` rounds up to whole blocks with a minimum of one, shrinks 3-D depth per level, and drives staging size, zeroing and `copyFromBuffer` from one extent; the clear repeats over all six faces. Tests `MTLTextureLevelExtent.*`. |
+| L162 | **C2: the readback used a block index as a texel origin** → `get_texture_readback_region` converts the byte offset to a block origin, scales by the block edge, and keeps the raw byte offset as the staging destination. Tests `MTLTextureReadbackRegion.*`. Readback only, so it changes evidence, not on-screen sampling. |
+| L163 | **C3: the reuse test ignored depth and compared the raw mip count** → `create_new_texture` compares width, height, depth, format and level count against `normalize_texture_extent(...)`. Tests `MTLTextureExtent.*`. |
+| L152 | The capture decoder was out of sync with `draw_record` (62 names over 298 scalars) → explicit `(name, count)` layout, asserted counts, arrays regrouped. All captures decode. |
+| L158 | The forward capture was one frame wide while the ring burst was six → `dump_frame_count() = max(6, capture_frame_count() + 1)`; each record also carries the Metal `texture_id[16]`/`sampler_id[16]` (record 1200 → 1456 bytes). |
+| L90 | The probe file opened with `"w"`, truncating every run → follows `MTL_PROBE_LOG`. |
+| L92 | The diagnostics perturbed the frame they measured: four sites read guest memory with `vm::read32`, faulting the `PROT_NONE` target and flushing it → all four read through `vm::get_super_ptr`. |
+| L93 | The pipeline archive suppressed every shader dump → moved aside before a capture run; dump limit 512. |
+| L109 | No diagnostic separated "discarded" from "never ran" → `MTL_PROBE_NO_ALPHA_TEST` compiles the alpha test out (own archive). Its depth half was withdrawn (L112); the surviving discriminator is L114. |
+| L33 / L34 | The probe could not see correctness; fourteen latches used a ternary name → per-draw id/format/readback records and plain latches. |
+| L78 | `MTL_SHADER_VALIDATION=1` crashes Apple's Metal 4 debug compiler → keep `MTL_DEBUG_LAYER=1`, drop shader validation (L79). |
+| L3 / L15 | `should_skip_draw` hid its reason → predicates logged for the first 64 refusals. |
+| L16 | Four `Resource was destroyed whilst holding a resource reference!` at shutdown → teardown only; the clean `rc=0` run proves it is not the fatal path. |
+| L37 | `0x00010000` is the argument of the preceding `reg 0x75C` write, not a method word → corrected; folded into the L145 class. |
+
+## 3.2 Code audit outcomes
+
+| id | defect | outcome |
+|---|---|---|
+| C1 | Compressed mip extents with floor division in `clear_texture` | fixed, L161 |
+| C2 | Block index used as a texel origin in `copy_texture` | fixed, L162 |
+| C3 | Reuse test ignored depth and compared the raw mip count | fixed, L163 |
+| C4 | Aliasing ordered but not invalidated | **not a code defect** (L164): the read note carries the texture's full guest footprint (all mips and faces), the write note the surface's level-0 footprint, the same Metal object matches by identity, and mip bytes a surface never wrote are stale by contract. |
+| C5 | The fragment alpha test is a per-pixel kill | open, §1.6 lead 4 |
+| C6 | `max_lod` clamped to the guest mip count | open, low rank, §1.6 lead 5 |
+| C7 | Readback and upload copy only slice 0 / level 0 | **not a defect** (L164): the shared cache flushes one section at a time and VK does the same (`VKTextureCache.h:212-300`); cubes and 3-D are covered by the upload/clear loops. |
+
+**Not found by the audit, and worth as much:** the bind path writes every changed argument-table slot
+and resets both binders per frame (L107), the view cache keys on the composed swizzle, and the format
+map matches VK/GL for every guest format in the census.
+
+---
+
+# 4. Closed — FIFO, labels and semaphores
+
+Everything below is fixed or superseded. The two load-bearing findings are L149 (nested `CALL`, fixed,
+device-confirmed by long runs) and L145 (honest GET, fixed, device-confirmed runs U and V).
+
+| id | finding | state |
+|---|---|---|
+| L149 | **A nested `CALL` is a legitimate hardware tail call; RPCS3 rejected it.** The guest enters the wait trampoline with `CALL 0x1544` from `0x10d1ffc`; `0x1544` is `NV406E_SEMAPHORE_ACQUIRE` and `0x154c` is `JUMP 0xcb0000`. The dispatch history reaches the aligned header `0x00c9a982` = `CALL 0xc9a980`, a mapped static routine. Hardware has one return-address register: the inner `CALL` overwrites the outer return, which is dead because A ends in a `JUMP`, not a `RET`. RPCS3 (and upstream) rejected the second `CALL` with `CALL found inside a subroutine`; `recover_fifo` restored the stale outer return and failed identically (21 recoveries in 2 s → `Dead FIFO` → fault). **Fix:** a `CALL` overwrites `fifo_ret_addr`, and `stream_tracker::on_call` saves the newest caller's stream unconditionally, so `on_return` restores the chunk the parser occupies and `add()` cannot recycle it mid-parse. Test `FifoStreams.NestedCallKeepsTheChunkItReturnsInto`. Deliberate divergence from upstream. | fixed |
+| L145 | **GET is an acknowledgement, not a read-ahead hint.** `sync_get()` published the prefetched block end, licensing the guest to recycle a chunk the parser was still in (run T: PUT moved to `A+0x9d4`, the parser spent 188 ms in the label acquire, the guest reused the link, the parser arrived on data). **Fix:** `sync_get()` publishes `m_fifo_pos` only; `cellGcmCallback` writes the jump before publishing PUT; the frontier is enforced in fast mode. Tests 12/12 `FifoStreams`. Device-confirmed runs U (2892 handovers, 0 desync) and V (zero `Dead FIFO`, zero desync, zero `FIFO error`, six redirects). | fixed (device-confirmed) |
+| L132 | The desync was a cached word at or past PUT → `stream_tracker` keeps `{base, frontier, linear}` per stream, attributes each PUT to its stream, consumes a frontier word only if it is a jump/call/return, caps the cache at the frontier, and dispatches a method packet only when fully published. | fixed |
+| L133 | The `put == addr` early return bypassed the frontier rule → the equality now enters the frontier path; a link is consumed as one word, a data word returns `EMPTY`. | fixed |
+| L140 | The L138 park was the guest's park area, and the frontier rule parked the parser on its first word (`0x3020300` holds a count-0 NOP the guest patches later) → a jump target above every stream that PUT does not name is added unbounded. Test `FifoStreams.ParkAreaAboveStreamsIsReadUnbounded`. | fixed |
+| L142 | A stream abandoned mid-command → `stream_tracker::redirect` marks the chunk stale and moves the parser to the published stream's base; `recover_fifo` keeps the known streams. Device-confirmed, six redirects in run V. | fixed |
+| L131 | **The label release drained the GPU on the RSX thread.** `release_GCM_label` now stages the guest word and emits one compute-encoder `copyFromBuffer` at the next encoder boundary under one queue-scope `All → Blit` barrier per batch; the shared code skips its CPU store. | fixed |
+| L134 | The backend label batch was never submitted (`flush_label_writes` ran only at the next encoder boundary, `commit_pending_labels` only from a path this guest never reaches) → `release_GCM_label` commits immediately. | fixed |
+| L135 | A semaphore acquire could accept the pre-release word while the GPU label write was in flight → `sync_label(address)` commits the buffer and waits only that slot's feedback. | fixed |
+| L136 / L137 | A no-copy import over the guest window is fixed at creation, but the guest maps the RSX report block 14 s later → a per-page 64 KiB no-copy import per label page, created at the first release and published to the residency set. Run M confirmed `sudo=0x1000000 guest=0x1000000`. | fixed |
+| L139 | The label path follows `host_label_synchronization` again: off (default) is the host store, on is the GPU write with the per-page import (L137) and the acquire wait (L135), polled through a `MTLSharedEvent` timeline. | fixed |
+| L129 | VK/GL write the label GPU-side and keep work in flight; Metal drained the GPU on the RSX thread → L131 removes the drain. | fixed (L131) |
+| L128 | `sync_get()` could publish GET ahead of the parsed position → closed by L145. | fixed (L145) |
+| L84 / L85 / L83 | **GET sat on an argument, confirmed at word level.** The 256 words before it were a well-formed header/argument cadence; episode B landed on the argument `0x10000` of `reg 0x75C` at `0x10a28c8`, episode A on the vertex-attribute value `0x10030303`. The dispatch history did not match the ring at those offsets because **the guest rewrites the buffer while the parser walks it** (L119), not because the 1 KB cache was parsed differently and not because a page was remapped. The host executed 4.07 MB ahead of PUT for `0x39c` bytes before `0x3f800000` became a legal *old jump* off the iomap (L120 closes the fetch half). | settled (L132/L145) |
+| L141 / L144 / L150 / L115 / L20 / L35 / L52 / L54 / L57 / L58 / L64 / L82 / L86 / L118 / L117 / L119 / L120 / L121 / L122 / L123 / L124 / L125 / L126 / L127 / L130 / L138 | The pre-L145 desync archaeology: data words parsed as commands, two command buffers `0x3F0000` apart with PUT naming the one the parser is not reading, recovery livelocking on `restore_point == get`, the producer rewriting the region mid-walk, and the numeric-only probe tests missing an inversion because the buffer being read has the lower address. Every one of these is either explained by the frontier rule (L132) and honest GET (L145), or was a probe blind spot (`L130`'s slab comparison is now `jump cross-buffer`). Kept as the evidence trail; no action. | settled (L132/L145) |
+
+---
+
+# 5. Settled — measured, not a cause
+
+| ids | result |
+|---|---|
+| L87, L88, L94 | The device samples BC exactly (BC1/BC3/cubemap, with and without mips) and every upload is faithful: 156 DXT1 and 263 DXT45 byte-identical; no large upload all-zero across 2026 + 4108. |
+| L95, L96, L22, L21, L23 | The video is three B8 planes and carries picture; B8 → `R8Unorm` with `{ONE, RED, RED, RED}` matches VK; the upload and present paths are correct early. The "dark flat luma" of the 52 s window was a fade. |
+| L25, L26, L27, L28, L24, L51 | Compilation is not the visible-bug path: 97 async links, none failed; `skipped pipeline pending`/`failed` and `bind dropped` never fire. Format census: guest DXT45 396 544, DXT1 171 588, A8R8G8B8 129 696, DXT23 8530, B8 2852; host BC3 802, BC1 528, BGRA8 259, R8 13, D32S8 12, BC2 1. Level-2 texture probes clean. |
+| L73, L74, L75, L76 | A null texture samples 0 and a null sampler falls back to a default; `setRenderTargetWidth/Height` is a hard clip; a 1920x1080 scissor with a 4096x4096 guest viewport is not a mismatch; the binding contract agrees on both sides, so a black object is not a slot-map mismatch. |
+| L80, L81, L114, L111 | The post-draw colour probe and the forced-output selector both work (run 5: forced programs painted magenta while the video quad did not, which produced L116). A `(0,0,0,0)` readback cannot by itself separate "wrote black" from "never ran" (L111); L114 answers it. |
+| L101, L102, L110, L42, L32 | The video quad was encoded with every field correct and still left the target untouched; its alpha and constants were faithful; compiling the alpha test out changed nothing. Resolved by L116. A black rectangle is not a texture-content problem. The boot black screen was the intro FMV. |
+| L91 | The texture-replacement bisection is not decisive for one draw inside a frame: every draw sampling the unit turns red, so an earlier draw may already have painted it. |
+| L100, L104, L36, L68 | Run 1 reached all four scenes (1067/2517/4374/5796/6996). The 100 s pause after the second video is the guest (~1059 "access violation … writing 1" with no new draws), not a GPU hang. The probe is exonerated; all 65 faults in the 02:5x run were on guest threads and handled. |
+| L67, L69, L4, L5, L7 | Baselines: nothing Metal-specific in the shared log (54 `lock sudo`, 21 desync reports, 819 SPU `MFC_*`, 71 `ROP reads from rN`); the rest is upstream noise with no wrong output. |
+| L43a, L45, L46, L53, L56, L63 | Metal ignoring Vulkan's create flags, `create_nul_section` arguments and `on_section_destroyed` matches OpenGL. The label address `0x60300800` is outside the ring, so it cannot land in command data. |
+| L77, L79 | Validation is the only debugger-class tool: `MTL_DEBUG_LAYER=1` with `MTL_DEBUG_LAYER_ERROR_MODE=nslog`. There is no Xcode 26, so no Metal Debugger, `.gputrace`, `xctrace` or offline `metal` compiler. |
+| L38 / L29 | The label drain was the frame rate: 57.9 ms average / 470 ms max per frame against `frame/gpu us` 8.68 ms — the GPU was idle 74 ms of every 83 ms. Fixed by L131. |
+| L103 | (a) The unit trace printed the declared layout, not the view swizzle → now prints the composed swizzle. (b) The MSL declares each ring at block size but indexes it with the ring index; real UB, proven benign (744 working draws, GPU validation silent), deferred until a codegen change is justified. |
+| L113 | A capture window covers at most 64 draws and is armed by cubemap bind, large B8 bind, present-gap watchdog, content trigger or `MTL_PROBE_AT_SEC`. |
+| L59, L55 | Folded into L64 and L70. |
+
+---
+
+# 6. Environment and non-Metal
 
 | id | result |
 |---|---|
-| L2 | LLVM JIT teardown SIGSEGV on quit — recorded and fixed as I6 (`REVIEW-FINDINGS.md:1564`). Run 2 quit with a main-thread segfault in the same teardown path (`SYS: Segfault … Deleting old game window`). |
-| L6 / L17 / L62 | 54 guest ranges fail `mlock` (first: the FIFO ring). Benign with unified memory; would matter on a discrete GPU. |
+| L2 | LLVM JIT teardown SIGSEGV on quit — fixed as I6 (`REVIEW-FINDINGS.md:1564`). Run 2 quit in the same path (`Deleting old game window`). |
+| L6, L17, L62 | 54 guest ranges fail `mlock` (first: the FIFO ring). Benign with unified memory; would matter on a discrete GPU. |
 | L8 | The guest asks for `BLJS10001/…/RR7.DAT`, gets `CELL_ENOENT`, and falls back to the 4.872 GB `/dev_bdvd` copy. |
-| L9 / L61 | **Low Power Mode was on and the machine was on battery** for every measurement in this window; the §1.3 numbers are lower bounds. |
+| L9, L61 | Low Power Mode was on and the machine was on battery for every measurement; the §2 performance numbers are lower bounds. |

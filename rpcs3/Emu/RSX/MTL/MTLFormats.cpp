@@ -37,6 +37,50 @@ namespace mtl
 		return format == MTL::PixelFormat::PixelFormatBGRA8Unorm || format == MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
 	}
 
+	namespace
+	{
+		// The unsupported-format report is bounded: at most one error line per
+		// distinct format value in the process, and the set is capped, so a title
+		// that feeds the lookup a stream of format guesses cannot flood the log.
+		// The coverage latch still counts every event, which is what names the
+		// format in the coverage table.  One set covers both surface namespaces
+		// (colour and depth), exactly like the texture lookup arms share one.
+		void report_unknown_surface_format(u32 surface_format)
+		{
+			// TODO(excise): level 2; an unsupported surface format reached the lookup.
+			MTL_PROBE_LATCH(2, "surface/unknown format");
+
+			static std::mutex guard;
+			static std::array<u32, 32> seen{};
+			static u32 seen_count = 0;
+			static bool full_warned = false;
+
+			std::lock_guard lock(guard);
+
+			for (u32 index = 0; index < seen_count; ++index)
+			{
+				if (seen[index] == surface_format)
+				{
+					return; // already reported once for this value
+				}
+			}
+
+			if (seen_count == seen.size())
+			{
+				if (!full_warned)
+				{
+					full_warned = true;
+					rsx_log.warning("Metal 4: more than %u distinct unsupported surface formats; later values are counted, not logged", static_cast<u32>(seen.size()));
+				}
+
+				return; // the set is full; the coverage latch still counts the event
+			}
+
+			seen[seen_count++] = surface_format;
+			rsx_log.error("Metal 4: unsupported surface format 0x%x", surface_format);
+		}
+	}
+
 	MTL::PixelFormat get_surface_color_format(rsx::surface_color_format format)
 	{
 		switch (format)
@@ -67,7 +111,7 @@ namespace mtl
 		case rsx::surface_color_format::x32:
 			return MTL::PixelFormat::PixelFormatR32Float;
 		default:
-			rsx_log.error("Metal 4: unsupported surface colour format 0x%x", static_cast<u32>(format));
+			report_unknown_surface_format(static_cast<u32>(format));
 			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
 		}
 	}
@@ -111,7 +155,7 @@ namespace mtl
 		case rsx::surface_color_format::w32z32y32x32:
 			return identity;
 		default:
-			rsx_log.error("Metal 4: unsupported surface colour format 0x%x", static_cast<u32>(format));
+			report_unknown_surface_format(static_cast<u32>(format));
 			return identity;
 		}
 	}
@@ -157,7 +201,7 @@ namespace mtl
 		case rsx::surface_depth_format2::z24s8_float:
 			return MTL::PixelFormat::PixelFormatDepth32Float_Stencil8;
 		default:
-			rsx_log.error("Metal 4: unsupported surface depth format 0x%x", static_cast<u32>(format));
+			report_unknown_surface_format(static_cast<u32>(format));
 			return MTL::PixelFormat::PixelFormatDepth32Float;
 		}
 	}
@@ -356,6 +400,184 @@ namespace mtl
 		}
 	}
 
+	namespace
+	{
+		// r5g6b5 is an involution: the guest pack (R[15:11] G[10:5] B[4:0]) and the Metal
+		// packed word (B5G6R5Unorm: B[15:11] G[10:5] R[4:0]) trade the five-bit red and
+		// blue fields; the six green bits keep their place.
+		u16 permute_r5g6b5(u16 value)
+		{
+			return static_cast<u16>(((value & 0x001Fu) << 11) | (value & 0x07E0u) | ((value >> 11) & 0x001Fu));
+		}
+
+		// x1r5g5b5_* (guest pack x[15] R[14:10] G[9:5] B[4:0]) against BGR5A1Unorm
+		// (B[15:11] G[10:6] R[5:1] A[0]).  The x1/o1 bit keeps its stored value: the
+		// guest read of the alpha channel is governed by the surface's component layout
+		// (zero or one), and the fragment stores no semantic bit there.
+		u16 x1r5g5b5_to_host(u16 value)
+		{
+			return static_cast<u16>(((value >> 15) & 0x0001u) |
+				(((value >> 10) & 0x001Fu) << 1) |
+				(((value >> 5) & 0x001Fu) << 6) |
+				((value & 0x001Fu) << 11));
+		}
+
+		u16 x1r5g5b5_to_guest(u16 value)
+		{
+			return static_cast<u16>(((value & 0x0001u) << 15) |
+				(((value >> 1) & 0x001Fu) << 10) |
+				(((value >> 6) & 0x001Fu) << 5) |
+				((value >> 11) & 0x001Fu));
+		}
+	}
+
+	bool packed_format_needs_convert(rsx::surface_color_format format)
+	{
+		switch (format)
+		{
+		case rsx::surface_color_format::r5g6b5:
+		case rsx::surface_color_format::x1r5g5b5_z1r5g5b5:
+		case rsx::surface_color_format::x1r5g5b5_o1r5g5b5:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	void decode_packed16_plane(void* dst, const void* src, u32 width, u32 height, u32 src_pitch, rsx::surface_color_format format)
+	{
+		ensure(packed_format_needs_convert(format));
+
+		// TODO(excise): level 2; a guest packed colour plane decoded to host, with the
+		// guest colour format.  This is the packed colour upload path.
+		MTL_PROBE_LATCH(2, "surface/packed plane decode");
+		MTL_PROBE_HISTOGRAM(2, "surface packed plane format", static_cast<u32>(format), "gcm colour format");
+
+		const u8* src_row = static_cast<const u8*>(src);
+		u8* dst_row = static_cast<u8*>(dst);
+		const bool r5g6b5 = format == rsx::surface_color_format::r5g6b5;
+
+		for (u32 y = 0; y < height; ++y)
+		{
+			for (u32 x = 0; x < width; ++x)
+			{
+				const u16 value = read_from_ptr_unsafe<u16>(src_row, x * 2);
+				write_to_ptr_unsafe<u16>(dst_row, x * 2, r5g6b5 ? permute_r5g6b5(value) : x1r5g5b5_to_host(value));
+			}
+
+			src_row += src_pitch;
+			dst_row += width * 2;
+		}
+	}
+
+	void encode_packed16_plane(void* dst, const void* src, u32 width, u32 height, u32 dst_pitch, rsx::surface_color_format format)
+	{
+		ensure(packed_format_needs_convert(format));
+
+		// TODO(excise): level 2; a host packed colour plane encoded back into the guest
+		// pack, with the guest colour format.  This is the packed colour read-back path.
+		MTL_PROBE_LATCH(2, "surface/packed plane encode");
+		MTL_PROBE_HISTOGRAM(2, "surface packed plane format", static_cast<u32>(format), "gcm colour format");
+
+		const u8* src_row = static_cast<const u8*>(src);
+		u8* dst_row = static_cast<u8*>(dst);
+		const bool r5g6b5 = format == rsx::surface_color_format::r5g6b5;
+
+		for (u32 y = 0; y < height; ++y)
+		{
+			for (u32 x = 0; x < width; ++x)
+			{
+				const u16 value = read_from_ptr_unsafe<u16>(src_row, x * 2);
+				write_to_ptr_unsafe<u16>(dst_row, x * 2, r5g6b5 ? permute_r5g6b5(value) : x1r5g5b5_to_guest(value));
+			}
+
+			src_row += width * 2;
+			dst_row += dst_pitch;
+		}
+	}
+
+	void encode_r6g5b5_plane(void* dst, const void* src, u32 width, u32 height, u32 dst_pitch)
+	{
+		// TODO(excise): level 2; a host BGRA8 texture plane encoded back into the guest
+		// r6g5b5 pack.  This is the R6G5B5 texture read-back path (TX20; the packed16
+		// counterpart is encode_packed16_plane above).
+		MTL_PROBE_LATCH(2, "texture/r6g5b5 plane encode");
+
+		const u8* src_row = static_cast<const u8*>(src);
+		u8* dst_row = static_cast<u8*>(dst);
+
+		for (u32 y = 0; y < height; ++y)
+		{
+			for (u32 x = 0; x < width; ++x)
+			{
+				const u32 texel = read_from_ptr_unsafe<u32>(src_row, x * 4);
+				const u32 b8 = texel & 0xff;
+				const u32 g8 = (texel >> 8) & 0xff;
+				const u32 r8 = (texel >> 16) & 0xff;
+
+				// The inverse of the upload expand (TextureUtils.cpp convert_rgb655_to_bgra8,
+				// which computes r8 as ((r6 * 259) + 33) >> 6 and g8/b8 as ((v * 527) + 23) >> 6):
+				// the multiplies have no exact inverse, so each channel keeps only its high
+				// bits, the VK-accepted lossy round trip, the same trade the raw pack hosts
+				// take on the upload leg.  a8 is ignored; guest r6g5b5 carries no alpha.
+				const u16 guest = static_cast<u16>((((r8 & 0xfc) >> 2) << 10) |
+					(((g8 & 0xf8) >> 3) << 5) |
+					((b8 & 0xf8) >> 3));
+
+				// The staging buffer impersonates the big-endian guest memory, so the guest
+				// word is stored with its bytes exchanged against the native u16 (the packed
+				// plane reaches the same place through the permute involution).
+				write_to_ptr_unsafe<u16>(dst_row, x * 2, static_cast<u16>((guest >> 8) | ((guest & 0xff) << 8)));
+			}
+
+			src_row += width * 4;
+			dst_row += dst_pitch;
+		}
+	}
+
+	namespace
+	{
+		// The unsupported-format report is bounded: at most one error line per
+		// distinct format value in the process, and the set is capped, so a title
+		// that feeds the lookup a stream of format guesses cannot flood the log.
+		// The coverage latch still counts every event, which is what names the
+		// format in the coverage table.
+		void report_unknown_texture_format(u32 gcm_format)
+		{
+			// TODO(excise): level 2; an unsupported texture format reached the lookup.
+			MTL_PROBE_LATCH(2, "texture/unknown format");
+
+			static std::mutex guard;
+			static std::array<u32, 32> seen{};
+			static u32 seen_count = 0;
+			static bool full_warned = false;
+
+			std::lock_guard lock(guard);
+
+			for (u32 index = 0; index < seen_count; ++index)
+			{
+				if (seen[index] == gcm_format)
+				{
+					return; // already reported once for this value
+				}
+			}
+
+			if (seen_count == seen.size())
+			{
+				if (!full_warned)
+				{
+					full_warned = true;
+					rsx_log.error("Metal 4: more than %u distinct unsupported texture formats; later values are counted, not logged", static_cast<u32>(seen.size()));
+				}
+
+				return; // the set is full; the coverage latch still counts the event
+			}
+
+			seen[seen_count++] = gcm_format;
+			rsx_log.error("Metal 4: unsupported texture format 0x%x", gcm_format);
+		}
+	}
+
 	MTL::PixelFormat get_texture_format(u32 gcm_format, bool supports_bc)
 	{
 		switch (gcm_format)
@@ -366,7 +588,7 @@ namespace mtl
 		case CELL_GCM_TEXTURE_D8R8G8B8:
 			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
 #if !defined(__APPLE__) || !defined(ARCH_X64)
-		// The uploader keeps a packed format packed (TextureUtils.cpp:950), so the
+		// The uploader keeps a packed format packed (TextureUtils.cpp), so the
 		// host texture holds the guest bits unchanged.  Vulkan shows the guest bit
 		// order directly: it uses R5G6B5, R5G5B5A1, A1R5G5B5 and R4G4B4A4 on this
 		// target (VKFormats.cpp:200-205).  Metal names a packed format from the most
@@ -374,9 +596,6 @@ namespace mtl
 		// bits in a different channel order.  get_texture_component_layout supplies
 		// the permutation that restores the guest channels.
 		case CELL_GCM_TEXTURE_R5G6B5:
-			return MTL::PixelFormat::PixelFormatB5G6R5Unorm;
-		case CELL_GCM_TEXTURE_R6G5B5:
-			// The guest stores six bits of red, which no Metal packed format has.
 			return MTL::PixelFormat::PixelFormatB5G6R5Unorm;
 		case CELL_GCM_TEXTURE_R5G5B5A1:
 			return MTL::PixelFormat::PixelFormatBGR5A1Unorm;
@@ -391,10 +610,18 @@ namespace mtl
 		case CELL_GCM_TEXTURE_A4R4G4B4:
 		case CELL_GCM_TEXTURE_R5G5B5A1:
 		case CELL_GCM_TEXTURE_D1R5G5B5:
-		case CELL_GCM_TEXTURE_R6G5B5:
 			// The Intel uploader expands every packed colour format to BGRA8
-			// (TextureUtils.cpp:966-1015).
+			// (TextureUtils.cpp).
 			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
+#endif
+		// Six bits of red have no packed Metal host, so every Apple target expands
+		// the upload to BGRA8 (TextureUtils.cpp); other targets keep the raw packed path.
+		case CELL_GCM_TEXTURE_R6G5B5:
+#if defined(__APPLE__)
+			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
+#else
+			// The guest stores six bits of red, which no Metal packed format has.
+			return MTL::PixelFormat::PixelFormatB5G6R5Unorm;
 #endif
 		case CELL_GCM_TEXTURE_G8B8:
 		case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
@@ -430,7 +657,7 @@ namespace mtl
 		case CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
 			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
 		default:
-			rsx_log.error("Metal 4: unsupported texture format 0x%x", gcm_format);
+			report_unknown_texture_format(gcm_format);
 			return MTL::PixelFormat::PixelFormatBGRA8Unorm;
 		}
 	}
@@ -467,21 +694,24 @@ namespace mtl
 			// RGBA4).  Against ABGR4 every field moves one place, so the whole
 			// channel vector rotates.
 			return { MTL::TextureSwizzleRed, MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen };
-		case CELL_GCM_TEXTURE_R6G5B5:
-			// Six bits of red have no packed Metal host, so the host above cannot hold
-			// the guest field.  The read states the R5G6B5 permutation; the upload
-			// expansion (REVIEW-RSX-NATIVE.md R3) must revisit both together.
-			return { MTL::TextureSwizzleOne, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
 #else
 		// The Intel uploader expands every packed format to BGRA8, so the guest
 		// channels already sit in the A-R-G-B order.
 		case CELL_GCM_TEXTURE_R5G6B5:
-		case CELL_GCM_TEXTURE_R6G5B5:
 		case CELL_GCM_TEXTURE_R5G5B5A1:
 		case CELL_GCM_TEXTURE_A1R5G5B5:
 		case CELL_GCM_TEXTURE_D1R5G5B5:
 		case CELL_GCM_TEXTURE_A4R4G4B4:
 			return { MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+#endif
+		// Six bits of red have no packed Metal host, so every Apple target expands
+		// the upload to BGRA8: the guest channels already sit in the A-R-G-B order.
+		// Other targets keep the packed host and read through the R5G6B5 permutation.
+		case CELL_GCM_TEXTURE_R6G5B5:
+#if defined(__APPLE__)
+			return { MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
+#else
+			return { MTL::TextureSwizzleOne, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
 #endif
 		case CELL_GCM_TEXTURE_DEPTH24_D8:
 		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
@@ -505,7 +735,7 @@ namespace mtl
 		case CELL_GCM_TEXTURE_D8R8G8B8:
 			return { MTL::TextureSwizzleOne, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
 		default:
-			rsx_log.error("Metal 4: unsupported texture format 0x%x", gcm_format);
+			report_unknown_texture_format(gcm_format);
 			return { MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue };
 		}
 	}

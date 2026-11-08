@@ -135,7 +135,16 @@ namespace mtl
 				 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
 				 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45);
 
-			if (decoded_dxt ||
+			// On Apple the uploader expands the packed R6G5B5 upload to one BGRA8
+			// texel per guest texel (Metal does not hold the format); the staging
+			// buffer must cover the expanded rows.
+#if defined(__APPLE__)
+			const bool expanded_r6g5b5 = gcm_format == CELL_GCM_TEXTURE_R6G5B5;
+#else
+			const bool expanded_r6g5b5 = false;
+#endif
+
+			if (decoded_dxt || expanded_r6g5b5 ||
 				gcm_format == CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8 ||
 				gcm_format == CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8)
 			{
@@ -301,6 +310,51 @@ namespace mtl
 						}
 					}
 				}
+
+				// TODO(excise): level 5; the census and the dump-tex arm.  The
+				// census counts BC flat-zero blocks on every DXT upload (the shape of a
+				// never-initialised allocation at the sample), and the arm writes the
+				// named address' level-0 bytes, bypassing the dedupe keys and the run
+				// budgets above (its own budget applies).
+				const bool compressed_dxt =
+					gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1 ||
+					gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
+					gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45;
+				const u32 census_block_bytes = (gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1) ? 8u : 16u;
+				const u64 census_blocks = compressed_dxt ? (size / census_block_bytes) : 0ull;
+				const u64 census_zero = compressed_dxt ? probe::bc_zero_block_scan(converted, size, census_block_bytes) : 0ull;
+
+				probe::census_note_upload(address, size, gcm_format, census_blocks, census_zero, census_block_bytes);
+
+				if (layout.level == 0 && probe::dump_tex_match(address))
+				{
+					const std::size_t dump_raw = std::min<std::size_t>(raw_size, 16u * 1024u * 1024u);
+					char path[512];
+
+					if (raw && probe::dump_tex_take(static_cast<u64>(dump_raw)))
+					{
+						std::snprintf(path, sizeof(path), "%s/dump-tex-addr%x-raw.bin", probe::dump_directory(), address);
+
+						if (std::FILE* out = std::fopen(path, "wb"))
+						{
+							std::fwrite(raw, 1, dump_raw, out);
+							std::fclose(out);
+							MTL_NOTE(5, "Metal 4: dump-tex raw %s, %llu bytes", path, static_cast<unsigned long long>(dump_raw));
+						}
+					}
+
+					if (converted && probe::dump_tex_take(static_cast<u64>(size)))
+					{
+						std::snprintf(path, sizeof(path), "%s/dump-tex-addr%x-conv.bin", probe::dump_directory(), address);
+
+						if (std::FILE* out = std::fopen(path, "wb"))
+						{
+							std::fwrite(converted, 1, size, out);
+							std::fclose(out);
+							MTL_NOTE(5, "Metal 4: dump-tex converted %s, %u bytes", path, size);
+						}
+					}
+				}
 			}
 #endif // MTL_DEBUG_LOGS
 
@@ -338,7 +392,7 @@ namespace mtl
 		}
 	}
 
-	void texture_cache::clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count) const
+	void texture_cache::clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count, u32 fill_word) const
 	{
 		if (!image || !level_count)
 		{
@@ -396,7 +450,8 @@ namespace mtl
 
 			if (void* bytes = staging->contents())
 			{
-				std::memset(bytes, 0, size);
+				// TODO(excise): level 5; fill_word is the MTL_PROBE_VARIANT=poison fill, zero is the shipping clear.
+				probe::fill_words(bytes, size, fill_word);
 			}
 
 			// A cube keeps its six faces in the slice dimension.  A 3-D volume
@@ -588,6 +643,95 @@ namespace mtl
 			sync_timestamp = rsx::get_shared_tag();
 			return;
 		}
+
+		// A framebuffer-storage section is the surface itself; a packed colour surface
+		// stores blue in the high field of the Metal packed word, so the raw row copy
+		// misaligns the guest pack (TX12 is the depth site of the same boundary; the
+		// encode is its colour counterpart).
+		if (context == rsx::texture_upload_context::framebuffer_storage)
+		{
+			if (auto* surf = static_cast<surface*>(vram_texture); surf && !surf->is_depth_surface())
+			{
+				const rsx::surface_color_format color_format = surf->get_surface_color_format();
+
+				if (packed_format_needs_convert(color_format))
+				{
+					const u32 plane_pitch = transfer_width * 2;
+					const u32 plane_rows = transfer_height;
+					MTL::Buffer* plane = cmd.resources().new_buffer(static_cast<u64>(plane_pitch) * plane_rows, MTL::StorageModeShared);
+
+					if (!plane)
+					{
+						rsx_log.error("Metal 4: the packed colour read-back staging buffer could not be created");
+						return;
+					}
+
+					encoder->copyFromTexture(source, 0, 0,
+						MTL::Origin::Make(transfer_x, transfer_y, 0),
+						MTL::Size::Make(transfer_width, transfer_height, 1),
+						plane, 0, plane_pitch, plane_pitch * plane_rows);
+
+					cmd.flush_for_readback();
+					m_readback_cmd = nullptr;
+
+					encode_packed16_plane(static_cast<u8*>(m_staging->value()->contents()) + dst_offset,
+						plane->contents(), transfer_width, transfer_height, rsx_pitch, color_format);
+
+					cmd.resources().defer_release(plane);
+
+					// TODO(excise): level 1; running total.
+					MTL_PERF_COUNT(1, "texture/readback bytes", static_cast<u64>(rsx_pitch) * transfer_height);
+
+					synchronized = true;
+					sync_timestamp = rsx::get_shared_tag();
+					return;
+				}
+			}
+		}
+
+		// An R6G5B5 texture read back leaving a shader_read section takes the same
+		// boundary as the packed colour surface: the Apple upload expands the guest
+		// pack to BGRA8 (TX20), so the host image holds one expanded texel per guest
+		// texel and the raw row copy returns bytes the guest cannot read.  The encode
+		// narrows the plane back into the guest pack; this is the texture arm of the
+		// SF14 packed16 pair (the surface arm is the framebuffer_storage branch
+		// above).  Every other format keeps the raw path: the packed 16-bit texture
+		// hosts stay packed on Apple, with the host word layout noted at
+		// get_texture_format (MTLFormats.cpp, the r5g6b5 host layout note).
+#if defined(__APPLE__)
+		if (context == rsx::texture_upload_context::shader_read && gcm_format == CELL_GCM_TEXTURE_R6G5B5)
+		{
+			const u32 plane_pitch = transfer_width * 4;
+			const u32 plane_rows = transfer_height;
+			MTL::Buffer* plane = cmd.resources().new_buffer(static_cast<u64>(plane_pitch) * plane_rows, MTL::StorageModeShared);
+
+			if (!plane)
+			{
+				rsx_log.error("Metal 4: the r6g5b5 read-back staging buffer could not be created");
+				return;
+			}
+
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(transfer_x, transfer_y, 0),
+				MTL::Size::Make(transfer_width, transfer_height, 1),
+				plane, 0, plane_pitch, plane_pitch * plane_rows);
+
+			cmd.flush_for_readback();
+			m_readback_cmd = nullptr;
+
+			encode_r6g5b5_plane(static_cast<u8*>(m_staging->value()->contents()) + dst_offset,
+				plane->contents(), transfer_width, transfer_height, rsx_pitch);
+
+			cmd.resources().defer_release(plane);
+
+			// TODO(excise): level 1; running total.
+			MTL_PERF_COUNT(1, "texture/readback bytes", static_cast<u64>(rsx_pitch) * transfer_height);
+
+			synchronized = true;
+			sync_timestamp = rsx::get_shared_tag();
+			return;
+		}
+#endif
 
 		{
 			// TODO(excise): level 1; block timer.

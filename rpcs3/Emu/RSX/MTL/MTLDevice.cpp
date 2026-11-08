@@ -189,12 +189,12 @@ namespace mtl
 			// outlive the diagnostic.  Such a run gets its own file.
 			std::string diagnostic_suffix;
 
-			if (mtl::probe::diagnostic_switch("MTL_PROBE_NO_ALPHA_TEST"))
+			if (probe::variant("no-alpha-test"))
 			{
 				diagnostic_suffix += "-noalpha";
 			}
 
-			if (const char* force = std::getenv("MTL_PROBE_FORCE_FP"); force && *force && *force != '0')
+			if (const std::string force = probe::variant_arg("force-fp"); !force.empty())
 			{
 				// TODO(excise): diagnostic.  The id list is part of the file name,
 				// because an archive built while a different id was forced holds
@@ -205,7 +205,7 @@ namespace mtl
 				diagnostic_suffix += "-forcefp" + tag;
 			}
 
-			if (const char* force = std::getenv("MTL_PROBE_FORCE_FP_TEXTURES"); force && *force && *force != '0')
+			if (const std::string force = probe::variant_arg("force-fp-tex"); !force.empty())
 			{
 				// TODO(excise): diagnostic; see the id list above.
 				std::string tag = force;

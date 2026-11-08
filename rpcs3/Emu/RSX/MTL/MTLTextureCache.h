@@ -356,7 +356,7 @@ namespace mtl
 		// (VKTextureCache.cpp:1096-1112).  Metal has neither, so the levels that no
 		// upload covers are cleared here.  The clear is a blit of a zeroed buffer
 		// over the level, because Metal 4 has no texture clear.
-		void clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count) const;
+		void clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count, u32 fill_word = 0) const;
 
 		void initialize_subresource_from_memory(command_recorder& cmd, texture* dst, const deferred_subresource& desc, rsx::texture_dimension_extended type) const
 		{
@@ -419,6 +419,15 @@ namespace mtl
 			auto* result = create_temporary_subresource_impl(cmd, _template, MTL::PixelFormat::PixelFormatInvalid, MTL::TextureTypeCube, desc.gcm_format,
 				desc.width, desc.height, 1, desc.exact_mip_count(), desc.remap);
 
+			// TODO(excise): level 5; TX21, a fresh temporary keeps whatever the pool is holding.
+			// Vulkan clears to black before the copies; otherwise the faces or levels the
+			// copies do not cover go to the shader as heap garbage.
+			if (!desc.force_bg_load)
+			{
+				clear_texture(cmd, result->image(), desc.gcm_format, 0,
+					static_cast<u8>(result->image()->value()->mipmapLevelCount()), 0);
+			}
+
 			if (desc.force_bg_load)
 			{
 				initialize_subresource_from_memory(cmd, result->image(), desc, rsx::texture_dimension_extended::texture_dimension_cubemap);
@@ -433,6 +442,15 @@ namespace mtl
 			auto* _template = get_template_from_collection_impl(desc.sections_to_copy);
 			auto* result = create_temporary_subresource_impl(cmd, _template, MTL::PixelFormat::PixelFormatInvalid, MTL::TextureType3D, desc.gcm_format,
 				desc.width, desc.height, desc.depth, desc.exact_mip_count(), desc.remap);
+
+			// TODO(excise): level 5; TX21, a fresh temporary keeps whatever the pool is holding.
+			// Vulkan clears to black before the copies; otherwise the faces or levels the
+			// copies do not cover go to the shader as heap garbage.
+			if (!desc.force_bg_load)
+			{
+				clear_texture(cmd, result->image(), desc.gcm_format, 0,
+					static_cast<u8>(result->image()->value()->mipmapLevelCount()), 0);
+			}
 
 			if (desc.force_bg_load)
 			{
@@ -449,6 +467,15 @@ namespace mtl
 			auto* result = create_temporary_subresource_impl(cmd, _template, MTL::PixelFormat::PixelFormatInvalid, MTL::TextureType2D, desc.gcm_format,
 				desc.width, desc.height, 1, 1, desc.remap);
 
+			// TODO(excise): level 5; TX21, a fresh temporary keeps whatever the pool is holding.
+			// Vulkan clears to black before the copies; otherwise the faces or levels the
+			// copies do not cover go to the shader as heap garbage.
+			if (!desc.force_bg_load)
+			{
+				clear_texture(cmd, result->image(), desc.gcm_format, 0,
+					static_cast<u8>(result->image()->value()->mipmapLevelCount()), 0);
+			}
+
 			if (desc.force_bg_load)
 			{
 				initialize_subresource_from_memory(cmd, result->image(), desc, rsx::texture_dimension_extended::texture_dimension_2d);
@@ -464,6 +491,15 @@ namespace mtl
 			auto* _template = get_template_from_collection_impl(desc.sections_to_copy);
 			auto* result = create_temporary_subresource_impl(cmd, _template, MTL::PixelFormat::PixelFormatInvalid, MTL::TextureType2D, desc.gcm_format,
 				desc.width, desc.height, 1, mipmaps, desc.remap);
+
+			// TODO(excise): level 5; TX21, a fresh temporary keeps whatever the pool is holding.
+			// Vulkan clears to black before the copies; otherwise the faces or levels the
+			// copies do not cover go to the shader as heap garbage.
+			if (!desc.force_bg_load)
+			{
+				clear_texture(cmd, result->image(), desc.gcm_format, 0,
+					static_cast<u8>(result->image()->value()->mipmapLevelCount()), 0);
+			}
 
 			if (desc.force_bg_load)
 			{
@@ -494,6 +530,10 @@ namespace mtl
 		cached_texture_section* create_new_texture(command_recorder& cmd, const utils::address_range32& rsx_range, u16 width, u16 height, u16 depth, u16 mipmaps, u32 pitch,
 			u32 gcm_format, rsx::texture_upload_context context, rsx::texture_dimension_extended type, bool swizzled, rsx::component_order swizzle_flags, rsx::flags32_t /*flags*/) override
 		{
+			// TODO(excise): level 5; MTL_PROBE_VARIANT=poison.  The creating guest address keys the fill word, so the
+			// delivered frame and the log agree on which allocation an unwritten image belongs to.
+			const bool diagnostic_poison = probe::variant("poison");
+			const u32 diagnostic_poison_word = diagnostic_poison ? probe::poison_word(rsx_range.start) : 0;
 			const rsx::image_section_attributes_t search_desc = { .gcm_format = gcm_format, .width = width, .height = height, .depth = depth, .mipmaps = mipmaps };
 			const bool allow_dirty = (context != rsx::texture_upload_context::framebuffer_storage);
 			auto& cached = *find_cached_texture(rsx_range, search_desc, true, true, allow_dirty);
@@ -566,7 +606,13 @@ namespace mtl
 					{
 						// TODO(excise): level 2; a reused image that no upload covers.
 						MTL_PROBE_LATCH(2, "texture/reuse cleared");
-						clear_texture(cmd, image, gcm_format, 0, mipmaps);
+						clear_texture(cmd, image, gcm_format, 0, mipmaps, diagnostic_poison_word);
+
+						if (diagnostic_poison)
+						{
+							MTL_NOTE(2, "Metal 4: poison texture reuse, address 0x%x, %ux%ux%u, %u mips, fmt 0x%x, word 0x%08x",
+								rsx_range.start, width, height, depth, static_cast<u32>(mipmaps), gcm_format, diagnostic_poison_word);
+						}
 					}
 				}
 			}
@@ -577,6 +623,13 @@ namespace mtl
 				MTL_PROBE_LATCH(2, "texture/create");
 				ensure(!cached.exists());
 				image = create_image(cmd, get_texture_format(gcm_format, m_supports_bc), get_texture_type(type), width, height, depth, static_cast<u8>(mipmaps));
+
+				if (diagnostic_poison)
+				{
+					clear_texture(cmd, image, gcm_format, 0, mipmaps, diagnostic_poison_word);
+					MTL_NOTE(2, "Metal 4: poison texture, address 0x%x, %ux%ux%u, %u mips, fmt 0x%x, word 0x%08x",
+						rsx_range.start, width, height, depth, static_cast<u32>(mipmaps), gcm_format, diagnostic_poison_word);
+				}
 				image->set_format_class(rsx::classify_format(gcm_format));
 
 				cached.reset(rsx_range);
@@ -626,6 +679,9 @@ namespace mtl
 		cached_texture_section* upload_image_from_cpu(command_recorder& cmd, const utils::address_range32& rsx_range, u16 width, u16 height, u16 depth, u16 mipmaps, u32 pitch, u32 gcm_format,
 			rsx::texture_upload_context context, const std::vector<rsx::subresource_layout>& subresource_layout, rsx::texture_dimension_extended type, bool input_swizzled) override
 		{
+			const bool diagnostic_poison = probe::variant("poison");
+			const u32 diagnostic_poison_word = diagnostic_poison ? probe::poison_word(rsx_range.start) : 0;
+
 			auto* section = create_new_texture(cmd, rsx_range, width, height, depth, mipmaps, pitch, gcm_format, context, type, input_swizzled,
 				rsx::component_order::default_, 0);
 
@@ -657,7 +713,13 @@ namespace mtl
 			{
 				// TODO(excise): level 2; an upload that leaves a level unwritten.
 				MTL_PROBE_LATCH(2, "texture/upload cleared levels");
-				clear_texture(cmd, section->get_raw_texture(), gcm_format, 0, mipmaps);
+				clear_texture(cmd, section->get_raw_texture(), gcm_format, 0, mipmaps, diagnostic_poison_word);
+
+				if (diagnostic_poison)
+				{
+					MTL_NOTE(2, "Metal 4: poison upload cleared levels, address 0x%x, %ux%ux%u, %u mips, fmt 0x%x, word 0x%08x",
+						rsx_range.start, width, height, depth, static_cast<u32>(mipmaps), gcm_format, diagnostic_poison_word);
+				}
 			}
 
 			upload_texture_data(cmd, section->get_raw_texture(), gcm_format, input_swizzled, subresource_layout);

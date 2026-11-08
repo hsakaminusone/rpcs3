@@ -11,6 +11,8 @@
 #include <string_view>
 #include "Thread.h"
 
+#include "stack_trace.h"
+
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -624,8 +626,36 @@ void fmt_class_string<std::source_location>::format(std::string& out, u64 arg)
 
 namespace fmt
 {
+	// TODO(excise): diagnostic, RPCS3_TRACE_ON_SIGNAL.  The signal handler
+	// prints a backtrace for hardware faults, but this is the ensure-throw
+	// variant the FIFO caller produces instead of a signal; without a stack
+	// here the clause state can only be guessed at.  Same discipline as
+	// L159, gated by the env like the signal one.
+	void trace_signal_frames()
+	{
+		const char* env = std::getenv("RPCS3_TRACE_ON_SIGNAL");
+		if (!env || *env == '\0' || *env == '0')
+		{
+			return;
+		}
+
+		struct stderr_logger
+		{
+			void print(std::string_view s) const
+			{
+				std::fprintf(stderr, "ensure backtrace: %.*s\n", static_cast<int>(s.size()), s.data());
+				std::fflush(stderr);
+			}
+		};
+
+		stderr_logger logger{};
+		utils::print_trace(logger);
+	}
+
 	[[noreturn]] void raw_verify_error(std::source_location loc, const char8_t* msg, usz object)
 	{
+		trace_signal_frames();
+
 		std::string out;
 		fmt::append(out, "%s (object: 0x%x)%s", msg ? msg : u8"Verification failed", object, loc);
 		thread_ctrl::emergency_exit(out);
@@ -633,6 +663,8 @@ namespace fmt
 
 	[[noreturn]] void raw_verify_error(std::source_location loc, std::source_location propagated_loc, const char8_t* msg, usz object)
 	{
+		trace_signal_frames();
+
 		std::string out;
 		fmt::append(out, "%s (object: 0x%x)%s%s", msg ? msg : u8"Verification failed", object, loc, propagated_loc);
 		thread_ctrl::emergency_exit(out);
