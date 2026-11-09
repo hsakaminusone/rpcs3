@@ -23,6 +23,7 @@ namespace rsx
 			// probe.  Log the boundary so the flip/device addresses are visible.
 			static std::atomic<u32> diag_label_calls{0};
 
+			// TODO(excise): level 1; bounded sample of the label traffic.
 			if (diag_label_calls.fetch_add(1, std::memory_order_relaxed) < 64)
 			{
 				rsx_log.warning("label: type=0x%x addr=0x%x data=0x%x flip=%d label_addr=0x%x device_addr=0x%x",

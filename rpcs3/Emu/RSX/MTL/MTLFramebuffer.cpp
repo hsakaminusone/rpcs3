@@ -219,6 +219,7 @@ namespace mtl
 		// clear is a scissored fill and passes 0 here, and a load action would wipe
 		// everything outside that scissor (MTLFramebuffer.h:27-31).
 		//
+		// EXCISE-BEGIN sentinel-pass
 		// TODO(excise): level 5; MTL_PROBE_VARIANT=sentinel.  Every colour attachment of
 		// every pass loads as a clear of the sentinel instead of loading its
 		// content.  A pixel that reaches the presented image therefore comes from
@@ -228,9 +229,17 @@ namespace mtl
 		// value is magenta, which no scene surface is, and the run is not a
 		// shipping frame.  Depth and stencil are not touched.
 		const bool sentinel_passes = probe::variant("sentinel");
-		const bool clear_color = sentinel_passes ||
-			((clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0 &&
-				state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0);
+		// EXCISE-END sentinel-pass
+
+		bool clear_color = ((clear_mask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0 &&
+			state.clear_color_fast && (state.clear_colormask & RSX_GCM_CLEAR_COLOR_RGBA_MASK) != 0);
+
+		// EXCISE-BEGIN sentinel-clear
+		if (sentinel_passes)
+		{
+			clear_color = true;
+		}
+		// EXCISE-END sentinel-clear
 		const bool clear_depth = (clear_mask & RSX_GCM_CLEAR_DEPTH_BIT) != 0;
 		const bool clear_stencil = (clear_mask & RSX_GCM_CLEAR_STENCIL_BIT) != 0 && state.clear_stencil_fast;
 
@@ -250,11 +259,14 @@ namespace mtl
 				attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
 			}
 
+			// EXCISE-BEGIN sentinel-clear-color
 			if (sentinel_passes)
 			{
 				attachment->setClearColor(MTL::ClearColor::Make(1.0, 0.0, 1.0, 1.0));
 			}
-			else if (clear_color)
+			else
+			// EXCISE-END sentinel-clear-color
+			if (clear_color)
 			{
 				attachment->setClearColor(state.clear_color);
 			}

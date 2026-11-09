@@ -39,6 +39,7 @@ namespace rsx
 			// acquire, so its address and current word decide the handshake.
 			static std::atomic<u32> diag_acquires{0};
 
+			// TODO(excise): level 1; bounded sample of the acquire traffic.
 			if (diag_acquires.fetch_add(1, std::memory_order_relaxed) < 64)
 			{
 				rsx_log.warning("NV406E acquire addr=0x%x arg=0x%x sema=0x%x", addr, arg, sema.value());

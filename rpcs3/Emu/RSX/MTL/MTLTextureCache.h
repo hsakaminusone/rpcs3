@@ -12,6 +12,7 @@
 
 #include "util/logs.hpp"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -534,10 +535,12 @@ namespace mtl
 		cached_texture_section* create_new_texture(command_recorder& cmd, const utils::address_range32& rsx_range, u16 width, u16 height, u16 depth, u16 mipmaps, u32 pitch,
 			u32 gcm_format, rsx::texture_upload_context context, rsx::texture_dimension_extended type, bool swizzled, rsx::component_order swizzle_flags, rsx::flags32_t /*flags*/) override
 		{
+			// EXCISE-BEGIN texture-poison-state
 			// TODO(excise): level 5; MTL_PROBE_VARIANT=poison.  The creating guest address keys the fill word, so the
 			// delivered frame and the log agree on which allocation an unwritten image belongs to.
 			const bool diagnostic_poison = probe::variant("poison");
 			const u32 diagnostic_poison_word = diagnostic_poison ? probe::poison_word(rsx_range.start) : 0;
+			// EXCISE-END texture-poison-state
 			const rsx::image_section_attributes_t search_desc = { .gcm_format = gcm_format, .width = width, .height = height, .depth = depth, .mipmaps = mipmaps };
 			const bool allow_dirty = (context != rsx::texture_upload_context::framebuffer_storage);
 			auto& cached = *find_cached_texture(rsx_range, search_desc, true, true, allow_dirty);
@@ -610,13 +613,19 @@ namespace mtl
 					{
 						// TODO(excise): level 2; a reused image that no upload covers.
 						MTL_PROBE_LATCH(2, "texture/reuse cleared");
-						clear_texture(cmd, image, gcm_format, 0, mipmaps, diagnostic_poison_word);
+						u32 clear_word = 0;
+
+						// EXCISE-BEGIN texture-reuse-poison
+						clear_word = diagnostic_poison ? diagnostic_poison_word : 0;
 
 						if (diagnostic_poison)
 						{
 							MTL_NOTE(2, "Metal 4: poison texture reuse, address 0x%x, %ux%ux%u, %u mips, fmt 0x%x, word 0x%08x",
 								rsx_range.start, width, height, depth, static_cast<u32>(mipmaps), gcm_format, diagnostic_poison_word);
 						}
+						// EXCISE-END texture-reuse-poison
+
+						clear_texture(cmd, image, gcm_format, 0, mipmaps, clear_word);
 					}
 				}
 			}
@@ -628,6 +637,7 @@ namespace mtl
 				ensure(!cached.exists());
 				image = create_image(cmd, get_texture_format(gcm_format, m_supports_bc), get_texture_type(type), width, height, depth, static_cast<u8>(mipmaps));
 
+				// TODO(excise): level 5; MTL_PROBE_VARIANT=poison, the fresh allocation.
 				if (diagnostic_poison)
 				{
 					clear_texture(cmd, image, gcm_format, 0, mipmaps, diagnostic_poison_word);
@@ -683,16 +693,19 @@ namespace mtl
 		cached_texture_section* upload_image_from_cpu(command_recorder& cmd, const utils::address_range32& rsx_range, u16 width, u16 height, u16 depth, u16 mipmaps, u32 pitch, u32 gcm_format,
 			rsx::texture_upload_context context, const std::vector<rsx::subresource_layout>& subresource_layout, rsx::texture_dimension_extended type, bool input_swizzled) override
 		{
+			// EXCISE-BEGIN texture-upload-poison-state
+			// TODO(excise): level 5; MTL_PROBE_VARIANT=poison, the uploaded allocation.
 			const bool diagnostic_poison = probe::variant("poison");
 			const u32 diagnostic_poison_word = diagnostic_poison ? probe::poison_word(rsx_range.start) : 0;
+			// EXCISE-END texture-upload-poison-state
 
 			auto* section = create_new_texture(cmd, rsx_range, width, height, depth, mipmaps, pitch, gcm_format, context, type, input_swizzled,
 				rsx::component_order::default_, 0);
 
-			// TODO(excise): level 2; the subresource coverage of the upload against
-			// the chain the section declares.  A chain that stops early leaves every
-			// minified fetch reading the tail of the allocation, which is black on a
-			// freshly created private texture.
+			// The subresource coverage of the upload against the chain the section
+			// declares.  A chain that stops early leaves every minified fetch
+			// reading the tail of the allocation, which is black on a freshly
+			// created private texture.
 			const u32 layer_count =
 				(type == rsx::texture_dimension_extended::texture_dimension_cubemap) ? 6u :
 				(type == rsx::texture_dimension_extended::texture_dimension_3d) ? static_cast<u32>(depth) : 1u;
@@ -717,13 +730,19 @@ namespace mtl
 			{
 				// TODO(excise): level 2; an upload that leaves a level unwritten.
 				MTL_PROBE_LATCH(2, "texture/upload cleared levels");
-				clear_texture(cmd, section->get_raw_texture(), gcm_format, 0, mipmaps, diagnostic_poison_word);
+				u32 clear_word = 0;
+
+				// EXCISE-BEGIN texture-upload-poison
+				clear_word = diagnostic_poison ? diagnostic_poison_word : 0;
 
 				if (diagnostic_poison)
 				{
 					MTL_NOTE(2, "Metal 4: poison upload cleared levels, address 0x%x, %ux%ux%u, %u mips, fmt 0x%x, word 0x%08x",
 						rsx_range.start, width, height, depth, static_cast<u32>(mipmaps), gcm_format, diagnostic_poison_word);
 				}
+				// EXCISE-END texture-upload-poison
+
+				clear_texture(cmd, section->get_raw_texture(), gcm_format, 0, mipmaps, clear_word);
 			}
 
 			upload_texture_data(cmd, section->get_raw_texture(), gcm_format, input_swizzled, subresource_layout);
@@ -745,6 +764,7 @@ namespace mtl
 		}
 
 	public:
+		// TODO(excise): level 2; the texture barrier count, reported at the first draw.
 		u32 diagnostic_texture_barriers = 0;
 
 		// A cyclic reference queues one barrier request for the renderer.  The surface
@@ -760,6 +780,7 @@ namespace mtl
 	protected:
 		void insert_texture_barrier(command_recorder&, texture*, bool) override
 		{
+			// TODO(excise): level 2; count the request.
 			++diagnostic_texture_barriers;
 			m_texture_barrier_requested = true;
 		}

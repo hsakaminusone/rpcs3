@@ -47,11 +47,14 @@
 #include "Emu/RSX/Utils/rsx_utils.h"
 #include "util/asm.hpp"
 #include "util/video_provider.h"
+#include "util/logs.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <list>
@@ -93,6 +96,7 @@ namespace mtl
 		// geometry dump can name it without reaching into the draw entry.
 		u32 diagnostic_current_draw = 0;
 
+		// EXCISE-BEGIN only-draw-probe
 		// TODO(excise): level 5; MTL_PROBE_ONLY_DRAW=<n> or <lo>-<hi>.  Every other
 		// draw is counted and dropped before it reaches the encoder, so the target
 		// after the run holds exactly the named draws' contribution.  The draw id is
@@ -131,13 +135,14 @@ namespace mtl
 
 			return range;
 		}
+		// EXCISE-END only-draw-probe
 
 		// TODO(excise): level 5; the monotonic subdraw id the per-draw record and
 		// the draw-parameter block share.  The ABI's draw_id was always zero, so a
 		// dumped draw could not be joined to the census's global id.
 		u32 diagnostic_global_draw_id = 0;
 
-		// TODO(excise): level 5; a field-wise hash of the state the pipeline key
+		// TODO(excise): whole-unit; level 5; a field-wise hash of the state the pipeline key
 		// carries.  Hashing the struct bytes would read the padding the enums
 		// leave behind, and the record exists to be compared across frames.
 		u32 hash_blend_state(const blend_state& state)
@@ -3382,9 +3387,10 @@ namespace mtl
 			}
 #endif // MTL_DEBUG_LOGS
 
+			// TODO(excise): level 5; the red-image bisection.  The whole branch is
+			// the replacement experiment, so it goes with the probe.
 			if (diagnostic_replace_textures() && diagnostic_replace_unit(i))
 			{
-				// TODO(excise): level 5; the red-image bisection.
 				frame.fragment_textures[i].texture = diagnostic_replacement_texture(
 					frame.resources, tex.get_extended_texture_dimension());
 			}
@@ -3798,13 +3804,17 @@ namespace mtl
 		const areau scissor_region = scaled_scissor(m_ctx->draw_state.scissor, m_ctx->fb.layout,
 			RSX(m_ctx)->resolution_scaling_config);
 
+		// EXCISE-BEGIN draw-report-bools
 		static bool diagnostic_program_reported = false;
 		static bool diagnostic_pipeline_reported = false;
 		static bool diagnostic_pass_reported = false;
+		// EXCISE-END draw-report-bools
 
 		// The programs of this draw.  The core resolved both, and the texture units
 		// resolved before them.
+		// EXCISE-BEGIN draw-counter
 		static u32 diagnostic_draws = 0;
+		// EXCISE-END draw-counter
 
 		// TODO(excise): level 2; the draw stream is counted and classified here.
 		MTL_PROBE_LATCH(2, "draw/record");
@@ -3875,15 +3885,17 @@ namespace mtl
 		}
 #endif // MTL_DEBUG_LOGS
 
+		// TODO(excise): level 3; the texture barrier count of the first draw.
 		if (diagnostic_draws == 0)
 		{
-			// TODO(excise): level 3; the texture barrier count of the first draw.
 			MTL_NOTE(3, "Metal 4: stats at draw %u, texture barriers %u",
 				diagnostic_draws, frame.textures.diagnostic_texture_barriers);
 		}
 
+		// EXCISE-BEGIN draw-counter-advance
 		diagnostic_draws++;
 		diagnostic_current_draw = diagnostic_draws - 1;
+		// EXCISE-END draw-counter-advance
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 5; the RCA pack's per-draw census: every enabled
@@ -4154,6 +4166,7 @@ namespace mtl
 
 		if (m_ctx->program.vertex_program.data.empty() || !m_ctx->program.fragment_program.ucode_length)
 		{
+			// TODO(excise): level 2; report the empty program once per run.
 			if (!diagnostic_program_reported)
 			{
 				diagnostic_program_reported = true;
@@ -4281,6 +4294,7 @@ namespace mtl
 					MTL_PROBE_LATCH(2, "draw/skipped pipeline pending");
 				}
 
+				// TODO(excise): level 2; report the failed pipeline once per run.
 				if (failed && !diagnostic_pipeline_reported)
 				{
 					diagnostic_pipeline_reported = true;
@@ -4545,6 +4559,7 @@ namespace mtl
 
 			if (!encoder)
 			{
+				// TODO(excise): level 2; report the failed pass once per run.
 				if (!diagnostic_pass_reported)
 				{
 					diagnostic_pass_reported = true;
@@ -4576,9 +4591,9 @@ namespace mtl
 
 		encoder->setRenderPipelineState(use_interpreter ? interpreted->state : program->state);
 
-		const auto diagnostic_encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
-		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), diagnostic_encoder_state.clip_height);
-		apply_encoder_state(encoder, diagnostic_encoder_state, scissor, frame.depth_cache);
+		const auto encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
+		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.clip_height);
+		apply_encoder_state(encoder, encoder_state, scissor, frame.depth_cache);
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 5; the clause-level state the per-draw record needs.
@@ -4592,9 +4607,9 @@ namespace mtl
 			frame.current_vp_id = frame.compiled_vertex ? frame.compiled_vertex->id : 0;
 			frame.current_fp_id = frame.compiled_fragment ? frame.compiled_fragment->id : 0;
 
-			const MTL::Viewport viewport = build_viewport(diagnostic_encoder_state.clip_width, diagnostic_encoder_state.clip_height,
-				diagnostic_encoder_state.has_clip_range ? diagnostic_encoder_state.znear : 0.0,
-				diagnostic_encoder_state.has_clip_range ? diagnostic_encoder_state.zfar : 1.0);
+			const MTL::Viewport viewport = build_viewport(encoder_state.clip_width, encoder_state.clip_height,
+				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
+				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
 
 			frame.current_viewport[0] = static_cast<f32>(viewport.originX);
 			frame.current_viewport[1] = static_cast<f32>(viewport.originY);
@@ -4622,7 +4637,7 @@ namespace mtl
 
 			if (probe::variant("no-depth"))
 			{
-				depth_stencil_state without_depth = diagnostic_encoder_state.depth_stencil;
+				depth_stencil_state without_depth = encoder_state.depth_stencil;
 				without_depth.depth_compare = rsx::comparison_function::always;
 				without_depth.depth_write = false;
 				apply_depth_stencil_state(encoder, frame.depth_cache, without_depth);
@@ -4633,12 +4648,12 @@ namespace mtl
 		// TODO(excise): level 2; the coordinate audit.  The clip size against the
 		// attachment, and the raster modes, decide whether geometry lands as the
 		// title drew it (area A and area C of the design).
-		MTL_PROBE_LATCH(2, diagnostic_encoder_state.clip_width == m_ctx->fb.layout.width &&
-			diagnostic_encoder_state.clip_height == m_ctx->fb.layout.height
+		MTL_PROBE_LATCH(2, encoder_state.clip_width == m_ctx->fb.layout.width &&
+			encoder_state.clip_height == m_ctx->fb.layout.height
 			? "audit/clip matches target" : "audit/clip mismatches target");
-		MTL_PROBE_HISTOGRAM(2, "audit fill mode", static_cast<u32>(diagnostic_encoder_state.fill_mode), "triangle fill mode");
-		MTL_PROBE_HISTOGRAM(2, "audit cull mode", static_cast<u32>(diagnostic_encoder_state.cull_mode), "cull mode");
-		MTL_PROBE_HISTOGRAM(2, "audit winding", static_cast<u32>(diagnostic_encoder_state.winding), "winding");
+		MTL_PROBE_HISTOGRAM(2, "audit fill mode", static_cast<u32>(encoder_state.fill_mode), "triangle fill mode");
+		MTL_PROBE_HISTOGRAM(2, "audit cull mode", static_cast<u32>(encoder_state.cull_mode), "cull mode");
+		MTL_PROBE_HISTOGRAM(2, "audit winding", static_cast<u32>(encoder_state.winding), "winding");
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 3; the viewport audit of the first draws of the run
@@ -4651,16 +4666,16 @@ namespace mtl
 
 		if (diagnostic_viewport_due)
 		{
-			const MTL::Viewport viewport = build_viewport(diagnostic_encoder_state.clip_width, diagnostic_encoder_state.clip_height,
-				diagnostic_encoder_state.has_clip_range ? diagnostic_encoder_state.znear : 0.0,
-				diagnostic_encoder_state.has_clip_range ? diagnostic_encoder_state.zfar : 1.0);
+			const MTL::Viewport viewport = build_viewport(encoder_state.clip_width, encoder_state.clip_height,
+				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
+				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
 
 			MTL_NOTE(3, "Metal 4: viewport %u, origin %.1f %.1f size %.1f %.1f z %.4f %.4f, scissor %u %u %ux%u, clip %ux%u, cull %u winding %u fill %u depthclip %u",
 				diagnostic_viewports, viewport.originX, viewport.originY, viewport.width, viewport.height, viewport.znear, viewport.zfar,
 				static_cast<u32>(scissor.x), static_cast<u32>(scissor.y), static_cast<u32>(scissor.width), static_cast<u32>(scissor.height),
-				static_cast<u32>(diagnostic_encoder_state.clip_width), static_cast<u32>(diagnostic_encoder_state.clip_height),
-				static_cast<u32>(diagnostic_encoder_state.cull_mode), static_cast<u32>(diagnostic_encoder_state.winding),
-				static_cast<u32>(diagnostic_encoder_state.fill_mode), static_cast<u32>(diagnostic_encoder_state.depth_clip_mode));
+				static_cast<u32>(encoder_state.clip_width), static_cast<u32>(encoder_state.clip_height),
+				static_cast<u32>(encoder_state.cull_mode), static_cast<u32>(encoder_state.winding),
+				static_cast<u32>(encoder_state.fill_mode), static_cast<u32>(encoder_state.depth_clip_mode));
 		}
 #endif // MTL_DEBUG_LOGS
 
@@ -6435,12 +6450,14 @@ namespace mtl
 				const u32 address = rsx::get_address(m_ctx, m_ctx->display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
 				get_present_source(address, buffer_width, buffer_height, buffer_pitch, av_format, 0, image);
 
+				// EXCISE-BEGIN present-trace
 				static u32 diagnostic_presents = 0;
 				// TODO(excise): level 5; the present-source dump budget, per run.
 				// A bare run reaches 5-6 presents at this cap; the sparse and
 				// capture-window branches would otherwise dump every present.
 				constexpr u32 diagnostic_present_dump_budget = 64;
 				static u32 diagnostic_present_dumps = 0;
+				// EXCISE-END present-trace
 
 				// TODO(excise): level 2; the present branch.  The source resolves here
 				// or it does not, and the two outcomes are different defects.
@@ -6463,6 +6480,7 @@ namespace mtl
 						image ? "resolved" : "none");
 				}
 
+				// TODO(excise): level 3; the present counter.
 				diagnostic_presents++;
 
 #if MTL_DEBUG_LOGS
@@ -6911,7 +6929,7 @@ namespace mtl
 	// The FIFO desync capture (RR7-FREEZE-FORENSICS.md §8.1).  The shared FIFO
 	// gathers the data; the backend prints it, through the probe facility so the
 	// bulk text stays out of the shared log and the run's cost is nil at level 0.
-	// TODO(excise): level 2; the hook and the print go with the probe work.
+	// TODO(excise): whole-unit; level 2; the hook and the print go with the probe work.
 	void MTLGSRender::on_fifo_desync(const rsx::fifo_desync_info& info)
 	{
 		if (!mtl::probe::at_least(2))

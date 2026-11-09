@@ -189,7 +189,7 @@ namespace rsx
 			// the parser to the base of the stream the producer did publish.
 			bool redirect(u32 put, u32 addr, u32& target);
 
-			// TODO(excise): level 1; the park line reports why a redirect could
+			// TODO(excise): whole-unit; level 1; the park line reports why a redirect could
 			// not fire. A call owns the return address, and PUT must name a
 			// stream the parser has already entered.
 			bool in_call() const { return m_in_call; }
@@ -254,6 +254,7 @@ namespace rsx
 			// it is a complete link to mapped memory; see fetch_u32.
 			bool is_valid_link(u32 word) const;
 
+			// EXCISE-BEGIN fifo-diag-state
 			// TODO(excise): level 1; FIFO desync instrumentation.  The desync only
 			// shows up downstream, as a data word read as a command header.  These
 			// record the producer frontier and the parser's own boundary so the
@@ -299,6 +300,7 @@ namespace rsx
 			u32 m_diag_slab[2] = {};
 			u64 m_diag_dump_time = 0;
 			u32 m_diag_dump_pos = 0;
+			// EXCISE-END fifo-diag-state
 
 		public:
 			FIFO_control(rsx::thread* pctrl);
@@ -349,6 +351,7 @@ namespace rsx
 			// diagnostics use it; the parser goes through fetch_u32.
 			u32 peek_word(u32 addr) const;
 
+			// EXCISE-BEGIN fifo-diag-methods
 			// TODO(excise): level 1; FIFO desync instrumentation, see the members.
 			void diag_put_sample(u32 put, u32 addr);
 			void diag_read_ahead(u32 addr, u32 put);
@@ -358,6 +361,7 @@ namespace rsx
 			void diag_resume(u32 addr, u32 put);
 			void diag_nop(u32 pos);
 			void diag_desync(u32 pos, u32 word);
+			// EXCISE-END fifo-diag-methods
 		};
 	}
 }

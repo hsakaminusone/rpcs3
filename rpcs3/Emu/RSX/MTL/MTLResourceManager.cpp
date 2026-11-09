@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <vector>
 
 namespace mtl
 {

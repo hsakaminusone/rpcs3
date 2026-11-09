@@ -17,11 +17,15 @@
 #include "Utilities/File.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace mtl
 {
@@ -1041,6 +1045,7 @@ namespace mtl
 		// VKTraits intent, VKProgramBuffer.h:34-41).
 		const u32 attachment_count = static_cast<u32>(properties.write_mask.size());
 
+		// EXCISE-BEGIN pipeline-validate-trace
 		static atomic_t<u32> diagnostic_validate = 0;
 		if (diagnostic_validate++ < 12)
 		{
@@ -1050,6 +1055,7 @@ namespace mtl
 				static_cast<u32>(properties.write_mask[0]), static_cast<u32>(properties.write_mask[1]),
 				static_cast<u32>(properties.write_mask[2]), static_cast<u32>(properties.write_mask[3]));
 		}
+		// EXCISE-END pipeline-validate-trace
 
 		for (u32 index = 0; index < attachment_count; ++index)
 		{
@@ -1059,6 +1065,7 @@ namespace mtl
 			}
 		}
 
+		// EXCISE-BEGIN pipeline-validate-after
 		if (diagnostic_validate <= 12)
 		{
 			// TODO(excise): level 3; per-event trace line.
@@ -1067,6 +1074,7 @@ namespace mtl
 				static_cast<u32>(properties.write_mask[2]), static_cast<u32>(properties.write_mask[3]),
 				properties.attachment_count);
 		}
+		// EXCISE-END pipeline-validate-after
 	}
 
 	MTLTraits::pipeline_type* MTLTraits::build_pipeline(

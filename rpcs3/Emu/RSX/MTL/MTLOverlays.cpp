@@ -21,7 +21,9 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace mtl
 {
@@ -400,6 +402,7 @@ namespace mtl
 		}
 		MTL_PROBE_HISTOGRAM(2, "overlay viewport height sign", metal_viewport.height < 0.0 ? 0 : 1, "height sign");
 
+		// EXCISE-BEGIN overlay-viewport-trace
 		// TODO(excise): level 3; the overlay viewport of the first frames.
 		static u32 diagnostic_overlay_viewports = 0;
 
@@ -409,6 +412,7 @@ namespace mtl
 				metal_viewport.originX, metal_viewport.originY, metal_viewport.width, metal_viewport.height,
 				metal_viewport.znear, metal_viewport.zfar, m_vulkan_clip_space ? 1u : 0u);
 		}
+		// EXCISE-END overlay-viewport-trace
 
 		metal_viewport.znear = 0.0;
 		metal_viewport.zfar = 1.0;

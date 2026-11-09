@@ -14,6 +14,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
 
+#include <atomic>
+#include <cstdio>
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <objc/runtime.h>

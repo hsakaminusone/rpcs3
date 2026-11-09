@@ -27,7 +27,7 @@ namespace rsx
 	class display_output;
 	class RSXDMAWriter;
 
-	// TODO(excise): level 1; the data of a FIFO desync, and a short history of
+	// TODO(excise): whole-unit; level 1; the data of a FIFO desync, and a short history of
 	// the commands the host dispatched. Both exist for one diagnostic: the
 	// desync capture shows a data word where a command header belongs, and the
 	// question is which command's argument block was mis-counted
@@ -53,7 +53,7 @@ namespace rsx
 	// the host has to show.
 	static constexpr u32 dispatch_history_size = 256;
 
-	// TODO(excise): level 1; what the shared code knows about a desync when it
+	// TODO(excise): whole-unit; level 1; what the shared code knows about a desync when it
 	// recovers. The backend prints it; removing it removes this struct and the
 	// fill block in recover_fifo.
 	struct fifo_desync_info
@@ -210,7 +210,7 @@ namespace rsx
 
 		// Backend housekeeping for the FIFO desync capture. The shared code gathers
 		// the data; a backend that does not care ignores it.
-		// TODO(excise): level 1; the hook goes with the capture.
+		// TODO(excise): whole-unit; level 1; the hook goes with the capture.
 		virtual void on_fifo_desync(const fifo_desync_info& /*info*/) {}
 
 		// Backend-specific control requests. Returns false if the request code is not handled.

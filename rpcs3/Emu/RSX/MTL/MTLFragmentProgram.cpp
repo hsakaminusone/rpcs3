@@ -12,10 +12,12 @@
 #include "util/logs.hpp"
 
 #include <bit>
+#include <cstring>
 #include <iterator>
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace mtl
 {
@@ -58,6 +60,7 @@ namespace mtl
 			}
 		}
 
+		// EXCISE-BEGIN force-output-tex
 		// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp-tex.  The compiled id
 		// shifts with the play sequence, so a selector that names the video by the
 		// number of textures its state enables survives a different route into the
@@ -85,6 +88,7 @@ namespace mtl
 				}
 			}
 		}
+		// EXCISE-END force-output-tex
 #endif
 	}
 
@@ -135,12 +139,14 @@ namespace mtl
 
 		OS << "#extension GL_ARB_separate_shader_objects: enable\n\n";
 
+		// EXCISE-BEGIN force-output-define
 		if (m_force_output)
 		{
 			// TODO(excise): diagnostic, MTL_PROBE_VARIANT=force-fp; RSXROPEpilogue.glsl
 			// carries the two sites this switches on.
 			OS << "#define _FORCE_OUTPUT 1\n\n";
 		}
+		// EXCISE-END force-output-define
 
 		glsl::insert_subheader_block(OS);
 	}

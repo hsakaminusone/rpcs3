@@ -1,5 +1,6 @@
 R"(
 
+// EXCISE-BEGIN rop-force-output-discard
 // TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  A fragment the guest would
 // discard still reaches the write stage, so the draw's own output is observed
 // without the discard masking it (MTLFragmentProgram.cpp defines this for one
@@ -7,6 +8,7 @@ R"(
 #if defined(_FORCE_OUTPUT) && defined(_DISABLE_EARLY_DISCARD)
 	_fragment_discard = false;
 #endif
+// EXCISE-END rop-force-output-discard
 
 #ifdef _DISABLE_EARLY_DISCARD
 	if (_fragment_discard)
@@ -112,6 +114,7 @@ R"(
 	}
 #endif // _ENABLE_DEPTH_COMPARE
 
+// EXCISE-BEGIN rop-force-output-magenta
 // TODO(excise): diagnostic, MTL_PROBE_FORCE_FP.  The unmistakable output is
 // written after every stage that could have turned the program's own colour
 // into the clear value, so a magenta patch means this draw reached the write
@@ -120,4 +123,5 @@ R"(
 #if defined(_FORCE_OUTPUT) && _MRT_BUFFERS_COUNT >= 1
 	ocol0 = vec4(1.0, 0.0, 1.0, 1.0);
 #endif
+// EXCISE-END rop-force-output-magenta
 )"
