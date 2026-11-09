@@ -209,7 +209,7 @@ namespace mtl
 		bool valid() const { return m_buffer != nullptr; }
 		MTL::GPUAddress address() const { return m_buffer ? m_buffer->gpuAddress() : 0; }
 
-		// TODO(excise): level 5; the raw ring, so a screenshot can record the exact
+		// TODO(excise): whole-unit; level 5; the raw ring, so a screenshot can record the exact
 		// bytes the GPU read for the frame it photographed.  `used` is in elements.
 		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
 		u64 used() const { return m_count; }
@@ -220,7 +220,7 @@ namespace mtl
 		// substituted push constant) is bound here, not at the ring base.
 		MTL::GPUAddress address_of(u32 index) const { return m_buffer ? m_buffer->gpuAddress() + (index * sizeof(T)) : 0; }
 
-		// TODO(excise): level 5; how many times the ring replaced its buffer.  A
+		// TODO(excise): whole-unit; level 5; how many times the ring replaced its buffer.  A
 		// generation that changed inside one frame means the earlier draws read a
 		// retired buffer, so the frame snapshot must carry that generation too.
 		u32 generation() const { return m_generation; }
@@ -280,7 +280,7 @@ namespace mtl
 		bool valid() const { return m_buffer != nullptr && m_view != nullptr; }
 		MTL::ResourceID resource_id() const { return m_view ? m_view->gpuResourceID() : MTL::ResourceID{}; }
 
-		// TODO(excise): level 5; see block_ring::data.
+		// TODO(excise): whole-unit; level 5; see block_ring::data.
 		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
 		u64 used() const { return m_count; }
 		u64 capacity() const { return m_capacity; }
@@ -317,7 +317,7 @@ namespace mtl
 		MTL::GPUAddress address() const { return m_buffer ? m_buffer->gpuAddress() : 0; }
 		MTL::GPUAddress address_of(u32 offset) const { return address() + offset; }
 
-		// TODO(excise): level 5; see block_ring::data.
+		// TODO(excise): whole-unit; level 5; see block_ring::data.
 		const void* data() const { return m_buffer ? m_buffer->contents() : nullptr; }
 		u64 used() const { return m_count; }
 		u64 capacity() const { return m_capacity; }
@@ -333,7 +333,8 @@ namespace mtl
 		u32 m_generation = 0;
 	};
 
-	// TODO(excise): level 5; one subdraw as the GPU received it.  The manifest
+	// EXCISE-BEGIN constants-draw-record
+	// TODO(excise): whole-unit; level 5; one subdraw as the GPU received it.  The manifest
 	// alone cannot attribute a collapsed glyph or a black decal: the draw
 	// parameters say where the bytes are, but not what the index range, the
 	// pipeline, the vertex descriptor, the sampler or the raster state were.  This
@@ -415,8 +416,10 @@ namespace mtl
 		u64 sampler_id[16] = {};
 	};
 	static_assert(sizeof(draw_record) == 1456, "the capture analysis decodes this layout by offset");
+	// EXCISE-END constants-draw-record
 
-	// TODO(excise): level 5; one frame's CPU rings, copied out while the frame is
+	// EXCISE-BEGIN constants-frame-snapshot
+	// TODO(excise): whole-unit; level 5; one frame's CPU rings, copied out while the frame is
 	// still current.  A frame's rings are reset at the next begin_frame, and the
 	// screenshot is written a frame or more after the key press, so the frame the
 	// user was looking at is already gone by the time the capture runs.  Keeping a
@@ -469,6 +472,7 @@ namespace mtl
 		u32 draw_count = 0;
 		bool valid = false;
 	};
+	// EXCISE-END constants-frame-snapshot
 
 	// Every per-draw ABI buffer, one set per frame slot (HLD-04 §3.3).  The draw
 	// path allocates a block, writes it, and passes the index to the shader through
@@ -512,10 +516,12 @@ namespace mtl
 		vec4_block* alloc_instancing_constants(u32 vec4_count) { return m_sets[m_slot].instancing_constants.alloc(vec4_count); }
 		s32* alloc_instancing_lookup(u32 count) { return m_sets[m_slot].instancing_lookup.alloc(count); }
 
-		// TODO(excise): level 5; the block a draw's offset names, so the per-draw
+		// EXCISE-BEGIN constants-ring-data
+		// TODO(excise): whole-unit; level 5; the block a draw's offset names, so the per-draw
 		// record can hash the constants the shader actually read.
 		const vec4_block* transform_constants_data() const { return static_cast<const vec4_block*>(m_sets[m_slot].transform_constants.data()); }
 		const vec4_block* fragment_constants_data() const { return static_cast<const vec4_block*>(m_sets[m_slot].fragment_constants.data()); }
+		// EXCISE-END constants-ring-data
 
 		u32 vertex_context_index() const { return m_sets[m_slot].vertex_context.index(); }
 		u32 draw_parameters_index() const { return m_sets[m_slot].draw_parameters.index(); }
@@ -567,6 +573,7 @@ namespace mtl
 
 		bool valid() const { return m_sets[m_slot].vertex_context.valid(); }
 
+		// EXCISE-BEGIN constants-history-api
 		// TODO(excise): level 5; the frame-ring capture.  A defect confined to a few
 		// vertices (a collapsed glyph quad, a smeared decal) is decided by the bytes
 		// the GPU read: correct bytes with a wrong image is a read hazard, wrong
@@ -586,9 +593,12 @@ namespace mtl
 		void snapshot_frame(u32 present);
 		void begin_dump(u32 index);
 		void continue_dump();
+		// EXCISE-END constants-history-api
 
 	private:
+		// EXCISE-BEGIN constants-capture-generations
 		void capture_generations(u32* out) const;
+		// EXCISE-END constants-capture-generations
 
 		struct ring_set
 		{
@@ -620,6 +630,7 @@ namespace mtl
 		std::array<stream_set, frame_slot_count> m_streams;
 		u32 m_slot = 0;
 
+		// EXCISE-BEGIN constants-history-state
 		// TODO(excise): level 5; the per-draw records of the open frame.  They are
 		// cleared with the rings, so a slot's records live exactly as long as the
 		// bytes they describe.
@@ -636,6 +647,7 @@ namespace mtl
 		u32 m_dump_burst = 0;
 		u32 m_dump_total = 0;
 		u32 m_dump_index = 0;
+		// EXCISE-END constants-history-state
 	};
 }
 

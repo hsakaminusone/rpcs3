@@ -48,6 +48,7 @@ namespace mtl
 		// its last commit, until that commit reports back).  A guest acquire on one
 		// of them must wait for this slot before it reads the old guest word.
 		std::vector<u32> labels;
+		// TODO(excise): level 4; the CPU commit time used by the feedback timings.
 		f64 debug_commit_time = 0.0;
 	};
 
@@ -202,9 +203,11 @@ namespace mtl
 		MTL::Buffer* m_label_probe = nullptr;
 		std::array<u32, label_staging_capacity> m_pending_labels{};
 		u32 m_pending_count = 0;
+		// EXCISE-BEGIN label-verify
 		// TODO(excise): level 2; the last GPU label write, verified after feedback.
 		u32 m_diag_label_address = 0;
 		u32 m_diag_label_value = 0;
+		// EXCISE-END label-verify
 		u32 m_slot = 0;
 		MTL4::CommandEncoder* m_encoder = nullptr;
 		MTL4::ComputeCommandEncoder* m_compute_encoder = nullptr;

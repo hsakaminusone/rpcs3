@@ -2555,7 +2555,7 @@ const bool s_exception_handler_set = []() -> bool
 
 #else
 
-// TODO(excise): level 1; temporary diagnostic for L159/B25.  The handler turns
+// TODO(excise): whole-unit; level 1; temporary diagnostic for L159/B25.  The handler turns
 // a fatal fault into an abort, so a debugger and a crash reporter only see the
 // abort path.  With RPCS3_TRACE_ON_SIGNAL=1 the fault path prints the faulting
 // stack, with module and symbol, so the caller of the IOGPU fault can be read
@@ -2573,10 +2573,12 @@ static bool trace_on_signal()
 static void print_signal_backtrace() noexcept
 {
 #if defined(__linux__) || defined(__APPLE__)
+	// EXCISE-BEGIN trace-on-signal-call
 	if (!trace_on_signal())
 	{
 		return;
 	}
+	// EXCISE-END trace-on-signal-call
 
 	void* frames[64];
 	const int count = ::backtrace(frames, static_cast<int>(sizeof(frames) / sizeof(frames[0])));

@@ -7,6 +7,11 @@
 
 #include "Emu/RSX/Common/TextureUtils.h"
 
+#include "util/logs.hpp"
+
+#include <algorithm>
+#include <array>
+
 namespace mtl
 {
 	// A content transfer fills a surface in its own encoder.  The heaps are untracked

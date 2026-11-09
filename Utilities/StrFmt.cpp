@@ -626,7 +626,7 @@ void fmt_class_string<std::source_location>::format(std::string& out, u64 arg)
 
 namespace fmt
 {
-	// TODO(excise): diagnostic, RPCS3_TRACE_ON_SIGNAL.  The signal handler
+	// TODO(excise): whole-unit; diagnostic, RPCS3_TRACE_ON_SIGNAL.  The signal handler
 	// prints a backtrace for hardware faults, but this is the ensure-throw
 	// variant the FIFO caller produces instead of a signal; without a stack
 	// here the clause state can only be guessed at.  Same discipline as
@@ -654,6 +654,7 @@ namespace fmt
 
 	[[noreturn]] void raw_verify_error(std::source_location loc, const char8_t* msg, usz object)
 	{
+		// TODO(excise): level 1; the ensure backtrace belongs to the signal probe.
 		trace_signal_frames();
 
 		std::string out;
@@ -663,6 +664,7 @@ namespace fmt
 
 	[[noreturn]] void raw_verify_error(std::source_location loc, std::source_location propagated_loc, const char8_t* msg, usz object)
 	{
+		// TODO(excise): level 1; the ensure backtrace belongs to the signal probe.
 		trace_signal_frames();
 
 		std::string out;

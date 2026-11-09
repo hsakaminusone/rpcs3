@@ -9,8 +9,10 @@
 #include "util/logs.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
+#include <mutex>
 
 namespace mtl
 {

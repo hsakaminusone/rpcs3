@@ -136,6 +136,7 @@ namespace rsx
 		u32 last_sema_cmd = 0;
 		u32 last_sema_addr = 0;
 
+		// EXCISE-BEGIN thread-desync-state
 		// TODO(excise): level 1; the data of a FIFO desync and the dispatch
 		// history now live at namespace scope (Core/RSXRenderBackend.h),
 		// because the hook that consumes them is on the backend.
@@ -144,6 +145,7 @@ namespace rsx
 		dispatch_entry m_dispatch_history[dispatch_history_size]{};
 		u32 m_dispatch_history_count = 0;
 		u32 m_dispatch_history_next = 0;
+		// EXCISE-END thread-desync-state
 		atomic_t<u32> external_interrupt_lock{ 0 };
 		atomic_t<bool> external_interrupt_ack{ false };
 		atomic_t<u32> is_initialized{0};
@@ -162,7 +164,8 @@ namespace rsx
 		static void fifo_wake_delay(u64 div = 1);
 		u32 get_fifo_cmd() const;
 
-		// TODO(excise): level 1; the label write is recorded so that a desync
+		// EXCISE-BEGIN thread-label-accessors
+		// TODO(excise): whole-unit; level 1; the label write is recorded so that a desync
 		// capture can compare it with the address of the FIFO command stream.
 		void note_label_release(u32 address, u32 value)
 		{
@@ -172,11 +175,13 @@ namespace rsx
 
 		u32 last_label_address() const { return m_last_label_address; }
 		u32 last_label_value() const { return m_last_label_value; }
+		// EXCISE-END thread-label-accessors
 
+		// EXCISE-BEGIN thread-dispatch-accessors
 		const dispatch_entry* dispatch_history() const { return m_dispatch_history; }
 		u32 dispatch_history_count() const { return m_dispatch_history_count; }
 
-		// TODO(excise): level 1; record one dispatched command.  The ring keeps the
+		// TODO(excise): whole-unit; level 1; record one dispatched command.  The ring keeps the
 		// last dispatch_history_size entries, newest last.
 		void note_dispatch(u32 reg, u32 value, u32 position, u32 cmd)
 		{
@@ -192,6 +197,7 @@ namespace rsx
 				m_dispatch_history_count++;
 			}
 		}
+		// EXCISE-END thread-dispatch-accessors
 
 		void dump_regs(std::string&, std::any& custom_data) const override;
 		void cpu_wait(bs_t<cpu_flag> old) override;

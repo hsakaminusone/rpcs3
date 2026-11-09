@@ -7,9 +7,11 @@
 
 #include "util/logs.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <vector>
 
 namespace mtl
 {
@@ -283,6 +285,7 @@ namespace mtl
 		m_slot = 0;
 	}
 
+	// TODO(excise): whole-unit; level 5; the ring generations of the open frame.
 	void constants_heap::capture_generations(u32* out) const
 	{
 		const ring_set& set = m_sets[m_slot];
@@ -332,6 +335,7 @@ namespace mtl
 		streams.overlay_vertices.begin_frame();
 		streams.overlay_uniforms.begin_frame();
 
+		// EXCISE-BEGIN constants-begin-frame-capture
 		// The records describe the same bytes as the rings, so they retire with
 		// them.
 		m_draws[m_slot].clear();
@@ -340,11 +344,12 @@ namespace mtl
 		// growth visible: a ring that replaces its buffer after this point
 		// retires the bytes the earlier draws read.
 		capture_generations(m_begin_generation[m_slot].data());
+		// EXCISE-END constants-begin-frame-capture
 	}
 
 	namespace
 	{
-		// TODO(excise): level 5; one snapshot written as the files a capture reads
+		// TODO(excise): whole-unit; level 5; one snapshot written as the files a capture reads
 		// back.  `age` is the distance from the photographed frame: "m3".."m0" are
 		// the frames before it, "p1".."p4" the ones after.
 		void dump_snapshot(const frame_snapshot& frame, u32 index, const char* age)
@@ -553,7 +558,7 @@ namespace mtl
 			std::fclose(manifest);
 		}
 
-		// TODO(excise): level 5; the copy a flip makes of one frame's rings.
+		// TODO(excise): whole-unit; level 5; the copy a flip makes of one frame's rings.
 		void copy_ring(std::vector<u8>& dst, const void* source, u64 size)
 		{
 			if (!source || !size)
@@ -566,7 +571,7 @@ namespace mtl
 			std::memcpy(dst.data(), source, size);
 		}
 
-		// TODO(excise): level 5; the buffers a ring retired inside the frame.  A
+		// TODO(excise): whole-unit; level 5; the buffers a ring retired inside the frame.  A
 		// grow replaces the buffer, so the draws encoded before it address a buffer
 		// that is no longer the ring's current one.  Copying the retired buffers is
 		// what makes a mid-frame grow visible instead of silently truncating the
@@ -590,7 +595,7 @@ namespace mtl
 		}
 	}
 
-	// TODO(excise): level 5; see the declaration.  This runs on every flip, so it
+	// TODO(excise): whole-unit; level 5; see the declaration.  This runs on every flip, so it
 	// is a bounded memcpy and nothing else: the rings are already in memory, and
 	// the copy is the only way to keep a frame past its slot's next reset.
 	void constants_heap::snapshot_frame(u32 present)
@@ -668,7 +673,7 @@ namespace mtl
 		frame.valid = true;
 	}
 
-	// TODO(excise): level 5; one subdraw as the GPU received it.
+	// TODO(excise): whole-unit; level 5; one subdraw as the GPU received it.
 	void constants_heap::record_draw(const draw_record& record)
 	{
 		if (!probe::at_least(5))
@@ -679,7 +684,7 @@ namespace mtl
 		m_draws[m_slot].push_back(record);
 	}
 
-	// TODO(excise): level 5; the key press.  The frames before the press are the
+	// TODO(excise): whole-unit; level 5; the key press.  The frames before the press are the
 	// ones that can hold the defect, because the screenshot is written a frame or
 	// more later, so they are written first and the frames after it follow.
 	void constants_heap::begin_dump(u32 index)
@@ -702,7 +707,7 @@ namespace mtl
 		m_dump_burst = m_dump_total;
 	}
 
-	// TODO(excise): level 5; the frames that follow a key press, so a defect that
+	// TODO(excise): whole-unit; level 5; the frames that follow a key press, so a defect that
 	// lasts more than one frame is caught from both sides of the press.
 	void constants_heap::continue_dump()
 	{

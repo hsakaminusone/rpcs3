@@ -84,7 +84,7 @@ namespace mtl
 		}
 	}
 
-	// TODO(excise): level 1; one warning for each user setting this backend does not
+	// TODO(excise): whole-unit; level 1; one warning for each user setting this backend does not
 	// read, and one coverage key for each.  A setting that is on and ignored is a
 	// silent difference from the reference backends, so it must be visible.
 	void report_ignored_settings()
@@ -183,7 +183,11 @@ namespace mtl
 		if (const std::string cache_root = rpcs3::cache::get_ppu_cache();
 			!g_cfg.video.disable_on_disk_shader_cache && !cache_root.empty())
 		{
-			// TODO(excise): diagnostic.  A switch that changes a shader (the
+			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u.bin",
+			cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major());
+
+		// EXCISE-BEGIN archive-diagnostic-suffix
+		// TODO(excise): diagnostic.  A switch that changes a shader (the
 			// alpha-test compile-out, MTLFragmentProgram.cpp) must not write its
 			// programs into the archive a normal run loads, or the change would
 			// outlive the diagnostic.  Such a run gets its own file.
@@ -213,8 +217,12 @@ namespace mtl
 				diagnostic_suffix += "-forcefpt" + tag;
 			}
 
-			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u%s.bin",
-				cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(), diagnostic_suffix);
+			if (!diagnostic_suffix.empty())
+			{
+				m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u%s.bin",
+					cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(), diagnostic_suffix);
+			}
+			// EXCISE-END archive-diagnostic-suffix
 		}
 
 		MTL4::CompilerDescriptor* descriptor = MTL4::CompilerDescriptor::alloc()->init();

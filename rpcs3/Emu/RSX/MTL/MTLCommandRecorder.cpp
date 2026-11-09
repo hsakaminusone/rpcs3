@@ -10,6 +10,7 @@
 #include "util/logs.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <mach/mach_time.h>
@@ -64,12 +65,14 @@ namespace mtl
 			die("Metal 4: the label staging buffer could not be allocated");
 		}
 
+		// EXCISE-BEGIN label-probe-buffer
 		// TODO(excise): level 2; probe word per slot.
 		m_label_probe = resources.new_buffer(static_cast<u64>(frame_slot_count) * sizeof(u32), MTL::StorageModeShared);
 		if (!m_label_probe)
 		{
 			die("Metal 4: the label probe buffer could not be allocated");
 		}
+		// EXCISE-END label-probe-buffer
 	}
 
 	u64 command_recorder::completed_commits(u32 slot) const
@@ -660,9 +663,11 @@ namespace mtl
 		slot.labels.push_back(address);
 		slot.label_staging_offset += sizeof(u32);
 
+		// EXCISE-BEGIN label-verify-write
 		// TODO(excise): level 2; the last label is verified in guest memory after feedback.
 		m_diag_label_address = address;
 		m_diag_label_value = value;
+		// EXCISE-END label-verify-write
 
 		// TODO(excise): level 2; the labels the GPU writes instead of the CPU.
 		MTL_PROBE_LATCH(2, "sync/label write/gpu");

@@ -158,6 +158,7 @@ namespace rsx
 			return true;
 		}
 
+		// EXCISE-BEGIN fifo-diag-impl
 		// TODO(excise): level 1; FIFO desync instrumentation.  A desync only ever
 		// shows up downstream, as a data word read as a command header; the state
 		// that makes that possible (the parser at or past the producer frontier, or
@@ -458,6 +459,7 @@ namespace rsx
 				rsx_log.error("FIFO diag: desync jump[%u] from=0x%x target=0x%x put=0x%x cmd=0x%x", i, entry.from, entry.target, entry.put, entry.cmd);
 			}
 		}
+		// EXCISE-END fifo-diag-impl
 
 		void stream_tracker::reset(u32 base)
 		{
@@ -787,6 +789,7 @@ namespace rsx
 			const u32 put = read_put();
 			m_streams.on_jump(target, put);
 
+			// EXCISE-BEGIN fifo-chunk-tail
 			// TODO(excise): level 1; capture the chunk before the producer
 			// recycles it.  The parked tail is already zeroed, so the methods
 			// that release the producer are only visible at entry.
@@ -806,6 +809,7 @@ namespace rsx
 
 				rsx_log.warning("FIFO diag: chunk tail %x..%x%s", start, put, dump.c_str());
 			}
+			// EXCISE-END fifo-chunk-tail
 		}
 
 		void FIFO_control::on_call(u32 target)
@@ -824,6 +828,7 @@ namespace rsx
 			{
 				const u32 put = read_put();
 
+				// TODO(excise): level 1; sample the producer frontier.
 				diag_put_sample(put, addr);
 				m_streams.note_put(put, m_fifo_pos);
 
@@ -887,6 +892,7 @@ namespace rsx
 							return {false, FIFO_EMPTY};
 						}
 
+						// EXCISE-BEGIN fifo-park-word
 						if (m_diag_parked_put != addr)
 						{
 							// TODO(excise): level 1; new park, remember the word.
@@ -906,6 +912,7 @@ namespace rsx
 						}
 
 						m_diag_parked_put = addr;
+						// EXCISE-END fifo-park-word
 						// Nothing of this position is in the cache.  Leaving the
 						// old range live makes the retry address the start of a
 						// line whose bytes were never copied, so it would read a
@@ -924,6 +931,7 @@ namespace rsx
 					return {true, word};
 				}
 
+				// EXCISE-BEGIN fifo-resume
 				if (m_diag_parked_put == addr)
 				{
 					// TODO(excise): level 1; resumed on a frontier that was just read.
@@ -931,6 +939,7 @@ namespace rsx
 				}
 
 				m_diag_parked_put = umax;
+				// EXCISE-END fifo-resume
 
 				if (addr == m_next_cmd_entry)
 				{
@@ -981,8 +990,10 @@ namespace rsx
 				const auto src = vm::_ptr<spu_rdata_t>(addr1);
 
 				u64 start_time = 0;
+				// EXCISE-BEGIN fifo-stall-state
 				u64 stall_start = 0;
 				bool stall_logged = false;
+				// EXCISE-END fifo-stall-state
 				u32 bytes_read = 0;
 
 				u32 fifo_code_path = m_next_cmd_entry;
@@ -1058,14 +1069,17 @@ namespace rsx
 
 						start_time = get_system_time();
 
+						// EXCISE-BEGIN fifo-stall-start
 						if (!stall_start)
 						{
 							stall_start = start_time;
 						}
+						// EXCISE-END fifo-stall-start
 					}
 
 					auto now = get_system_time();
 
+					// EXCISE-BEGIN fifo-stall-log
 					if (stall_start && !stall_logged && now - stall_start >= 1000000)
 					{
 						// TODO(excise): level 1; a fill that cannot commit for a
@@ -1074,6 +1088,7 @@ namespace rsx
 						rsx_log.warning("FIFO diag: fetch wait addr=0x%x put=0x%x cache=0x%x+0x%x to_fetch=0x%x bytes=%u next=0x%x",
 							addr, put, m_cache_addr, m_cache_size, to_fetch, bytes_read, m_next_cmd_entry);
 					}
+					// EXCISE-END fifo-stall-log
 
 					if (now - start_time >= 50u)
 					{
@@ -1117,7 +1132,7 @@ namespace rsx
 			return {true, ret};
 		}
 
-		// TODO(excise): level 1; the desync capture reads the cache snapshot so the
+		// TODO(excise): whole-unit; level 1; the desync capture reads the cache snapshot so the
 		// cached bytes can be compared with the ring at the same positions.
 		bool FIFO_control::peek_cache(u32 pos, u32& word) const
 		{
@@ -1446,6 +1461,7 @@ namespace rsx
 				return;
 			}
 
+			// TODO(excise): level 1; a real method ends any NOP run.
 			m_diag_nop_run = 0;
 
 			if (count > 1)
