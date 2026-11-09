@@ -51,7 +51,18 @@ namespace mtl
 	{
 		// The per-pass edges and the split request belong to the pass.  The records
 		// stay, and so does a carried edge: the caller emits it on the encoder this
-		// pass opens.
+		// pass opens.  The satisfied masks are per-pass scratch — they suppress
+		// duplicate emission of one hazard within one pass, and they must not
+		// silence the edge a later pass owes the same record, so every pass starts
+		// with them clear.
+		for (record& entry : m_records)
+		{
+			entry.write_satisfied_same = 0;
+			entry.write_satisfied_earlier = 0;
+			entry.read_satisfied_same = 0;
+			entry.read_satisfied_earlier = 0;
+		}
+
 		m_pending.clear();
 		m_pass++;
 		m_split = false;
@@ -113,12 +124,11 @@ namespace mtl
 			entry.range = range;
 		}
 
-		// The producers of this read split by pass: the queue form orders an earlier
-		// pass, while a writer in this pass may still need the split path.  Merging
-		// them into one queue-scope edge would skip that split.
-		MTL::Stages same_pass = 0;
-		MTL::Stages earlier_pass = 0;
-
+		// Each conflicting write is its own edge, per bucket.  The satisfied mask is
+		// per candidate, so a same-object conflict and a range-alias conflict from
+		// two different images never share a suppression.  Emitting per candidate —
+		// instead of unioning into one spec — keeps a legal intra-pass producer
+		// from being carried along by an illegal one in the same bucket.
 		for (record* candidate : m_write_records)
 		{
 			if (!candidate->write_stages)
@@ -134,29 +144,21 @@ namespace mtl
 				continue;
 			}
 
-			if (candidate->write_pass == m_pass)
+			const bool same_bucket = candidate->write_pass == m_pass;
+			MTL::Stages& satisfied = same_bucket ? candidate->write_satisfied_same : candidate->write_satisfied_earlier;
+			const MTL::Stages missing = stages & ~satisfied;
+
+			if (!missing)
 			{
-				same_pass |= candidate->write_stages;
-			}
-			else
-			{
-				earlier_pass |= candidate->write_stages;
+				continue;
 			}
 
-			candidate->write_stages = 0;
+			satisfied |= stages;
+
+			m_pending.push_back(barrier_spec{ candidate->write_stages, missing, MTL4::VisibilityOptionDevice, !same_bucket });
 		}
 
-		if (same_pass)
-		{
-			m_pending.push_back(barrier_spec{ same_pass, stages, MTL4::VisibilityOptionDevice, false });
-		}
-
-		if (earlier_pass)
-		{
-			m_pending.push_back(barrier_spec{ earlier_pass, stages, MTL4::VisibilityOptionDevice, true });
-		}
-
-		entry.read_stages = stages;
+		entry.read_stages |= stages;
 		entry.read_pass = m_pass;
 		index_read(entry);
 	}
@@ -171,9 +173,6 @@ namespace mtl
 			entry.range = range;
 		}
 
-		MTL::Stages same_pass = 0;
-		MTL::Stages earlier_pass = 0;
-
 		const auto consume = [&](record& candidate)
 		{
 			if (!candidate.read_stages)
@@ -181,16 +180,18 @@ namespace mtl
 				return;
 			}
 
-			if (candidate.read_pass == m_pass)
+			const bool same_bucket = candidate.read_pass == m_pass;
+			MTL::Stages& satisfied = same_bucket ? candidate.read_satisfied_same : candidate.read_satisfied_earlier;
+			const MTL::Stages missing = stages & ~satisfied;
+
+			if (!missing)
 			{
-				same_pass |= candidate.read_stages;
-			}
-			else
-			{
-				earlier_pass |= candidate.read_stages;
+				return;
 			}
 
-			candidate.read_stages = 0;
+			satisfied |= stages;
+
+			m_pending.push_back(barrier_spec{ candidate.read_stages, missing, MTL4::VisibilityOptionDevice, !same_bucket });
 		};
 
 		// The same object is always a hazard, even when the two notes carry different
@@ -223,17 +224,11 @@ namespace mtl
 			}
 		}
 
-		if (same_pass)
-		{
-			m_pending.push_back(barrier_spec{ same_pass, stages, MTL4::VisibilityOptionDevice, false });
-		}
-
-		if (earlier_pass)
-		{
-			m_pending.push_back(barrier_spec{ earlier_pass, stages, MTL4::VisibilityOptionDevice, true });
-		}
-
-		entry.write_stages = stages;
+		// The producer mask unions across notes: every stage-set ever written to the
+		// resource this frame is part of the barrier producer.  The satisfied masks
+		// are per-pass scratch (see begin_pass), so a repeated note across passes
+		// re-emits the edges that pass owes.
+		entry.write_stages |= stages;
 		entry.write_pass = m_pass;
 
 		if (!entry.write_listed)
@@ -249,6 +244,11 @@ namespace mtl
 		MTL_PERF_SCOPE(1, "pass/barrier batch");
 		if (!encoder)
 		{
+			// No encoder exists, so nothing can be emitted now — but the edges were
+			// computed from real hazards, and destroying them here would silently
+			// drop them for good.  Carry them into the split list: the next open
+			// pass emits them in queue form, the safest form.
+			m_carried.insert(m_carried.end(), m_pending.begin(), m_pending.end());
 			m_pending.clear();
 			return;
 		}

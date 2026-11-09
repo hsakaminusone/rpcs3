@@ -204,13 +204,49 @@ namespace mtl
 
 		struct key_hash
 		{
+			// The field-wise mix VKProgramPipeline.h uses (not fnv over the struct
+			// bytes): a whole-struct hash smears the enum padding and the bool holes
+			// into the key, so two otherwise-identical pipelines compiled from
+			// different stack garbage occupy one slot twice.  Every field the
+			// descriptor builds from is mixed explicitly; the mixes order matches
+			// operator== verbatim, so hash implies equality-capable lookup.
+			using base = unsigned long long;
+
 			usz operator()(const key& value) const
 			{
-				usz hash = 0;
-				hash ^= rpcs3::hash_base<unsigned>(value.vertex_id);
-				hash ^= rpcs3::hash_base<unsigned>(value.fragment_id);
-				hash ^= rpcs3::hash_struct<pipeline_properties>(value.properties);
-				return hash;
+				const auto& props = value.properties;
+
+				using seed_t = std::conditional_t<(sizeof(void*) == 8), base, unsigned>;
+				seed_t hash = 0xcbf29ce484222325ull;
+				const auto mix = [&hash](seed_t part) { hash = (hash ^ part) * 0x100000001b3ull; };
+
+				mix(value.vertex_id);
+				mix(value.fragment_id);
+				mix(static_cast<seed_t>(props.color_format));
+				mix(static_cast<seed_t>(props.attachment_count));
+				mix(static_cast<seed_t>(props.sample_count));
+				mix(props.alpha_to_coverage ? 1ull : 0ull);
+				mix(props.alpha_to_one ? 1ull : 0ull);
+				mix(props.raster_enabled ? 1ull : 0ull);
+				mix(static_cast<seed_t>(props.blend.enable_mask));
+				mix(static_cast<seed_t>(props.blend.source_rgb));
+				mix(static_cast<seed_t>(props.blend.source_a));
+				mix(static_cast<seed_t>(props.blend.destination_rgb));
+				mix(static_cast<seed_t>(props.blend.destination_a));
+				mix(static_cast<seed_t>(props.blend.equation_rgb));
+				mix(static_cast<seed_t>(props.blend.equation_a));
+				mix(props.blend.alpha_test_enabled ? 1ull : 0ull);
+				mix(props.blend.logic_op_enabled ? 1ull : 0ull);
+				mix(static_cast<seed_t>(props.blend.logic_operation));
+				mix(static_cast<seed_t>(props.blend.shade_mode));
+
+				for (const auto& mask : props.write_mask)
+				{
+					mix(static_cast<seed_t>(mask));
+				}
+
+				mix(static_cast<seed_t>(props.input_primitive_topology));
+				return static_cast<usz>(hash);
 			}
 		};
 

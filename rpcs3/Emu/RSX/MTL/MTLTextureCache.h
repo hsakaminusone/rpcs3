@@ -32,6 +32,10 @@ namespace mtl
 		using image_storage_type      = mtl::texture;
 		using texture_format          = MTL::PixelFormat;
 		using viewable_image_type     = mtl::texture*;
+
+		// Metal has no feedback-loop primitive, so a bound render target that is
+		// sampled by the same draw must be copied before it can be read.
+		static constexpr bool requires_feedback_loop_copy = true;
 	};
 
 	// The host extent of a guest texture.  Metal requires at least one texel and

@@ -204,6 +204,8 @@ if(BUILD_RPCS3_TESTS)
             tests/test_rsx_metal4_dials.cpp
             tests/test_rsx_metal4_interpreter.cpp
             tests/test_rsx_metal4_mapping.cpp
+            tests/test_rsx_metal4_pass_policy.cpp
+            tests/test_rsx_metal4_scheduler.cpp
             tests/test_rsx_metal4_state.cpp
             tests/test_rsx_mm_queue.cpp
             tests/test_simple_array.cpp

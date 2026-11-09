@@ -2547,7 +2547,7 @@ namespace rsx
 					const bool force_convert = !render_target_format_is_compatible(texptr, attr.gcm_format);
 
 					auto result = helpers::process_framebuffer_resource_fast<sampled_image_descriptor>(
-						cmd, texptr, attr, {}, scale, extended_dimension, remap, true, force_convert);
+						cmd, texptr, attr, {}, scale, extended_dimension, remap, true, force_convert, traits::requires_feedback_loop_copy);
 
 					if (!options.skip_texture_barriers && result.is_cyclic_reference)
 					{
@@ -2575,7 +2575,7 @@ namespace rsx
 					const bool surface_is_rop_target = m_rtts.address_is_bound(last.base_address);
 
 					auto result = helpers::process_framebuffer_resource_fast<sampled_image_descriptor>(
-						cmd, last.surface, attr, position2u(last.src_area.x, last.src_area.y), scale, extended_dimension, remap, surface_is_rop_target, force_convert);
+						cmd, last.surface, attr, position2u(last.src_area.x, last.src_area.y), scale, extended_dimension, remap, surface_is_rop_target, force_convert, traits::requires_feedback_loop_copy);
 
 					if (!options.skip_texture_barriers && result.is_cyclic_reference)
 					{
@@ -2890,7 +2890,9 @@ namespace rsx
 				 * 3. Surface is swapped back in. Surface cache resets layout to optimal rasterization layout
 				 * 4. During bind, the surface is converted to shader layout because it is not in GENERAL layout
 				 */
-				if (!texture_cache_helpers::force_strict_fbo_sampling(result.second->samples()))
+				const bool force_copy = traits::requires_feedback_loop_copy ||
+					texture_cache_helpers::force_strict_fbo_sampling(result.second->samples());
+				if (!force_copy)
 				{
 					insert_texture_barrier(cmd, result.second, false);
 				}

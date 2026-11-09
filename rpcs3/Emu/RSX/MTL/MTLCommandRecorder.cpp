@@ -847,6 +847,15 @@ namespace mtl
 		MTL_PERF_SCOPE(1, "recorder/close encoder");
 		if (m_encoder)
 		{
+			// The encoder boundary is the backstop the rest of the backend relies on:
+			// Metal 4 tracks no hazards, so once this encoder ends, nothing else in the
+			// backend is obliged to reconstruct what it wrote.  StageAll includes the
+			// tile stage, so a stored attachment is ordered even when the producer was
+			// a render pass's tile flush (L202 question (a); KK does the same in
+			// end_encoder, kk_cmd_buffer.c:266).
+			emit_producer_barrier(m_encoder,
+				barrier_spec{ MTL::StageAll, MTL::StageAll, MTL4::VisibilityOptionDevice, true });
+
 			m_encoder->endEncoding();
 			m_encoder = nullptr;
 		}

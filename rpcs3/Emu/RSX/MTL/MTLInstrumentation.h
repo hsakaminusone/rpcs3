@@ -33,8 +33,18 @@
  *                        printed by the per-draw trace; every other draw is
  *                        counted and dropped.
  *   MTL_PROBE_PIXELS     the fixed-patch readback after every draw of a
- *                        capture window (on/off).  The patch list comes from
- *                        MTL_PROBE_PIXELS ("x,y,w,h;x,y,w,h").
+ *                        capture window.  The patch list is a semicolon list of
+ *                        "x,y,w,h" (up to eight patches).
+ *   MTL_PROBE_TAPE       the rolling pixel tape's depth in frames (default 0,
+ *                        off).  The tape keeps the last N presented frames and
+ *                        the images a feedback-loop sample read (up to 2048
+ *                        square, so a full post-chain input fits), on the GPU,
+ *                        and writes them when F12 freezes it.  N is raised to
+ *                        at least 8 while enabled so a slot is never reused
+ *                        before its frame has completed.  At the freeze the
+ *                        present stream is read back as a timeline
+ *                        (newly-black/newly-dark, bbox, worst 16x16 cell) and
+ *                        each sample image gets a black/dark tally.
  *   MTL_PROBE_VARIANT    the experiment arms, semicolon separated.  State-only
  *                        arms never touch the shipping archive; the shader arms
  *                        build into their own archive suffix.  The arms:
@@ -461,10 +471,37 @@ namespace mtl::probe
 	// widened for one run.  The cost is one queue round trip per probe.
 	inline u32 pixel_probe_limit()
 	{
-		// Race frames run past 600 draws; the per-window probe limit is a
-		// compile constant large enough to cover the failing band's draw even
-		// in a season-2 frame (INVESTIGATION-2026-10-22 §10.6).
-		return 512u;
+		// The RCA run watches the whole capture window, not a prefix of one
+		// frame.  A race frame reaches ~1100 draws and a 120-frame window is
+		// ~130000 draws, so the limit covers the window with headroom.  The
+		// cost is one queue round trip per probed draw, and a run that sets a
+		// 120-frame window pays it deliberately.
+		return 400000u;
+	}
+
+	// TODO(excise): level 5; why nothing is captured when the trigger frame is
+	// already gone.  The user presses the key after seeing the defect, and the
+	// capture window starts on the next frame, so the frame that showed the
+	// defect is never the frame that is dumped.  The tape keeps the last few
+	// presented frames and the small images a feedback-loop sample read, on the
+	// GPU and without a readback, and F12 freezes it.  A depth below 8 is raised
+	// to 8, because a slot must not be reused while its frame is still in flight.
+	inline u32 tape_depth()
+	{
+		static const u32 cached = [] {
+			const char* text = std::getenv("MTL_PROBE_TAPE");
+			const u64 parsed = text ? std::strtoull(text, nullptr, 10) : 0;
+
+			if (!parsed)
+			{
+				return 0u;
+			}
+
+			const u64 depth = parsed < 8 ? 8 : parsed;
+			return static_cast<u32>(depth > 64 ? 64 : depth);
+		}();
+
+		return cached;
 	}
 
 	// TODO(excise): level 5; the RCA pack.  One host-side census of every texture
@@ -919,6 +956,41 @@ namespace mtl::probe
 				mtl_log.warning("Metal 4 probe: the run reached its budget of %lld lines; later lines are counted only",
 					static_cast<long long>(run_line_budget()));
 			});
+
+			return false;
+		}
+
+		return true;
+	}
+
+	// The phase witness is the device-verdict instrument, so it must still be
+	// printing when the race starts.  The generic text budget is per call site
+	// (4096 lines), and one witness line per frame crosses that in about two
+	// minutes, which is before the game reaches the car: the budget would go
+	// quiet exactly when the evidence appears.  A witness line therefore has its
+	// own high cap and does not spend the generic site/interval budgets.
+	inline u32 witness_line_cap()
+	{
+		return 400000u;
+	}
+
+	inline std::atomic<u32>& witness_lines()
+	{
+		static std::atomic<u32> value{0};
+		return value;
+	}
+
+	inline bool allow_witness_line()
+	{
+		const u32 line = witness_lines().fetch_add(1, std::memory_order_relaxed);
+
+		if (line >= witness_line_cap())
+		{
+			if (line == witness_line_cap())
+			{
+				mtl_log.warning("Metal 4 probe: the witness reached its cap of %u lines; later witness lines are dropped",
+					witness_line_cap());
+			}
 
 			return false;
 		}
@@ -1539,6 +1611,17 @@ namespace mtl::perf
 		} \
 	} while (false)
 
+// A witness line is the evidence the run exists to produce, so it is not bound
+// by the per-site cap that silences an ordinary trace before the race.  It has
+// its own large cap and prints at the level gate alone.
+#define MTL_NOTE_WITNESS(level, ...) \
+	do { \
+		if (::mtl::probe::at_least(level) && ::mtl::probe::allow_witness_line()) \
+		{ \
+			::mtl::probe::sink().write(__VA_ARGS__); \
+		} \
+	} while (false)
+
 // One warning line at the given level.  A warning carries a decision, so it is
 // not capped: it is gated by the level alone.
 #define MTL_WARN(level, ...) do { if (::mtl::probe::at_least(level)) { mtl_log.warning(__VA_ARGS__); } } while (false)
@@ -1559,6 +1642,7 @@ namespace mtl::perf
 #else
 
 #define MTL_NOTE(level, ...) do {} while (false)
+#define MTL_NOTE_WITNESS(level, ...) do {} while (false)
 #define MTL_WARN(level, ...) do {} while (false)
 #define MTL_ERROR(level, ...) do {} while (false)
 #define MTL_NOTE_DUMP(level, expr) do {} while (false)

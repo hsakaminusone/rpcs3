@@ -112,7 +112,19 @@ namespace mtl
 
 		MTL4::RenderCommandEncoder* open_pass(const MTL4::RenderPassDescriptor* descriptor, MTL4::RenderEncoderOptions options = MTL4::RenderEncoderOptionNone);
 		MTL4::ComputeCommandEncoder* open_compute();
+
+		// End the open encoder, if any.  Every encoder ends with a producer-scope
+		// ALL->ALL barrier: Metal 4 tracks no hazards, so the encoder boundary is
+		// the one place the backend can guarantee that a later encoder observes
+		// everything an earlier one wrote.  This is the recorder's contract, not the
+		// scheduler's; the scheduler is an optimiser and may not weaken it
+		// (METAL4-ARCH-REDESIGN-2026-11-09.md C2).
 		void close_encoder();
+
+		// The encoder currently open on the recorder, or null.  A caller that keeps
+		// an encoder across draws must compare its own pointer with this: a copy,
+		// upload, readback or re-entered slot closes the encoder behind its back.
+		MTL4::CommandEncoder* current_encoder() const { return m_encoder; }
 
 		MTL4::ArgumentTable* vertex_table() const { return m_slots[m_slot].vertex_table; }
 		MTL4::ArgumentTable* fragment_table() const { return m_slots[m_slot].fragment_table; }

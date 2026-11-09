@@ -15,6 +15,7 @@
 #include "MTLFormats.h"
 #include "MTLFramebuffer.h"
 #include "MTLInstrumentation.h"
+#include "MTLPassPolicy.h"
 #include "MTLPassScheduler.h"
 #include "MTLPresent.h"
 #include "MTLPresenter.h"
@@ -81,6 +82,10 @@ namespace mtl
 	// TODO(excise): level 3; the draw census is collected in the draw path and
 	// printed once at teardown, so a run that is quit normally keeps the counts.
 	void diagnostic_census_report();
+
+	// TODO(excise): level 5; the rolling tape is frozen where a window is armed,
+	// so an automatic trigger keeps the frames before it too.
+	void diagnostic_tape_freeze();
 
 	namespace
 	{
@@ -358,6 +363,7 @@ namespace mtl
 			diagnostic_capture_dump_pending = true;
 			++diagnostic_capture_windows;
 			diagnostic_reset_window_state();
+			diagnostic_tape_freeze();
 
 			MTL_NOTE(2, "Metal 4: probe capture %u armed by %s at frame %llu, window %llu..%llu, %.3f s",
 				diagnostic_capture_windows, reason,
@@ -634,9 +640,8 @@ namespace mtl
 		// frame is the first captured frame), and a run dumps at most this many
 		// image files in total, so one capture window cannot fill a disk.  Compile
 		// constants, not switches: a run that wants more opens a shorter window.
-		constexpr u32 diagnostic_capture_frame_budget = 4;
-		constexpr u32 diagnostic_capture_run_budget = 384;
-		constexpr u32 diagnostic_present_dump_budget = 24;
+		constexpr u32 diagnostic_capture_frame_budget = 6;
+		constexpr u32 diagnostic_capture_run_budget = 2048;
 		const void* diagnostic_capture_images[diagnostic_capture_image_limit] = {};
 		u32 diagnostic_capture_image_count = 0;
 		u32 diagnostic_window_dump_frames = 0;
@@ -1285,9 +1290,20 @@ namespace mtl
 		// state does not carry, so the key holds exactly the pipeline's inputs.
 		pipeline_properties capture_pipeline_properties(const rsx::context& ctx, const surface_state& surface, const RSXVertexProgram& vertex)
 		{
-			const blend_state blend = capture_blend_state(ctx);
+			blend_state blend = capture_blend_state(ctx);
 			const raster_state raster = capture_raster_state(ctx);
 			const anti_aliasing_state aa = capture_anti_aliasing_state(ctx.draw_state.multisample);
+
+			// The guest drives the compose epilogue with the programmable-blend
+			// descriptor bits (signed equations, forced blending); the epilogue blends
+			// in the fragment shader through the framebuffer fetch.  The fixed-function
+			// blend unit must not run on top of it — VK drops the FF blend here for the
+			// same reason (RSX forces PB for any draw with a signed equation).  The
+			// RSX bytes are otherwise unchanged; this only clears the FF enable mask.
+			if (ctx.program.fragment_program.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
+			{
+				blend.enable_mask = 0;
+			}
 
 			pipeline_properties properties;
 			properties.color_format = surface.color_format;
@@ -2247,6 +2263,28 @@ namespace mtl
 		const u32 row_count = pixel_size ? height : (height + block_edge - 1) / block_edge;
 		const u32 row_pitch = utils::align(row_bytes, 0x100);
 		const u64 length = static_cast<u64>(row_pitch) * row_count;
+
+		// The user presses F12 several times in one run (menu, then two or three
+		// times in the race), so the deep dumps are bounded by bytes, not only by
+		// file count.  A little over a gigabyte of image files plus the tape's own
+		// half-gigabyte keeps a four-window run well inside the free space on the
+		// machine while still writing the frames that matter.
+		constexpr u64 diagnostic_image_byte_budget = 1024ull * 1024ull * 1024ull;
+		static u64 diagnostic_image_bytes = 0;
+		static bool diagnostic_image_byte_budget_reported = false;
+
+		if (diagnostic_image_bytes + length > diagnostic_image_byte_budget)
+		{
+			if (!diagnostic_image_byte_budget_reported)
+			{
+				diagnostic_image_byte_budget_reported = true;
+				MTL_NOTE(2, "Metal 4: capture image byte budget %llu exhausted; later images are counted, not dumped",
+					static_cast<unsigned long long>(diagnostic_image_byte_budget));
+			}
+
+			return;
+		}
+
 		MTL::Buffer* buffer = resources.new_buffer(utils::align(length, 0x1000), MTL::StorageModeShared);
 
 		if (!buffer)
@@ -2333,6 +2371,7 @@ namespace mtl
 			{
 				const usz written = std::fwrite(bytes, 1, length, out);
 				std::fclose(out);
+				diagnostic_image_bytes += written;
 
 				if (written != length)
 				{
@@ -2364,10 +2403,518 @@ namespace mtl
 		u32 x, y, w, h;
 	};
 
-	diagnostic_pixel_rect diagnostic_pixel_rects[4] = {};
+	// One patch's post-draw readback.  `black` counts pure #000000 texels (the
+	// defect signature), `opaque` counts texels whose alpha survived, and the
+	// two together separate "a draw wrote black" from "nothing has written the
+	// region yet".  The per-draw series is the attribution: the draw whose black
+	// count jumps is the one that introduced the defect.
+	struct diagnostic_patch_observation
+	{
+		u32 rect = 0;
+		u32 x = 0;
+		u32 y = 0;
+		u32 width = 0;
+		u32 height = 0;
+		u32 black = 0;
+		u32 opaque = 0;
+		u32 pixels = 0;
+	};
+
+	// TODO(excise): level 5; the per-rect previous reading, so a sudden black
+	// jump is the trigger and a steady dark region is not.  The target address
+	// is part of the key: the same patch rect is read from different targets
+	// inside one frame, and a pass change is not an increase.
+	u32 diagnostic_patch_previous_black[8] = {};
+	u32 diagnostic_patch_previous_address[8] = {};
+
+	// TODO(excise): level 5; the automatic evidence dumps are bounded, because
+	// a continuously corrupt frame would otherwise dump every draw.  Each hit
+	// writes the target and the draw's sampled images once.
+	u32 diagnostic_black_patch_dumps = 0;
+	constexpr u32 diagnostic_black_patch_dump_limit = 32;
+	constexpr u32 diagnostic_black_patch_image_limit = 16;
+
+	diagnostic_pixel_rect diagnostic_pixel_rects[8] = {};
 	u32 diagnostic_pixel_rect_count = 0;
 	u32 diagnostic_pixel_probes = 0;
 	bool diagnostic_pixel_rects_read = false;
+
+	// TODO(excise): level 5; the per-frame black total.  A single frame can move
+	// the defect between patches, so the tally (not one patch's count) is what a
+	// frame is compared on.  It is logged with the feedback witness below.
+	u32 diagnostic_black_count = 0;
+
+	// TODO(excise): level 5; the feedback witness.  A unit that samples a bound
+	// render target is the only place Metal can differ from GL and Vulkan: GL
+	// makes it legal with glTextureBarrier and Vulkan with the feedback-loop
+	// layout, and Metal has neither, so it copies.  The witness records, per
+	// frame, how many such units were bound live and how many were copied, plus
+	// the last few (unit, address, path) triples.  A run after the fix must show
+	// live 0 for the post chain; a live count that is still nonzero names the
+	// unit the copy did not reach.
+	struct diagnostic_feedback_binding
+	{
+		MTL::Texture* image = nullptr;
+		u32 unit = 0;
+		u32 address = 0;
+		u32 target = 0;
+		u32 draw = 0;
+		bool copy = false;
+	};
+
+	u32 diagnostic_feedback_live = 0;
+	u32 diagnostic_feedback_copy = 0;
+	diagnostic_feedback_binding diagnostic_feedback_bindings[8] = {};
+	u32 diagnostic_feedback_binding_count = 0;
+
+	// TODO(excise): level 5; the rolling pixel tape (MTL_PROBE_TAPE).  Each frame
+	// owns one present stream and up to eight feedback streams.  A stream's
+	// buffer is persistent shared memory; a frame copies into it with the GPU and
+	// never reads it back, so the tape does not serialise the frame it watches.
+	// F12 freezes the ring and the next present reads it once.
+	struct diagnostic_tape_slot
+	{
+		MTL::Buffer* buffer = nullptr;
+		u64 capacity = 0;
+		u32 width = 0;
+		u32 height = 0;
+		u32 row_pitch = 0;
+		u32 address = 0;
+		u32 draw = 0;
+		u32 unit = 0;
+		u32 stream = 0;
+		u64 frame = 0;
+		bool present = false;
+		bool copy = false;
+		bool valid = false;
+	};
+
+	constexpr u32 diagnostic_tape_feedback_streams = 8;
+	constexpr u32 diagnostic_tape_streams = 1 + diagnostic_tape_feedback_streams;
+	constexpr u64 diagnostic_tape_byte_limit = 512ull * 1024ull * 1024ull;
+	// The tape's own allocations are bounded too: a post-chain feedback image is a
+	// full 1280x720 or 1408x768 target, and eight streams times the ring depth of
+	// those is more than the run should take.  A slot above the bound is skipped
+	// with one notice; the present stream and the smaller units still arrive.
+	constexpr u64 diagnostic_tape_allocation_limit = 448ull * 1024ull * 1024ull;
+	// A taped image larger than this is not part of the game's frame; skipping it
+	// keeps a pathological guest extent from sizing a persistent buffer.
+	constexpr u32 diagnostic_tape_max_dimension = 2048;
+	std::vector<diagnostic_tape_slot> diagnostic_tape;
+	bool diagnostic_tape_frozen = false;
+	u64 diagnostic_tape_bytes = 0;
+	u64 diagnostic_tape_allocated = 0;
+	u32 diagnostic_tape_dumps = 0;
+	bool diagnostic_tape_budget_reported = false;
+	bool diagnostic_tape_allocation_reported = false;
+
+	diagnostic_tape_slot* diagnostic_tape_slot_for(u64 frame, u32 stream)
+	{
+		const u32 depth = probe::tape_depth();
+
+		if (!depth || stream >= diagnostic_tape_streams)
+		{
+			return nullptr;
+		}
+
+		if (diagnostic_tape.empty())
+		{
+			diagnostic_tape.resize(static_cast<usz>(depth) * diagnostic_tape_streams);
+		}
+
+		return &diagnostic_tape[static_cast<usz>(frame % depth) * diagnostic_tape_streams + stream];
+	}
+
+	bool diagnostic_tape_reserve(diagnostic_tape_slot& slot, u64 length, resource_manager& resources)
+	{
+		if (slot.buffer && slot.capacity >= length)
+		{
+			return true;
+		}
+
+		// A slot that grows replaces its buffer rather than failing: the present
+		// stream starts at the boot resolution and later the game presents at its
+		// own, and a feedback stream's first image can be a small scratch target
+		// while the post chain's input is a full 1280x720 frame.  The old buffer is
+		// deferred, not freed, so a copy already queued into it stays valid.
+		const u64 capacity = utils::align(length, 0x1000);
+
+		if (diagnostic_tape_allocated + capacity > diagnostic_tape_allocation_limit)
+		{
+			if (!diagnostic_tape_allocation_reported)
+			{
+				diagnostic_tape_allocation_reported = true;
+				MTL_NOTE_WITNESS(5, "Metal 4: pixel tape allocation %llu bytes exhausted; later images are skipped",
+					static_cast<unsigned long long>(diagnostic_tape_allocation_limit));
+			}
+
+			return false;
+		}
+
+		MTL::Buffer* buffer = resources.new_buffer(capacity, MTL::StorageModeShared);
+
+		if (!buffer)
+		{
+			return false;
+		}
+
+		resources.make_persistent(buffer);
+
+		if (slot.buffer)
+		{
+			diagnostic_tape_allocated -= slot.capacity;
+			resources.defer_release(slot.buffer);
+		}
+
+		slot.buffer = buffer;
+		slot.capacity = capacity;
+		diagnostic_tape_allocated += capacity;
+		return true;
+	}
+
+	void diagnostic_tape_copy(command_recorder& recorder, resource_manager& resources, MTL::Texture* image,
+		u32 address, u32 draw, u32 unit, u64 frame, u32 stream, bool present, bool copy)
+	{
+		if (!probe::tape_depth() || !image)
+		{
+			return;
+		}
+
+		const u32 width = static_cast<u32>(image->width());
+		const u32 height = static_cast<u32>(image->height());
+		const MTL::PixelFormat format = image->pixelFormat();
+
+		// The tape is a byte-for-byte record of the colour targets, so only the
+		// four-byte layouts are taped; a packed or compressed image would need its
+		// block geometry and is not part of the post chain.
+		if (!width || !height || width > diagnostic_tape_max_dimension || height > diagnostic_tape_max_dimension ||
+			image->sampleCount() != 1 ||
+			(format != MTL::PixelFormat::PixelFormatBGRA8Unorm && format != MTL::PixelFormat::PixelFormatRGBA8Unorm))
+		{
+			return;
+		}
+
+		diagnostic_tape_slot* slot = diagnostic_tape_slot_for(frame, stream);
+
+		if (!slot)
+		{
+			return;
+		}
+
+		const u32 row_pitch = utils::align(width * 4u, 0x100);
+		const u64 length = static_cast<u64>(row_pitch) * height;
+
+		if (!diagnostic_tape_reserve(*slot, length, resources))
+		{
+			return;
+		}
+
+		MTL4::ComputeCommandEncoder* encoder = recorder.open_compute();
+
+		if (!encoder)
+		{
+			return;
+		}
+
+		emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+		encoder->copyFromTexture(image, 0, 0, MTL::Origin::Make(0, 0, 0), MTL::Size::Make(width, height, 1),
+			slot->buffer, 0, row_pitch, row_pitch * height);
+		recorder.close_encoder();
+
+		slot->width = width;
+		slot->height = height;
+		slot->row_pitch = row_pitch;
+		slot->address = address;
+		slot->draw = draw;
+		slot->unit = unit;
+		slot->stream = stream;
+		slot->frame = frame;
+		slot->present = present;
+		slot->copy = copy;
+		slot->valid = true;
+	}
+
+	void diagnostic_tape_freeze()
+	{
+		if (!probe::tape_depth() || diagnostic_tape_frozen)
+		{
+			return;
+		}
+
+		diagnostic_tape_frozen = true;
+		MTL_NOTE(2, "Metal 4: pixel tape frozen at frame %llu, depth %u",
+			static_cast<unsigned long long>(diagnostic_frame_index), probe::tape_depth());
+	}
+
+	void diagnostic_tape_flush(command_recorder& recorder)
+	{
+		if (!diagnostic_tape_frozen)
+		{
+			return;
+		}
+
+		diagnostic_tape_frozen = false;
+
+		// The copies are still queued, so one wait makes every slot readable.
+		recorder.flush_for_readback();
+
+		// The two readings below run on the bytes that were just made CPU-visible.
+		// They cost nothing on the GPU and are what makes the tape a verdict rather
+		// than a pile of files: the present timeline names the flicker frames, and
+		// the sample tally says whether a feedback copy held black before its draw.
+		const auto slot_bytes = [](const diagnostic_tape_slot& slot) -> const u8*
+		{
+			return slot.buffer ? static_cast<const u8*>(slot.buffer->contents()) : nullptr;
+		};
+
+		const auto count_pixels = [&](const diagnostic_tape_slot& slot, u32& black, u32& dark)
+		{
+			black = 0;
+			dark = 0;
+
+			const u8* bytes = slot_bytes(slot);
+
+			if (!bytes)
+			{
+				return;
+			}
+
+			for (u32 y = 0; y < slot.height; ++y)
+			{
+				const u8* row = bytes + static_cast<u64>(y) * slot.row_pitch;
+
+				for (u32 x = 0; x < slot.width; ++x)
+				{
+					const u8* pixel = row + x * 4u;
+
+					if (!pixel[0] && !pixel[1] && !pixel[2])
+					{
+						++black;
+						++dark;
+					}
+					else if (std::max({ pixel[0], pixel[1], pixel[2] }) <= 16)
+					{
+						++dark;
+					}
+				}
+			}
+		};
+
+		for (diagnostic_tape_slot& slot : diagnostic_tape)
+		{
+			if (!slot.valid || !slot.buffer || slot.present)
+			{
+				continue;
+			}
+
+			u32 black = 0;
+			u32 dark = 0;
+			count_pixels(slot, black, dark);
+
+			MTL_NOTE_WITNESS(5, "Metal 4: tape sample frame %llu draw %u unit %u addr 0x%x %ux%u path %s, black %u dark %u of %u",
+				static_cast<unsigned long long>(slot.frame), slot.draw, slot.unit, slot.address,
+				slot.width, slot.height, slot.copy ? "copy" : "live",
+				black, dark, slot.width * slot.height);
+		}
+
+		// The present stream in frame order.  A newly-black pixel is the defect's
+		// own signature: it is pure #000000 now and was not pure black in the
+		// previous presented frame.  The count, the bounding box and the busiest
+		// 16x16 cell locate the flicker without a configured rect, and the line is
+		// printed for the frames before the key press, which no per-draw probe ever
+		// reaches.
+		{
+			std::vector<const diagnostic_tape_slot*> presents;
+
+			for (const diagnostic_tape_slot& slot : diagnostic_tape)
+			{
+				if (slot.valid && slot.buffer && slot.present)
+				{
+					presents.push_back(&slot);
+				}
+			}
+
+			std::sort(presents.begin(), presents.end(), [](const diagnostic_tape_slot* a, const diagnostic_tape_slot* b)
+			{
+				return a->frame < b->frame;
+			});
+
+			for (usz index = 1; index < presents.size(); ++index)
+			{
+				const diagnostic_tape_slot& now = *presents[index];
+				const diagnostic_tape_slot& before = *presents[index - 1];
+
+				if (now.width != before.width || now.height != before.height || now.frame <= before.frame)
+				{
+					continue;
+				}
+
+				const u8* now_bytes = slot_bytes(now);
+				const u8* before_bytes = slot_bytes(before);
+
+				if (!now_bytes || !before_bytes)
+				{
+					continue;
+				}
+
+				u32 newly_black = 0;
+				u32 newly_dark = 0;
+				u32 x0 = now.width;
+				u32 y0 = now.height;
+				u32 x1 = 0;
+				u32 y1 = 0;
+				u32 cell_x = 0;
+				u32 cell_y = 0;
+				u32 cell_count = 0;
+				// One counter per 16x16 cell of the whole taped image.  A 2048
+				// square is the largest the tape accepts, so 128 by 128 cells covers
+				// every slot; sizing this to the old 16 by 16 grid silently ignored
+				// everything right of or below x=255.
+				const u32 cell_columns = (now.width + 15u) / 16u;
+				u32 cells[128 * 128] = {};
+
+				for (u32 y = 0; y < now.height; ++y)
+				{
+					const u8* now_row = now_bytes + static_cast<u64>(y) * now.row_pitch;
+					const u8* before_row = before_bytes + static_cast<u64>(y) * before.row_pitch;
+
+					for (u32 x = 0; x < now.width; ++x)
+					{
+						const u8* now_pixel = now_row + x * 4u;
+						const u8* before_pixel = before_row + x * 4u;
+
+						const bool now_black = !now_pixel[0] && !now_pixel[1] && !now_pixel[2];
+						const bool before_black = !before_pixel[0] && !before_pixel[1] && !before_pixel[2];
+
+						const bool now_dark = now_black || std::max({ now_pixel[0], now_pixel[1], now_pixel[2] }) <= 16;
+						const bool before_dark = before_black || std::max({ before_pixel[0], before_pixel[1], before_pixel[2] }) <= 16;
+
+						if (!now_black || before_black)
+						{
+							if (!now_dark || before_dark)
+							{
+								continue;
+							}
+
+							++newly_dark;
+							continue;
+						}
+
+						++newly_black;
+						++newly_dark;
+
+						if (x < x0) x0 = x;
+						if (y < y0) y0 = y;
+						if (x > x1) x1 = x;
+						if (y > y1) y1 = y;
+
+						const u32 cell = (y / 16u) * cell_columns + (x / 16u);
+						if (cell < std::size(cells) && ++cells[cell] > cell_count)
+						{
+							cell_count = cells[cell];
+							cell_x = x & ~15u;
+							cell_y = y & ~15u;
+						}
+					}
+				}
+
+				if (newly_black || (newly_dark >= 64))
+				{
+					char bbox[64] = "-";
+
+					if (newly_black)
+					{
+						std::snprintf(bbox, sizeof(bbox), "%u,%u %ux%u", x0, y0,
+							x1 >= x0 ? x1 - x0 + 1 : 0u, y1 >= y0 ? y1 - y0 + 1 : 0u);
+					}
+
+					MTL_NOTE_WITNESS(5, "Metal 4: tape present frame %llu vs %llu %ux%u, newly-black %u bbox %s, newly-dark %u, worst cell %u,%u n=%u",
+						static_cast<unsigned long long>(now.frame), static_cast<unsigned long long>(before.frame),
+						now.width, now.height, newly_black, bbox, newly_dark, cell_x, cell_y, cell_count);
+				}
+			}
+		}
+
+		// Present frames are the flicker timeline and are written first.  A sample
+		// stream can be a full-size target, and the disk budget is one pool: if the
+		// samples filled it first, a later press would lose the very presents that
+		// prove the frame.  The loop therefore makes two passes, present then sample.
+		const auto write_slot = [&](diagnostic_tape_slot& slot)
+		{
+			if (!slot.valid || !slot.buffer)
+			{
+				return;
+			}
+
+			const u8* bytes = slot_bytes(slot);
+
+			if (!bytes)
+			{
+				slot.valid = false;
+				return;
+			}
+
+			const u32 row_bytes = slot.width * 4u;
+			const u64 file_bytes = static_cast<u64>(row_bytes) * slot.height;
+
+			// The measurement above always runs; only the file write is budgeted, so
+			// a full budget still leaves the timeline in the log.
+			if (diagnostic_tape_bytes + file_bytes > diagnostic_tape_byte_limit)
+			{
+				if (!diagnostic_tape_budget_reported)
+				{
+					diagnostic_tape_budget_reported = true;
+					MTL_NOTE_WITNESS(5, "Metal 4: pixel tape budget %llu bytes exhausted; remaining slots are dropped",
+						static_cast<unsigned long long>(diagnostic_tape_byte_limit));
+				}
+
+				slot.valid = false;
+				return;
+			}
+
+			char path[1024];
+			std::snprintf(path, sizeof(path), "%s/host-tape-f%llu-%s-s%u-d%u-u%u-addr%x-%ux%u.bin",
+				probe::dump_directory(), static_cast<unsigned long long>(slot.frame),
+				slot.present ? "present" : "sample", slot.stream, slot.draw, slot.unit, slot.address, slot.width, slot.height);
+
+			if (std::FILE* out = std::fopen(path, "wb"))
+			{
+				for (u32 y = 0; y < slot.height; ++y)
+				{
+					std::fwrite(bytes + static_cast<u64>(y) * slot.row_pitch, 1, row_bytes, out);
+				}
+
+				std::fclose(out);
+				diagnostic_tape_bytes += file_bytes;
+				++diagnostic_tape_dumps;
+			}
+
+			slot.valid = false;
+		};
+
+		std::error_code directory_error;
+		std::filesystem::create_directories(probe::dump_directory(), directory_error);
+
+		for (diagnostic_tape_slot& slot : diagnostic_tape)
+		{
+			if (slot.present)
+			{
+				write_slot(slot);
+			}
+		}
+
+		for (diagnostic_tape_slot& slot : diagnostic_tape)
+		{
+			if (!slot.present)
+			{
+				write_slot(slot);
+			}
+		}
+
+		MTL_NOTE_WITNESS(5, "Metal 4: pixel tape dumped %u slot(s), %llu bytes total, %llu bytes allocated",
+			diagnostic_tape_dumps, static_cast<unsigned long long>(diagnostic_tape_bytes),
+			static_cast<unsigned long long>(diagnostic_tape_allocated));
+	}
 
 	// TODO(excise): level 5; a capture window may open on a frame with thousands of
 	// draws (a race-start frame reached 670).  Every probe is a queue round trip,
@@ -2389,6 +2936,17 @@ namespace mtl
 		diagnostic_capture_vertex_dumps = 0;
 		diagnostic_window_dump_frames = 0;
 		diagnostic_frame_dump_images = 0;
+		diagnostic_black_patch_dumps = 0;
+
+		for (u32& previous : diagnostic_patch_previous_black)
+		{
+			previous = 0;
+		}
+
+		for (u32& address : diagnostic_patch_previous_address)
+		{
+			address = 0;
+		}
 	}
 
 	// TODO(excise): level 5; the sampled-image dedupe is per frame.  The frame
@@ -2400,6 +2958,19 @@ namespace mtl
 	{
 		diagnostic_capture_image_count = 0;
 		diagnostic_frame_dump_images = 0;
+
+		// The black-jump baseline is per frame: the first probe of a frame
+		// establishes it, so a pass from the previous frame cannot look like a
+		// rise and spend an evidence dump.
+		for (u32& previous : diagnostic_patch_previous_black)
+		{
+			previous = 0;
+		}
+
+		for (u32& address : diagnostic_patch_previous_address)
+		{
+			address = 0;
+		}
 	}
 
 	// TODO(excise): level 3; the census counts at teardown, the busiest row first.
@@ -2479,7 +3050,8 @@ namespace mtl
 		MTL_NOTE(2, "Metal 4: pixel probe, %u patch(es) configured", diagnostic_pixel_rect_count);
 	}
 
-	void probe_frame_pixels(command_recorder& recorder, resource_manager& resources, MTL::Texture* image, u32 serial, u64 fp_hash, u64 vp_hash)
+	void probe_frame_pixels(command_recorder& recorder, resource_manager& resources, MTL::Texture* image, u32 serial, u64 fp_hash, u64 vp_hash,
+		diagnostic_patch_observation* observations, u32* observation_count)
 	{
 		if (!image || !diagnostic_pixel_rect_count)
 		{
@@ -2497,6 +3069,24 @@ namespace mtl
 
 		const u32 slice_width = static_cast<u32>(image->width());
 		const u32 slice_height = static_cast<u32>(image->height());
+
+		// One readback per draw, not one per patch.  Each flush is a queue wait, so
+		// three patches would otherwise stall the frame three times at every draw;
+		// all the copies are recorded on one encoder and one wait makes them all
+		// CPU-visible.
+		struct pending_patch
+		{
+			u32 index = 0;
+			u32 x = 0;
+			u32 y = 0;
+			u32 width = 0;
+			u32 height = 0;
+			u32 row_pitch = 0;
+			MTL::Buffer* buffer = nullptr;
+		};
+
+		pending_patch pending[8] = {};
+		u32 pending_count = 0;
 
 		for (u32 index = 0; index < diagnostic_pixel_rect_count; ++index)
 		{
@@ -2516,28 +3106,53 @@ namespace mtl
 
 			if (!buffer)
 			{
-				return;
+				break;
 			}
 
 			resources.make_persistent(buffer);
+			pending[pending_count++] = { index, rect.x, rect.y, width, height, row_pitch, buffer };
+		}
 
-			MTL4::ComputeCommandEncoder* encoder = recorder.open_compute();
+		if (!pending_count)
+		{
+			return;
+		}
 
-			if (!encoder)
+		MTL4::ComputeCommandEncoder* encoder = recorder.open_compute();
+
+		if (!encoder)
+		{
+			for (u32 slot = 0; slot < pending_count; ++slot)
 			{
-				resources.defer_release(buffer);
-				return;
+				resources.defer_release(pending[slot].buffer);
 			}
 
-			// The draw just closed its encoder, so the patch is the state that draw
-			// left behind; the barrier orders that write before this copy.
-			emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
-			encoder->copyFromTexture(image, 0, 0, MTL::Origin::Make(rect.x, rect.y, 0), MTL::Size::Make(width, height, 1),
-				buffer, 0, row_pitch, row_pitch * height);
-			recorder.close_encoder();
-			recorder.flush_for_readback();
+			return;
+		}
 
-			const u8* bytes = static_cast<const u8*>(buffer->contents());
+		// The draw just closed its encoder, so the patch is the state that draw
+		// left behind; one barrier orders that write before every copy below.
+		emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+
+		for (u32 slot = 0; slot < pending_count; ++slot)
+		{
+			const pending_patch& patch = pending[slot];
+			encoder->copyFromTexture(image, 0, 0, MTL::Origin::Make(patch.x, patch.y, 0),
+				MTL::Size::Make(patch.width, patch.height, 1),
+				patch.buffer, 0, patch.row_pitch, patch.row_pitch * patch.height);
+		}
+
+		recorder.close_encoder();
+		recorder.flush_for_readback();
+
+		for (u32 slot = 0; slot < pending_count; ++slot)
+		{
+			const pending_patch& patch = pending[slot];
+			const u32 index = patch.index;
+			const u32 width = patch.width;
+			const u32 height = patch.height;
+			const u32 row_pitch = patch.row_pitch;
+			const u8* bytes = static_cast<const u8*>(patch.buffer->contents());
 
 			if (bytes)
 			{
@@ -2546,6 +3161,8 @@ namespace mtl
 				u8 seen[256] = {};
 				u32 distinct = 0;
 				u32 first = 0;
+				u32 black = 0;
+				u32 opaque = 0;
 
 				for (u32 y = 0; y < height; ++y)
 				{
@@ -2554,6 +3171,19 @@ namespace mtl
 					for (u32 x = 0; x < width; ++x)
 					{
 						const u8* pixel = row + x * 4u;
+
+						// BGRA/RGBA: the first three bytes are colour, the fourth
+						// alpha.  The defect is pure #000000, so all three colour
+						// bytes are zero; an opaque black pixel also carries alpha.
+						if (!pixel[0] && !pixel[1] && !pixel[2])
+						{
+							++black;
+						}
+
+						if (pixel[3])
+						{
+							++opaque;
+						}
 
 						for (u32 channel = 0; channel < 4; ++channel)
 						{
@@ -2576,14 +3206,20 @@ namespace mtl
 
 				const u32 pixels = width * height;
 
-				MTL_NOTE(2, "Metal 4: pixel probe draw %u patch %u %u,%u %ux%u, fp 0x%llx vp 0x%llx, mean b %.1f g %.1f r %.1f a %.1f, nonzero b %u g %u r %u a %u of %u, distinct %u, first 0x%08x",
-					serial, index, rect.x, rect.y, width, height, static_cast<unsigned long long>(fp_hash), static_cast<unsigned long long>(vp_hash),
+				if (observations && observation_count && *observation_count < 8)
+				{
+					observations[*observation_count] = { index, patch.x, patch.y, width, height, black, opaque, pixels };
+					++*observation_count;
+				}
+
+				MTL_NOTE(2, "Metal 4: pixel probe draw %u patch %u %u,%u %ux%u, fp 0x%llx vp 0x%llx, mean b %.1f g %.1f r %.1f a %.1f, nonzero b %u g %u r %u a %u of %u, black %u opaque %u, distinct %u, first 0x%08x",
+					serial, index, patch.x, patch.y, width, height, static_cast<unsigned long long>(fp_hash), static_cast<unsigned long long>(vp_hash),
 					static_cast<f64>(sums[0]) / pixels, static_cast<f64>(sums[1]) / pixels,
 					static_cast<f64>(sums[2]) / pixels, static_cast<f64>(sums[3]) / pixels,
-					nonzero[0], nonzero[1], nonzero[2], nonzero[3], pixels, distinct, first);
+					nonzero[0], nonzero[1], nonzero[2], nonzero[3], pixels, black, opaque, distinct, first);
 			}
 
-			resources.defer_release(buffer);
+			resources.defer_release(patch.buffer);
 		}
 	}
 
@@ -2602,6 +3238,10 @@ namespace mtl
 		frame.fragment_stencil = {};
 
 #if MTL_DEBUG_LOGS
+		// Each resolve is one draw's unit set.  The draw loop consumes the
+		// feedback witness this resolve produced, not the previous draw's.
+		diagnostic_feedback_binding_count = 0;
+
 		// The per-unit trace runs near once per draw per unit, so a bounded prefix of
 		// the run carries it and the counters carry the rest (anti-flood rule).
 		static u32 diagnostic_unit_traces = 0;
@@ -2698,6 +3338,49 @@ namespace mtl
 			frame.fragment_textures[i] = frame.textures.resolve_texture_bind(
 				frame.recorder, descriptor,
 				frame.samplers.get(capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i))), deferred);
+
+#if MTL_DEBUG_LOGS
+			// TODO(excise): level 5; the feedback witness.  The shared cache sets
+			// `is_feedback_loop_read` when the unit samples the bound target, so this
+			// line separates "the draw read a live attachment" from "the cache
+			// copied it first" without guessing from the address.  A run after the
+			// fix must show `copy` for the post chain; a surviving `live` names the
+			// unit the copy did not reach.
+			if (probe::at_least(5) && descriptor->is_feedback_loop_read)
+			{
+				// A copy descriptor carries no live view; the expired-feedback
+				// rebuild above also clears it.  Deriving the path from the handle
+				// therefore survives that rebuild, where the old
+				// `is_cyclic_reference` test mislabelled the rebuilt copy as live.
+				const bool copied = !descriptor->image_handle;
+
+				if (copied)
+				{
+					++diagnostic_feedback_copy;
+				}
+				else
+				{
+					++diagnostic_feedback_live;
+				}
+
+				if (diagnostic_feedback_binding_count < std::size(diagnostic_feedback_bindings))
+				{
+					diagnostic_feedback_binding& binding = diagnostic_feedback_bindings[diagnostic_feedback_binding_count++];
+					binding.image = descriptor->image_handle
+						? descriptor->image_handle->value()
+						: static_cast<MTL::Texture*>(probe::deferred_dump.image);
+					binding.unit = i;
+					binding.address = descriptor->ref_address;
+					binding.target = 0;
+					binding.draw = diagnostic_current_draw;
+					binding.copy = copied;
+				}
+
+				MTL_NOTE_WITNESS(5, "Metal 4: feedback witness frame %llu draw %u unit %u addr 0x%x samples %u path %s",
+					static_cast<unsigned long long>(diagnostic_frame_index), diagnostic_current_draw, i,
+					descriptor->ref_address, descriptor->samples, copied ? "copy" : "live");
+			}
+#endif // MTL_DEBUG_LOGS
 
 			if (diagnostic_replace_textures() && diagnostic_replace_unit(i))
 			{
@@ -3014,12 +3697,15 @@ namespace mtl
 			}
 		}
 
-		// The attachment set is the pass's write set.
+		// The attachment set is the pass's write set.  The store is a tile-stage
+		// operation on Apple silicon (StoreActionStore), so the note names the
+		// fragment and tile stages — a fragment-only producer never claims to
+		// order the flush of the tile the pass wrote.
 		for (u32 index = 0; index < frame.attachments.color_count(); ++index)
 		{
 			surface* color = frame.attachments.color(index);
 			scheduler.note_write(color->resource_id(), color->get_memory_range(),
-				access_stages(rsx::surface_access::shader_write, false));
+				access_stages(rsx::surface_access::shader_write, false) | MTL::StageTile);
 
 			// A multisampled attachment resolves into its resolve target when the
 			// pass ends, and the resolve target is the image a later draw samples
@@ -3041,7 +3727,29 @@ namespace mtl
 		if (frame.attachments.has_depth())
 		{
 			scheduler.note_write(frame.attachments.depth()->resource_id(), frame.attachments.depth()->get_memory_range(),
-				access_stages(rsx::surface_access::shader_write, false));
+				access_stages(rsx::surface_access::shader_write, false) | MTL::StageTile);
+
+			// A multisampled depth attachment resolves into its resolve target in
+			// the resolve pass, which is a tile-stage write of that pass — the same
+			// note the colour branch carries for its resolve target (HLD-02 §2.2).
+			if (texture* depth_resolve = frame.attachments.depth()->resolve_surface.get())
+			{
+				scheduler.note_write(depth_resolve->resource_id(), frame.attachments.depth()->get_memory_range(), MTL::StageTile);
+			}
+
+			// A redirected depth unit also reads the stencil half of its surface
+			// through a castable view (MTLArgumentBinds.cpp:131-138).  The view is a
+			// separate Metal texture with no neighbour the scheduler can see, so the
+			// read is noted here against the depth surface's footprint — the stencil
+			// bytes live in the same guest range.  Coverage duplicates the mirror
+			// barrier for the mirror image, and extends it to the attachment write.
+			for (u32 unit = 0; unit < frame.fragment_stencil.size(); ++unit)
+			{
+				if (frame.fragment_stencil[unit].texture._impl)
+				{
+					scheduler.note_read(frame.fragment_stencil[unit].texture, frame.attachments.depth()->get_memory_range(), MTL::StageFragment);
+				}
+			}
 		}
 
 		// A cyclic reference the cache met while it resolved this clause: the surface
@@ -3076,6 +3784,14 @@ namespace mtl
 
 		frame_resources& frame = *m_frame_resources;
 		auto& draw_call = m_ctx->register_state->current_draw_clause;
+
+		// The recorder can have ended the encoder since the previous draw: an
+		// upload, a resolve, a readback, a present, or a slot re-entry.  The cached
+		// pointer is only valid while it still names the recorder's encoder.
+		if (frame.encoder && static_cast<MTL4::CommandEncoder*>(frame.encoder) != frame.recorder.current_encoder())
+		{
+			frame.encoder = nullptr;
+		}
 
 		// The core's resolve_scissor already intersected the viewport, clamped to the
 		// window and marked the invalid case.
@@ -3729,22 +4445,127 @@ namespace mtl
 			}
 		}
 
-		MTL4::RenderCommandEncoder* encoder = frame.attachments.open_pass(frame.recorder, 0, surface);
-		if (!encoder)
+		// C3: a draw cannot sample an attachment the open encoder is still rendering.
+		// Metal has no feedback primitive and a stage barrier cannot make tile memory
+		// samplable, so the encoder closes first.  The store plus the recorder's
+		// boundary barrier then make the stored image legal input to the fresh pass
+		// (H2).  The same-clause copy (L204) covers the case where the cache already
+		// resolved the unit to a temporary: that copy closed the encoder itself.
+		const auto samples_open_pass = [&]() -> bool
 		{
-			if (!diagnostic_pass_reported)
+			const auto conflicts = [&](MTL::ResourceID resource, const utils::address_range32& range)
 			{
-				diagnostic_pass_reported = true;
-				rsx_log.error("Metal 4: the pass of the draw could not open");
+				for (u32 index = 0; index < frame.attachments.color_count(); ++index)
+				{
+					mtl::surface* color = frame.attachments.color(index);
+
+					if (!color)
+					{
+						continue;
+					}
+
+					if (color->resource_id()._impl == resource._impl ||
+						(range.valid() && range.overlaps(color->get_memory_range())))
+					{
+						return true;
+					}
+				}
+
+				if (mtl::surface* depth = frame.attachments.depth())
+				{
+					if (depth->resource_id()._impl == resource._impl ||
+						(range.valid() && range.overlaps(depth->get_memory_range())))
+					{
+						return true;
+					}
+				}
+
+				return false;
+			};
+
+			for (u32 referenced = m_ctx->program.fp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			{
+				if ((referenced & 1) && frame.fragment_textures[i].texture._impl &&
+					conflicts(frame.fragment_textures[i].texture,
+						sampled_guest_range(m_ctx, m_ctx->register_state->fragment_textures[i])))
+				{
+					return true;
+				}
 			}
 
-			// Returning false runs the NOP draw and the shared bookkeeping
-			// (VKDraw.cpp:1283-1288).
+			for (u32 referenced = m_ctx->program.vp_metadata.referenced_textures_mask, i = 0; referenced; referenced >>= 1, ++i)
+			{
+				if ((referenced & 1) && frame.vertex_textures[i].texture._impl &&
+					conflicts(frame.vertex_textures[i].texture,
+						sampled_guest_range(m_ctx, m_ctx->register_state->vertex_textures[i])))
+				{
+					return true;
+				}
+			}
+
 			return false;
+		};
+
+		// A copy or upload during texture resolution can have ended the encoder
+		// since the top of this function; the pointer is only valid while the
+		// recorder still owns it.  A copy, upload, readback, framebuffer change or a
+		// re-entered slot closes the encoder behind this pointer, so the recorder is
+		// the authority (C1).  The depth mirror above is one such close: it runs in
+		// its own encoder.
+		if (frame.encoder &&
+			static_cast<MTL4::CommandEncoder*>(frame.encoder) != frame.recorder.current_encoder())
+		{
+			frame.encoder = nullptr;
 		}
 
-		frame.encoder = encoder;
-		record_pass_hazards(true);
+		draw_pass_policy policy;
+		policy.encoder_open = frame.encoder != nullptr;
+		policy.recorder_owns_encoder = policy.encoder_open;
+		policy.pass_key_matches = policy.encoder_open && frame.attachments.can_absorb();
+		policy.samples_attachment = policy.encoder_open && samples_open_pass();
+
+		if (policy.samples_attachment)
+		{
+			MTL_PROBE_LATCH(1, "recorder/pass split feedback");
+			frame.encoder = nullptr;
+			policy.encoder_open = false;
+			frame.recorder.close_encoder();
+		}
+
+		MTL4::RenderCommandEncoder* encoder = nullptr;
+
+		if (policy.absorbs())
+		{
+			encoder = frame.encoder;
+			MTL_PROBE_LATCH(1, "recorder/pass absorbed");
+		}
+		else
+		{
+			encoder = frame.attachments.open_pass(frame.recorder, 0, surface);
+
+			if (!encoder)
+			{
+				if (!diagnostic_pass_reported)
+				{
+					diagnostic_pass_reported = true;
+					rsx_log.error("Metal 4: the pass of the draw could not open");
+				}
+
+				// Returning false runs the NOP draw and the shared bookkeeping
+				// (VKDraw.cpp:1283-1288).
+				return false;
+			}
+
+			MTL_PROBE_LATCH(1, "recorder/pass opened");
+			frame.encoder = encoder;
+
+			// The hazard notes describe a pass, not a draw.  Within one encoder the
+			// only writes are attachment writes, ordered by the hardware's defined
+			// raster order, and a sampled attachment is copied before the pass opens.
+			// So the notes are recorded once per pass, and the recorder's boundary
+			// barrier orders the few pass transitions (C2/C6).
+			record_pass_hazards(true);
+		}
 
 		// The mirror copy ran in the encoder that open_pass closed, so the pass reads
 		// the mirror across a queue-scope edge.
@@ -3954,15 +4775,44 @@ namespace mtl
 		}
 		while (draw_call.next());
 
-		frame.encoder = nullptr;
-		frame.recorder.close_encoder();
+		// The post-draw instruments (tape, pixel probes, the first-draw dumps) read
+		// the attachment after the draw, so they need the pass closed.  They are the
+		// only post-draw reason to end a pass: every other draw leaves the encoder
+		// open for the next one, which is where the pass count collapses (C1).
+#if MTL_DEBUG_LOGS
+		const bool close_for_diagnostics = probe::tape_depth()
+			|| diagnostic_capture_active()
+			|| diagnostic_draws < 24;
+#else
+		constexpr bool close_for_diagnostics = false;
+#endif
+
+		if (close_for_diagnostics)
+		{
+			frame.encoder = nullptr;
+			frame.recorder.close_encoder();
+		}
 
 #if MTL_DEBUG_LOGS
+		// TODO(excise): level 5; the tape of the images this draw sampled from the
+		// bound target.  The bind recorded them and the draw's encoder is closed, so
+		// the images are stable and the copy is queued without a readback.
+		if (probe::tape_depth())
+		{
+			for (u32 binding = 0; binding < diagnostic_feedback_binding_count; ++binding)
+			{
+				const auto& entry = diagnostic_feedback_bindings[binding];
+				diagnostic_tape_copy(frame.recorder, frame.resources, entry.image,
+					entry.address, entry.draw, entry.unit, diagnostic_frame_index,
+					binding + 1, false, entry.copy);
+			}
+		}
+
 		// TODO(excise): level 5; the frame pixels a capture draw left behind.  The
 		// patch is read after the draw, so the alpha byte says whether the draw
 		// wrote the patch at all, and a patch that was already the same colour says
 		// a later draw owns it.
-		if (diagnostic_capture_active() && diagnostic_pixel_probes < 20000 && diagnostic_window_probes < diagnostic_window_probe_limit)
+		if (diagnostic_capture_active() && diagnostic_pixel_probes < 400000 && diagnostic_window_probes < diagnostic_window_probe_limit)
 		{
 			if (!diagnostic_pixel_rects_read)
 			{
@@ -3988,9 +4838,86 @@ namespace mtl
 
 					++diagnostic_pixel_probes;
 					++diagnostic_window_probes;
-					probe_frame_pixels(frame.recorder, frame.resources, target->value(), diagnostic_draws - 1,
-						static_cast<unsigned long long>(m_ctx->program.fp_metadata.ucode_hash),
-						static_cast<unsigned long long>(m_ctx->program.vp_metadata.ucode_hash));
+
+					const u32 probe_serial = diagnostic_draws - 1;
+					const u64 probe_fp = static_cast<unsigned long long>(m_ctx->program.fp_metadata.ucode_hash);
+					const u64 probe_vp = static_cast<unsigned long long>(m_ctx->program.vp_metadata.ucode_hash);
+					diagnostic_patch_observation observations[8] = {};
+					u32 observation_count = 0;
+
+					probe_frame_pixels(frame.recorder, frame.resources, target->value(), probe_serial, probe_fp, probe_vp,
+						observations, &observation_count);
+
+					// TODO(excise): level 5; the draw that introduces the defect.
+					// A sudden rise in the patch's pure-black count is the
+					// attribution, and the target plus every sampled image are
+					// dumped at that draw, so the black is either in an input or
+					// the shader produced it.  The previous reading is keyed by
+					// the target address, because one frame reads the patch from
+					// several targets and a pass change is not an increase.
+					for (u32 observation_index = 0; observation_index < observation_count; ++observation_index)
+					{
+						const auto& observation = observations[observation_index];
+						const u32 rect_index = observation.rect;
+
+						if (rect_index >= std::size(diagnostic_patch_previous_black))
+						{
+							continue;
+						}
+
+						diagnostic_black_count += observation.black;
+
+						const u32 previous = diagnostic_patch_previous_address[rect_index] == target->base_addr
+							? diagnostic_patch_previous_black[rect_index] : observation.black;
+
+						diagnostic_patch_previous_black[rect_index] = observation.black;
+						diagnostic_patch_previous_address[rect_index] = target->base_addr;
+
+						const bool jump = observation.black >= 64 && observation.black >= previous + 64;
+
+						if (!jump || diagnostic_black_patch_dumps >= diagnostic_black_patch_dump_limit)
+						{
+							continue;
+						}
+
+						++diagnostic_black_patch_dumps;
+
+						MTL_NOTE(2, "Metal 4: black patch draw %u rect %u %u,%u %ux%u, fp 0x%llx vp 0x%llx, black %u -> %u of %u, opaque %u, target 0x%x %ux%u fmt %u",
+							probe_serial, rect_index, observation.x, observation.y,
+							observation.width, observation.height, probe_fp, probe_vp,
+							previous, observation.black, observation.pixels, observation.opaque,
+							target->base_addr, target->width(), target->height(),
+							static_cast<u32>(target->pixel_format()));
+
+						// The target as the draw left it.
+						dump_host_image(frame.recorder, frame.resources, target->value(), "black-target",
+							probe_serial, target->base_addr);
+
+						// Every image the draw sampled.  A black region in one of
+						// these is the source; a clean set means the shader made it.
+						u32 dumped = 0;
+
+						for (u32 unit = 0; unit < m_fs_sampler_descriptors.size() && dumped < diagnostic_black_patch_image_limit; ++unit)
+						{
+							auto* descriptor = static_cast<texture_cache::sampled_image_descriptor*>(m_fs_sampler_descriptors[unit].get());
+
+							if (!descriptor || !descriptor->image_handle)
+							{
+								continue;
+							}
+
+							MTL::Texture* sampled = descriptor->image_handle->value();
+
+							if (!sampled)
+							{
+								continue;
+							}
+
+							dump_host_image(frame.recorder, frame.resources, sampled, "black-sample",
+								probe_serial * 16u + unit, static_cast<u32>(descriptor->ref_address));
+							++dumped;
+						}
+					}
 				}
 			}
 		}
@@ -5512,7 +6439,7 @@ namespace mtl
 				// TODO(excise): level 5; the present-source dump budget, per run.
 				// A bare run reaches 5-6 presents at this cap; the sparse and
 				// capture-window branches would otherwise dump every present.
-				constexpr u32 diagnostic_present_dump_budget = 24;
+				constexpr u32 diagnostic_present_dump_budget = 64;
 				static u32 diagnostic_present_dumps = 0;
 
 				// TODO(excise): level 2; the present branch.  The source resolves here
@@ -5539,12 +6466,50 @@ namespace mtl
 				diagnostic_presents++;
 
 #if MTL_DEBUG_LOGS
+				// TODO(excise): level 5; the rolling tape's presented frame.  The
+				// copy is recorded, not read, so it does not stall the present; F12
+				// freezes the ring and one readback at that present writes it.
+				if (probe::tape_depth())
+				{
+					diagnostic_tape_copy(resources.recorder, resources.resources, image,
+						address, diagnostic_current_draw, 0, diagnostic_frame_index,
+						0, true, false);
+				}
+
+				// TODO(excise): level 5; the per-frame witness, present in the log
+				// before the key press.  A `live` count for a bound-target sample is
+				// the unsafe Metal binding; `copy` is the fixed path.  The per-draw
+				// `feedback witness` line above names each binding; this line is the
+				// frame's tally and is not bound by the generic site cap, so it still
+				// prints when the race is reached.
+				if (probe::at_least(5) && (diagnostic_feedback_live || diagnostic_feedback_copy))
+				{
+					MTL_NOTE_WITNESS(5, "Metal 4: frame witness %llu present %u draw %u, feedback live %u copy %u, black %u",
+						static_cast<unsigned long long>(diagnostic_frame_index), diagnostic_present_index,
+						diagnostic_current_draw, diagnostic_feedback_live, diagnostic_feedback_copy,
+						diagnostic_black_count);
+				}
+
+				// The witness and the black tally are per frame, so the count starts
+				// over at the present that ends this frame.
+				diagnostic_black_count = 0;
+				diagnostic_feedback_live = 0;
+				diagnostic_feedback_copy = 0;
+				diagnostic_feedback_binding_count = 0;
+#endif // MTL_DEBUG_LOGS
+
+#if MTL_DEBUG_LOGS
 				// TODO(excise): level 5; the present readback of the first presents,
-				// the capture frame, and a sparse sample of the whole run.  The
-				// sparse sample is what reaches the menu video and the race start.
+				// a sparse sample of the whole run, and every eighth present of a
+				// capture window.  The user presses F12 three or four times, so a
+				// dense window dump would be hundreds of megabytes per press; the tape
+				// already keeps the dense pre-trigger frames and the per-draw probe
+				// keeps the patch timeline, so eight-frame sampling is enough here.
+				const bool periodic_present = diagnostic_present_index < 20000 && (diagnostic_present_index % 600) == 0;
+				const bool window_present = diagnostic_capture_active() && (diagnostic_present_index % 8) == 0;
+
 				if (image && diagnostic_present_dumps < diagnostic_present_dump_budget &&
-					(diagnostic_present_index < 6 || diagnostic_capture_active() ||
-					(diagnostic_present_index < 20000 && (diagnostic_present_index % 600) == 0)))
+					(diagnostic_present_index < 6 || window_present || periodic_present))
 				{
 					dump_host_image(resources.recorder, resources.resources, image, "present", diagnostic_present_index, address);
 					++diagnostic_present_dumps;
@@ -5609,6 +6574,7 @@ namespace mtl
 		if (screenshot_requested)
 		{
 			diagnostic_try_arm_capture("screenshot", true);
+			diagnostic_tape_freeze();
 		}
 #else
 		const bool user_asked_for_screenshot = g_user_asked_for_screenshot.exchange(false);
@@ -5639,6 +6605,11 @@ namespace mtl
 			// so a screenshot and an automatic trigger share the same ordering:
 			// the history before the current snapshot, then the forward burst.
 		}
+
+		// TODO(excise): level 5; the frozen tape.  The readback runs after the
+		// screenshot dump so both see the same submitted stream; the slots before
+		// the press are the frames the user was actually looking at.
+		diagnostic_tape_flush(resources.recorder);
 #endif
 
 		// The CPU-reduction limits are re-evaluated on an emu flip only

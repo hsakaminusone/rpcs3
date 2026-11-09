@@ -29,6 +29,8 @@ namespace vk
 		using image_storage_type      = vk::image;
 		using texture_format          = VkFormat;
 		using viewable_image_type     = vk::viewable_image*;
+
+		static constexpr bool requires_feedback_loop_copy = false;
 	};
 
 	class cached_texture_section : public rsx::cached_texture_section<vk::cached_texture_section, vk::texture_cache_traits>

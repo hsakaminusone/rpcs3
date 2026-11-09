@@ -467,6 +467,12 @@ namespace mtl
 
 			cmd.resources().defer_release(staging);
 		}
+
+		// The reused image may hold tile content of the pass that wrote it, and the copies above are blits:
+		// the producer-side queue edge makes this encoder's writes visible to everything after it, matching
+		// the resolve path (MTLSurface.cpp:533) and clear_memory/load_background.  On untracked heaps there
+		// is no other edge before the next sample of this image.
+		emit_producer_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageAll, MTL4::VisibilityOptionDevice });
 	}
 
 	void cached_texture_section::copy_texture(command_recorder& cmd, bool miss)
@@ -1005,7 +1011,7 @@ namespace mtl
 			// so this is the last point before the pass where its content can be
 			// read back.  The gather is the car's reflection unit, the one surface
 			// whose image the capture window never had at bind time.
-			if (probe::at_least(5))
+			if (probe::at_least(5) || probe::tape_depth())
 			{
 				probe::deferred_dump = { image->value(), desc->ref_address,
 					static_cast<u32>(desc->external_subresource_desc.op) };

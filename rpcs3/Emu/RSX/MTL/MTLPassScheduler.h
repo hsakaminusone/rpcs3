@@ -18,9 +18,15 @@ namespace mtl
 	// both.  vertex_stage selects the vertex half of the two shader rows.
 	MTL::Stages access_stages(rsx::surface_access access, bool vertex_stage);
 
-	// The hazard-derived pass scheduler (HLD-01 C3, HLD-03 §2.4).  It owns the
-	// encoder boundaries and every barrier.  It does not open or close encoders: it
-	// answers, and the caller acts.
+	// The hazard-derived pass scheduler.  It is an optimiser, not the correctness
+	// authority (METAL4-ARCH-REDESIGN-2026-11-09.md C6).
+	//
+	// Metal 4 tracks no hazards anywhere, so correctness comes from the recorder:
+	// every encoder ends with a producer-scope ALL->ALL device barrier, and the
+	// framebuffer/pass key decides when a draw may share an encoder (C1/C2).  A
+	// wrong note can therefore cost a barrier or a pass, never a missing one.
+	// Within a pass the scheduler may still order a resource it saw written and
+	// then read; outside it the boundary already orders everything.
 	//
 	// The hazard identity is the guest memory a resource occupies, not the Metal
 	// object that backs it.  RSX aliases arbitrary guest ranges: the same address
@@ -29,6 +35,12 @@ namespace mtl
 	// same bytes.  Keying a record by gpuResourceID therefore misses every such
 	// write-to-read edge, so each note carries the guest range it covers and two
 	// accesses conflict when their resources match or their ranges overlap.
+	//
+	// Ordering is the only thing that makes a report mean something: a pass
+	// boundary orders NOTHING by itself — only barriers do.  begin_pass() clears
+	// the per-pass queue and the split latch; the records survive, because a read
+	// in this pass must still be ordered behind a write in an earlier pass of the
+	// frame.
 	class pass_scheduler
 	{
 	public:
@@ -36,36 +48,46 @@ namespace mtl
 		// (HLD-03 §5).
 		void begin_frame();
 
-		// Start a pass.  A pass boundary orders everything already queued, so the
-		// per-pass edges and the split request clear here.  The per-resource record
-		// survives, because a read in this pass must still be ordered behind a write
-		// in an earlier pass of the frame.
+		// Start a pass.  A pass boundary orders nothing: only barriers do.
+		// begin_pass() clears the per-pass queue (m_pending) and the split latch;
+		// the per-resource record survives, because a read in this pass must still
+		// be ordered behind a write in an earlier pass of the frame.
 		void begin_pass();
 
 		// Record the read and the write of a resource at stages in the open pass.
-		// Each one consumes the opposite record, because the edge it finds is the
-		// edge it queues.  A range that is invalid (a resource with no guest bytes,
+		// Each one consumes the opposite record for the stages it carries, per
+		// consumer class, so a pair emits at most one barrier per bucket per frame;
+		// a record's producer mask is the union of every stage-set ever written to
+		// it this frame.  A range that is invalid (a resource with no guest bytes,
 		// such as a temporary image) matches by resource only.
 		void note_read(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages);
 		void note_write(MTL::ResourceID resource, utils::address_range32 range, MTL::Stages stages);
 
 		// Emit every queued edge that the open encoder can order.  An edge it cannot
 		// order is carried to the next encoder and latches the split request.
+		// When encoder is null (the framebuffer-invalid clear paths), nothing is
+		// emitted and every queued edge is carried into the carried list instead of
+		// being destroyed: the next open pass emits them in queue form.
 		void flush(MTL4::CommandEncoder* encoder);
 
 		// Emit the carried edges on the encoder the caller opened after the split.
 		// Returns false when nothing was carried.  The caller calls this before it
-		// records the new pass (HLD-03 §2.4).
+		// records the new pass.
 		bool emit_split_barriers(MTL4::CommandEncoder* encoder);
 
 		// An explicit request from the texture cache (I4).  A cyclic reference samples
 		// a surface an earlier pass of this frame wrote, so the pair is a queue-scope
-		// edge: the writer's tile has flushed and only the next encoder can carry it
-		// (HLD-03 §2.1 item 5).  The request waits in the carried list, because the
-		// sampler resolves before the consuming pass opens and begin_pass clears the
-		// per-pass queue.
+		// edge: the writer's tile has flushed and only the encoder that opens after
+		// the consuming resolve can carry it.  The request is pushed onto the carried
+		// list and the caller emits it from the current pass's encoder at the head of
+		// that pass.
 		void request_texture_barrier();
 
+		// A hint, never a correctness gate.  The recorder already orders every
+		// encoder boundary with ALL->ALL, so a missed split costs performance and a
+		// spurious one costs an encoder; neither changes the pixels.  The caller is
+		// therefore free to open a pass for reasons the scheduler did not predict
+		// (the framebuffer key, a feedback copy, a readback).
 		bool split_requested() const { return m_split; }
 
 		// The edges the notes have queued since the last begin_pass.  flush() emits
@@ -79,10 +101,23 @@ namespace mtl
 			// the resource has no guest bytes, so only its own id can match.
 			utils::address_range32 range;
 
+			// The producer mask is the union of every stage-set written to the
+			// resource this frame; adding new bits re-arms the satisfied masks.
 			MTL::Stages write_stages = 0;
 			u32 write_pass = 0;
+
+			// The union of the read stages noted so far this frame.
 			MTL::Stages read_stages = 0;
 			u32 read_pass = 0;
+
+			// Per-pass scratch: consumer stages for which an edge naming this
+			// record's producer mask has already been emitted in this pass, per
+			// bucket.  Cleared by every begin_pass, so an edge a later pass owes a
+			// record is never silenced by an earlier pass.
+			MTL::Stages write_satisfied_same = 0;
+			MTL::Stages write_satisfied_earlier = 0;
+			MTL::Stages read_satisfied_same = 0;
+			MTL::Stages read_satisfied_earlier = 0;
 
 			bool write_listed = false;
 			bool read_indexed = false;
