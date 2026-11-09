@@ -29,6 +29,67 @@ namespace mtl
 			&& a.raster_type == b.raster_type;
 	}
 
+	bool framebuffer::pass_key::matches(const pass_key& other) const
+	{
+		// The layout comparison is the same one bind() uses, so a set that bind()
+		// considers unchanged is a set this key considers unchanged.  The texture
+		// identities cover the cases the layout cannot: a surface swap, a resolve
+		// target appearing or changing, and a zcull buffer replacement.
+		return same_framebuffer(layout, other.layout)
+			&& color == other.color
+			&& resolve == other.resolve
+			&& depth == other.depth
+			&& depth_resolve == other.depth_resolve
+			&& visibility == other.visibility
+			&& color_count == other.color_count
+			&& sample_count == other.sample_count
+			&& width == other.width
+			&& height == other.height;
+	}
+
+	framebuffer::pass_key framebuffer::current_key() const
+	{
+		pass_key key;
+		key.layout = m_layout;
+		key.color_count = m_color_count;
+		key.sample_count = m_sample_count;
+		key.width = m_width;
+		key.height = m_height;
+		key.visibility = m_visibility;
+
+		for (u32 index = 0; index < m_color_count; ++index)
+		{
+			if (!m_color[index])
+			{
+				continue;
+			}
+
+			key.color[index] = m_color[index]->value();
+
+			if (texture* resolve = m_color[index]->resolve_surface.get())
+			{
+				key.resolve[index] = resolve->value();
+			}
+		}
+
+		if (m_depth)
+		{
+			key.depth = m_depth->value();
+
+			if (texture* depth_resolve = m_depth->resolve_surface.get())
+			{
+				key.depth_resolve = depth_resolve->value();
+			}
+		}
+
+		return key;
+	}
+
+	bool framebuffer::can_absorb() const
+	{
+		return m_has_pass_key && m_pass_key.matches(current_key());
+	}
+
 	void framebuffer::reset()
 	{
 		m_color = {};
@@ -38,6 +99,7 @@ namespace mtl
 		m_width = 0;
 		m_height = 0;
 		m_has_layout = false;
+		m_has_pass_key = false;
 	}
 
 	void framebuffer::bind(command_recorder& cmd, surface_cache& cache, const rsx::framebuffer_layout& layout, const rsx::surface_scaling_config_t& scaling)
@@ -229,6 +291,13 @@ namespace mtl
 
 		MTL4::RenderCommandEncoder* encoder = cmd.open_pass(descriptor);
 		descriptor->release();
+
+		// The pass is now the one a later draw may share.  Capture its inputs after
+		// the open: the recorder closed the previous encoder inside open_pass, and a
+		// draw that finds this key unchanged can encode into this pass without a
+		// boundary (C1).
+		m_pass_key = current_key();
+		m_has_pass_key = encoder != nullptr;
 		return encoder;
 	}
 }
