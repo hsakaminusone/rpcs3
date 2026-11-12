@@ -145,77 +145,28 @@ namespace rsx
 			flattening_helper flattener;
 		};
 
-		// The guest publishes with a single PUT register but alternates between
-		// command streams (Ridge Racer 7 uses two buffers ~4 MB apart). While the
-		// parser is inside one stream, PUT may already name the end of the other,
-		// so PUT is not a usable end marker for the stream being read. Track the
-		// published end of every stream separately and never read at or past it:
-		// a data word sitting exactly on the end has not been written for this
-		// pass yet. Flow control (jump/call/return) is the only way across.
+		// Pure decision table for the single-cursor parser (handoff §17, §18).
 		//
-		// A jump carries a strict frontier only when the producer has published the
-		// target: PUT inside it (a new command buffer) or below every stream (static
-		// code). A target above every stream that PUT does not name is a park area
-		// the guest patches later, and is read unbounded, exactly as the hardware
-		// reads it.
-		class stream_tracker
+		// Hardware has one read cursor and one producer position. PUT is the
+		// producer's watermark and it is *exclusive*: the word at PUT is not
+		// published, and there is no exception. A word there that looks like a
+		// link is previous-lap data; consuming it jumps into unwritten memory
+		// (the 2026-11-11 Demon's Souls regression, L214).
+		//
+		// Keeping the decision free of parser state lets the rule be tested
+		// directly.
+		struct cursor_rules
 		{
-		public:
-			static constexpr u32 max_put_gap = 0x100000;
-			static constexpr u32 max_streams = 4;
-
-			void reset(u32 base);
-			// A resync keeps the streams that are already known: a recovery point
-			// in static code must not turn the command buffers into fresh streams
-			// with a frontier on their base, which parks the parser for ever.
-			void reset_at(u32 base);
-			void note_put(u32 put, u32 pos);
-
-			// The word at a stream's published end is the link that carries the
-			// parser to the next stream. It is consumed only when the parser stands
-			// on it, and GET does not acknowledge it until then, so the producer
-			// cannot have recycled it yet.
-			static bool is_link(u32 word);
-
-			u32 frontier(u32 put, u32 addr) const;
-			void on_jump(u32 target, u32 put);
-			void on_call(u32 target, u32 pos);
-			void on_return();
-
-			// The parser is standing on the published end of a stream and the
-			// word there is not a link. If the producer has meanwhile published
-			// another stream, this chunk was abandoned mid-command and the link
-			// that would carry the parser out of it will never be written. Move
-			// the parser to the base of the stream the producer did publish.
-			bool redirect(u32 put, u32 addr, u32& target);
-
-			// TODO(excise): whole-unit; level 1; the park line reports why a redirect could
-			// not fire. A call owns the return address, and PUT must name a
-			// stream the parser has already entered.
-			bool in_call() const { return m_in_call; }
-			bool is_known(u32 addr) const;
-
-		private:
-			struct entry
+			enum class action : u8
 			{
-				u32 base = 0;
-				u32 frontier = 0;
-				bool linear = false;
+				read,  // the cursor is not on the producer: read the command there
+				idle,  // the cursor is on the producer: nothing is published yet
 			};
 
-			entry m_entries[max_streams];
-			u32 m_count = 0;
-			u32 m_current = 0;
-			u32 m_pending[max_streams] = {};
-			u32 m_pending_next = 0;
-			u32 m_pending_count = 0;
-			u32 m_saved = 0;
-			bool m_in_call = false;
-			bool m_call_linear = false;
-
-			bool find(u32 addr, u32& index) const;
-			u32 min_base() const;
-			void add(u32 base, u32 frontier, bool linear);
+			static action decide(u32 pos, u32 put)
+			{
+				return put == pos ? action::idle : action::read;
+			}
 		};
 
 		class FIFO_control
@@ -238,21 +189,27 @@ namespace rsx
 
 			u32 m_cache_addr = 0;
 			u32 m_cache_size = 0;
+			// PUT when the cache was filled. A word cached at or past that value
+			// was read ahead of the producer; once PUT moves past it the byte may
+			// have been rewritten, so the cache must be refilled, not reused.
+			u32 m_cache_put = 0;
 			alignas(64) std::byte m_cache[8][128];
 
-			// Published end of the stream the parser is currently in, kept as the
-			// hard upper bound for the cache and for whole-packet dispatch.
-			stream_tracker m_streams;
-			u32 m_published_end = 0;
+			// One cursor, no stream table. PUT is the producer's watermark and
+			// the producer's exit link is the only other way the cursor moves.
+			// See the FIFO park handoff, §17. The decision itself is
+			// cursor_rules::decide().
+			//
+			// TODO(excise): level 1; A/B switch for the whole-packet rule. Upstream
+			// (8183f6e32) dispatches a packet as soon as its header is read; the
+			// production model waits until every argument of the packet is
+			// published. This restores upstream's behaviour, so a run can show
+			// whether the gate is load-bearing for a given game.
+			bool m_upstream_semantics = false;
 
-			// Set when the parser has to leave a stream the producer abandoned.
-			// Consumed at the start of read(), where no packet is in flight.
-			u32 m_redirect = 0;
-
-			// The producer may recycle a chunk as soon as GET acknowledges it,
-			// so a word read at the published end is taken as the link only when
-			// it is a complete link to mapped memory; see fetch_u32.
-			bool is_valid_link(u32 word) const;
+			// A word of the command ring, read through the iomap. Used at a park
+			// (once per producer move) and by the diagnostics.
+			u32 ring_word(u32 addr) const;
 
 			// EXCISE-BEGIN fifo-diag-state
 			// TODO(excise): level 1; FIFO desync instrumentation.  The desync only
@@ -309,16 +266,7 @@ namespace rsx
 			u32 translate_address(u32 addr) const;
 
 			std::pair<bool, u32> fetch_u32(u32 addr);
-			void invalidate_cache() { m_cache_size = 0; m_published_end = 0; }
-
-			// Stream bookkeeping for the redirect commands. reset_streams() starts
-			// a linear stream at the boot position; strict streams are created when
-			// a jump enters a new command buffer. A resync preserves the streams
-			// that are already known.
-			void reset_streams(u32 base, bool preserve = false);
-			void on_jump(u32 target);
-			void on_call(u32 target);
-			void on_return();
+			void invalidate_cache() { m_cache_size = 0; }
 
 			u32 get_pos() const { return m_fifo_pos; }
 			u32 last_cmd() const { return m_cmd; }
@@ -347,17 +295,14 @@ namespace rsx
 			inline bool read_unsafe(register_pair& data);
 			bool skip_methods(u32 count);
 
-			// A word of the command ring, read through the iomap. Only the
-			// diagnostics use it; the parser goes through fetch_u32.
-			u32 peek_word(u32 addr) const;
-
 			// EXCISE-BEGIN fifo-diag-methods
 			// TODO(excise): level 1; FIFO desync instrumentation, see the members.
 			void diag_put_sample(u32 put, u32 addr);
 			void diag_read_ahead(u32 addr, u32 put);
 			void diag_phase(u32 pos);
 			void diag_jump(u32 target);
-			void diag_park(u32 addr, u32 frontier, u32 put, u32 word);
+			void diag_park(u32 addr, u32 put, u32 word);
+			void diag_link(u32 addr, u32 put, u32 word);
 			void diag_resume(u32 addr, u32 put);
 			void diag_nop(u32 pos);
 			void diag_desync(u32 pos, u32 word);
