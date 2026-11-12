@@ -831,7 +831,6 @@ namespace rsx
 
 		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
 		fifo_ctrl->set_get(ctrl->get);
-		fifo_ctrl->reset_streams(ctrl->get);
 
 		resolution_scaling_config =
 		{
@@ -1330,7 +1329,6 @@ namespace rsx
 					{
 						vm::_ptr<atomic_be_t<u64>>(dma_address + ::offset32(&RsxDmaControl::put))->release(get_put);
 						fifo_ctrl->set_get(static_cast<u32>(get_put));
-						fifo_ctrl->reset_streams(static_cast<u32>(get_put));
 						fifo_ctrl->abort();
 						fifo_ret_addr = RSX_CALL_STACK_EMPTY;
 						last_known_code_start = static_cast<u32>(get_put);
@@ -1899,10 +1897,6 @@ namespace rsx
 
 		// Error. Should reset the queue
 		fifo_ctrl->set_get(restore_point);
-		// Keep the command streams the parser has already discovered: wiping them
-		// makes the next jump into a command buffer create a stream whose frontier
-		// is its own base, which parks the parser before it reads a single word.
-		fifo_ctrl->reset_streams(restore_point, true);
 		fifo_ret_addr = saved_fifo_ret;
 		std::this_thread::sleep_for(2ms);
 		fifo_ctrl->abort();

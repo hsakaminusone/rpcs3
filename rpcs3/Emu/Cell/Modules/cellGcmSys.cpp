@@ -1585,8 +1585,33 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 	// the RSX must never be able to read the jump position before the jump is
 	// there; the previous order published the position first and then wrote it.
 	*context->current = RSX_METHOD_OLD_JUMP_CMD | offset;
+
+	// EXCISE-BEGIN gcm-callback-put
+	// TODO(excise): level 1; the producer's own account of where it is.  PUT is
+	// a watermark, but this is the only place that knows which command buffer
+	// the guest believes it is filling and where that buffer begins, so it is
+	// the ground truth for a re-point (handoff §16.6, O1).  A rewind (new PUT
+	// below the old one) means the guest switched buffer; the log says which
+	// buffer and where it starts.
+	const u32 old_put = ctrl.put.load();
+	// EXCISE-END gcm-callback-put
+
 	// Flush command buffer (ie allow RSX to read up to context->current)
 	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
+
+	// EXCISE-BEGIN gcm-callback-put
+	{
+		const u32 new_put = getOffsetFromAddress(context->current.addr());
+
+		if (new_put != old_put)
+		{
+			cellGcmSys.warning("cellGcmCallback: put 0x%x -> 0x%x %s begin=0x%x current=0x%x end=0x%x next=0x%x..0x%x get=0x%x",
+				old_put, new_put, new_put < old_put ? "REWIND" : "advance",
+				static_cast<u32>(*context->begin), context->current.addr(), static_cast<u32>(*context->end),
+				newCommandBuffer.first, newCommandBuffer.second, ctrl.get.load());
+		}
+	}
+	// EXCISE-END gcm-callback-put
 	// Update current command buffer
 	context->begin.set(newCommandBuffer.first);
 	context->current.set(newCommandBuffer.first);
