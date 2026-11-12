@@ -200,11 +200,13 @@ namespace rsx
 			// See the FIFO park handoff, §17. The decision itself is
 			// cursor_rules::decide().
 			//
-			// TODO(excise): level 1; A/B switch for the whole-packet rule. Upstream
-			// (8183f6e32) dispatches a packet as soon as its header is read; the
-			// production model waits until every argument of the packet is
-			// published. This restores upstream's behaviour, so a run can show
-			// whether the gate is load-bearing for a given game.
+			// The A/B switch for the whole-packet rule.  Upstream (8183f6e32)
+			// dispatches a packet as soon as its header is read; the production
+			// model waits until every argument of the packet is published.  The
+			// switch is read by the dispatch itself, so it is production state
+			// and stays in the release tree; the release build never sets it, so
+			// it always takes the production path.  (The scrubber removes the
+			// ctor block that sets it, not the member.)
 			bool m_upstream_semantics = false;
 
 			// A word of the command ring, read through the iomap. Used at a park
@@ -270,8 +272,10 @@ namespace rsx
 
 			u32 get_pos() const { return m_fifo_pos; }
 			u32 last_cmd() const { return m_cmd; }
-			// TODO(excise): level 1; a desync capture compares the cache snapshot
-			// with the ring, which is how a stale read is told from a mis-parse.
+			// A desync capture compares the cache snapshot with the ring, which
+			// is how a stale read is told from a mis-parse.  The accessor is
+			// production code -- the definition lives in the .cpp -- so it stays
+			// in the release tree; only the capture that calls it is excised.
 			bool peek_cache(u32 pos, u32& word) const;
 			u32 cache_addr() const { return m_cache_addr; }
 			u32 cache_size() const { return m_cache_size; }
