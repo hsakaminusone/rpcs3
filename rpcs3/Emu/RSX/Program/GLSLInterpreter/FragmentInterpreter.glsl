@@ -1,8 +1,14 @@
 R"(
 layout(location=0) out vec4 ocol0;
+#ifndef MTL_NO_OCOL1
 layout(location=1) out vec4 ocol1;
+#endif
+#ifndef MTL_NO_OCOL2
 layout(location=2) out vec4 ocol2;
+#endif
+#ifndef MTL_NO_OCOL3
 layout(location=3) out vec4 ocol3;
+#endif
 
 layout(location=0) in vec4 in_regs[16];
 
@@ -371,23 +377,35 @@ vec4 _texture(in vec4 coord, float bias)
 	ur1 = ur0 + ur0;
 	const uint type = GET_BITS(texture_control, int(ur1), 2);
 
+	vr0 = vr_zero;
 	switch (type)
 	{
+#ifndef MTL_NO_TEX1D
 	case RSX_SAMPLE_TEXTURE_1D:
 		coord.x = _texcoord_xform(coord.x, texture_parameters[ur0 + texture_base_index]);
 		vr0 = texture(SAMPLER1D(ur0), coord.x, bias);
 		break;
+#endif
+#ifndef MTL_NO_TEX2D
 	case RSX_SAMPLE_TEXTURE_2D:
 		coord.xy = _texcoord_xform(coord.xy, texture_parameters[ur0 + texture_base_index]);
 		vr0 = texture(SAMPLER2D(ur0), coord.xy, bias);
 		break;
+#endif
+#ifndef MTL_NO_TEXCUBE
 	case RSX_SAMPLE_TEXTURE_CUBE:
 		coord.xyz = _texcoord_xform(coord.xyz, texture_parameters[ur0 + texture_base_index]);
 		vr0 = texture(SAMPLERCUBE(ur0), coord.xyz, bias);
 		break;
+#endif
+#ifndef MTL_NO_TEX3D
 	case RSX_SAMPLE_TEXTURE_3D:
 		coord.xyz = _texcoord_xform(coord.xyz, texture_parameters[ur0 + texture_base_index]);
 		vr0 = texture(SAMPLER3D(ur0), coord.xyz, bias);
+		break;
+#endif
+	default:
+		vr0 = vr_zero;
 		break;
 	}
 
@@ -410,23 +428,35 @@ vec4 _textureLod(in vec4 coord, float lod)
 	ur1 = ur0 + ur0;
 	const uint type = GET_BITS(texture_control, int(ur1), 2);
 
+	vr0 = vr_zero;
 	switch (type)
 	{
+#ifndef MTL_NO_TEX1D
 	case RSX_SAMPLE_TEXTURE_1D:
 		coord.x = _texcoord_xform(coord.x, texture_parameters[ur0 + texture_base_index]);
 		vr0 = textureLod(SAMPLER1D(ur0), coord.x, lod);
 		break;
+#endif
+#ifndef MTL_NO_TEX2D
 	case RSX_SAMPLE_TEXTURE_2D:
 		coord.xy = _texcoord_xform(coord.xy, texture_parameters[ur0 + texture_base_index]);
 		vr0 = textureLod(SAMPLER2D(ur0), coord.xy, lod);
 		break;
+#endif
+#ifndef MTL_NO_TEXCUBE
 	case RSX_SAMPLE_TEXTURE_CUBE:
 		coord.xyz = _texcoord_xform(coord.xyz, texture_parameters[ur0 + texture_base_index]);
 		vr0 = textureLod(SAMPLERCUBE(ur0), coord.xyz, lod);
 		break;
+#endif
+#ifndef MTL_NO_TEX3D
 	case RSX_SAMPLE_TEXTURE_3D:
 		coord.xyz = _texcoord_xform(coord.xyz, texture_parameters[ur0 + texture_base_index]);
 		vr0 = textureLod(SAMPLER3D(ur0), coord.xyz, lod);
+		break;
+#endif
+	default:
+		vr0 = vr_zero;
 		break;
 	}
 
@@ -862,14 +892,26 @@ void main()
 
 #ifdef WITH_HALF_OUTPUT_REGISTER
 		ocol0 = regs16[0];
+#ifndef MTL_NO_OCOL1
 		ocol1 = regs16[4];
+#endif
+#ifndef MTL_NO_OCOL2
 		ocol2 = regs16[6];
+#endif
+#ifndef MTL_NO_OCOL3
 		ocol3 = regs16[8];
+#endif
 #else
 		ocol0 = regs32[0];
+#ifndef MTL_NO_OCOL1
 		ocol1 = regs32[2];
+#endif
+#ifndef MTL_NO_OCOL2
 		ocol2 = regs32[3];
+#endif
+#ifndef MTL_NO_OCOL3
 		ocol3 = regs32[4];
+#endif
 #endif
 
 #ifdef WITH_DEPTH_EXPORT
@@ -899,9 +941,15 @@ void main()
 #ifdef _ENABLE_ROP_CHANNEL_REMAPPING
 	const uint ROP_remap = get_ROP_channel_remap();
 	ocol0 = remap_ROP_output(ocol0, ROP_remap);
+#ifndef MTL_NO_OCOL1
 	ocol1 = remap_ROP_output(ocol1, ROP_remap);
+#endif
+#ifndef MTL_NO_OCOL2
 	ocol2 = remap_ROP_output(ocol2, ROP_remap);
+#endif
+#ifndef MTL_NO_OCOL3
 	ocol3 = remap_ROP_output(ocol3, ROP_remap);
+#endif
 #endif
 }
 

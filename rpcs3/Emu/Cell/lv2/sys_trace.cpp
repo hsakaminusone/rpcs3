@@ -4,7 +4,6 @@
 #include "Emu/Cell/ErrorCodes.h"
 
 
-
 LOG_CHANNEL(sys_trace);
 
 // TODO: DEX/DECR mode support?

@@ -4,7 +4,6 @@
 #include "cellSpudll.h"
 
 
-
 LOG_CHANNEL(cellSpudll);
 
 template<>

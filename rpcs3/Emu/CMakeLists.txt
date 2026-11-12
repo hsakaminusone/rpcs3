@@ -693,6 +693,52 @@ if(TARGET 3rdparty_vulkan)
     endif()
 endif()
 
+if(TARGET 3rdparty_metal)
+    target_sources(rpcs3_emu PRIVATE
+        RSX/MTL/MTLDevice.cpp
+        RSX/MTL/MTLResourceManager.cpp
+        RSX/MTL/MTLCommandRecorder.cpp
+        RSX/MTL/MTLBarrier.cpp
+        RSX/MTL/MTLFormats.cpp
+        RSX/MTL/MTLPassScheduler.cpp
+        RSX/MTL/MTLPipeline.cpp
+        RSX/MTL/MTLSurface.cpp
+        RSX/MTL/MTLSurfaceCache.cpp
+        RSX/MTL/MTLSurfaceState.cpp
+        RSX/MTL/MTLDepthStencil.cpp
+        RSX/MTL/MTLRasterState.cpp
+        RSX/MTL/MTLSamplerState.cpp
+        RSX/MTL/MTLBlendState.cpp
+        RSX/MTL/MTLDrawState.cpp
+        RSX/MTL/MTLEncoderState.cpp
+        RSX/MTL/MTLArgumentBinds.cpp
+        RSX/MTL/MTLConstants.cpp
+        RSX/MTL/MTLHandles.cpp
+        RSX/MTL/MTLTextureCache.cpp
+        RSX/MTL/MTLGSRender.cpp
+        RSX/MTL/MTLShader.cpp
+        RSX/MTL/MTLProgramPipeline.cpp
+        RSX/MTL/MTLVertexProgram.cpp
+        RSX/MTL/MTLFragmentProgram.cpp
+        RSX/MTL/MTLShaderInterpreter.cpp
+        RSX/MTL/MTLFramebuffer.cpp
+        RSX/MTL/MTLFill.cpp
+        RSX/MTL/MTLPresenter.cpp
+        RSX/MTL/MTLPresent.cpp
+        RSX/MTL/MTLOverlays.cpp
+        RSX/MTL/MTLZCULL.cpp
+        RSX/MTL/MTLMetalLayer.mm
+    )
+
+    # SPIRV-Cross reports an unsupported or malformed module by throwing, and the
+    # project builds without exceptions (ConfigureCompiler.cmake:33).  This one
+    # file is the exception, so the throw becomes a failed pipeline instead of a
+    # process abort (REALISATION.md, "The remaining risk").  A source property is
+    # appended after the directory options, so it wins.  The Metal block is
+    # Apple-only, so no non-clang host reaches this.
+    set_source_files_properties(RSX/MTL/MTLShader.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions")
+endif()
+
 if(NOT WIN32)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
 endif()
@@ -707,6 +753,8 @@ target_link_libraries(rpcs3_emu
         3rdparty::opengl
         3rdparty::stblib
         3rdparty::vulkan
+        3rdparty::metal
+        3rdparty::spirv_cross
         3rdparty::glew
         3rdparty::libusb
         3rdparty::hidapi

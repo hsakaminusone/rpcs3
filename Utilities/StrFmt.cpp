@@ -11,6 +11,8 @@
 #include <string_view>
 #include "Thread.h"
 
+#include "stack_trace.h"
+
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -624,8 +626,10 @@ void fmt_class_string<std::source_location>::format(std::string& out, u64 arg)
 
 namespace fmt
 {
+
 	[[noreturn]] void raw_verify_error(std::source_location loc, const char8_t* msg, usz object)
 	{
+
 		std::string out;
 		fmt::append(out, "%s (object: 0x%x)%s", msg ? msg : u8"Verification failed", object, loc);
 		thread_ctrl::emergency_exit(out);
@@ -633,6 +637,7 @@ namespace fmt
 
 	[[noreturn]] void raw_verify_error(std::source_location loc, std::source_location propagated_loc, const char8_t* msg, usz object)
 	{
+
 		std::string out;
 		fmt::append(out, "%s (object: 0x%x)%s%s", msg ? msg : u8"Verification failed", object, loc, propagated_loc);
 		thread_ctrl::emergency_exit(out);

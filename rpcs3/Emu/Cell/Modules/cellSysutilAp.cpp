@@ -2,7 +2,6 @@
 #include "Emu/Cell/PPUModule.h"
 
 
-
 LOG_CHANNEL(cellSysutilAp);
 
 // Return Codes

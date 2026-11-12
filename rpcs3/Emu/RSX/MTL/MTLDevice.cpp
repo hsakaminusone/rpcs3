@@ -1,0 +1,286 @@
+#include "MTLDevice.h"
+
+#ifdef RSX_ENABLE_METAL4
+
+
+#include "Emu/Memory/vm.h"
+#include "Emu/RSX/RSXThread.h"
+#include "Emu/cache_utils.hpp"
+#include "Emu/system_config.h"
+#include "util/logs.hpp"
+
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <sys/sysctl.h>
+
+namespace mtl
+{
+	// The text of a framework error, with the domain and code, because a failure
+	// can carry an error object whose description is empty.
+	static std::string archive_error_text(NS::Error* error)
+	{
+		if (!error)
+		{
+			return "no error object";
+		}
+
+		const char* domain = error->domain() ? error->domain()->utf8String() : "?";
+		const char* text = error->localizedDescription() ? error->localizedDescription()->utf8String() : "?";
+		return fmt::format("%s (%s, code %lld)", text, domain, static_cast<long long>(error->code()));
+	}
+
+	u32 macos_major()
+	{
+		char version[16]{};
+		size_t length = sizeof(version);
+		if (sysctlbyname("kern.osproductversion", version, &length, nullptr, 0) != 0)
+		{
+			return 0;
+		}
+
+		const auto dot = std::strchr(version, '.');
+		const std::string major = dot ? std::string(version, dot - version) : std::string(version);
+		const int value = std::atoi(major.c_str());
+		return value > 0 ? static_cast<u32>(value) : 0u;
+	}
+
+	bool metal4_supported()
+	{
+		if (__builtin_available(macOS 26.0, *))
+		{
+			return true;
+		}
+
+		rsx_log.error("Metal 4 requires macOS %u or newer on Apple silicon. Host reported: %u", metal4_api_floor, macos_major());
+		return false;
+	}
+
+	[[noreturn]] void die(const std::string& err)
+	{
+		rsx_log.fatal("%s", err);
+		fmt::throw_exception("Metal 4: %s", err);
+	}
+
+	std::unique_ptr<device> device::create()
+	{
+		auto dev = std::unique_ptr<device>(new device());
+		if (!dev->init())
+		{
+			return nullptr;
+		}
+
+		return dev;
+	}
+
+	device::~device()
+	{
+		if (m_removal_observer)
+		{
+			NS::NotificationCenter::defaultCenter()->removeObserver(m_removal_observer);
+			m_removal_observer = nullptr;
+		}
+	}
+
+
+	bool device::init()
+	{
+		if (!metal4_supported())
+		{
+			return false;
+		}
+
+
+		m_device = MTL::CreateSystemDefaultDevice();
+		if (!m_device)
+		{
+			rsx_log.error("No usable Metal device was found.");
+			return false;
+		}
+
+		if (!m_device->supportsFamily(MTL::GPUFamily::GPUFamilyMetal4))
+		{
+			const std::string gpu_name = m_device->name() ? m_device->name()->utf8String() : "unknown";
+			rsx_log.error("Metal 4 is not supported on this GPU: %s", gpu_name);
+			return false;
+		}
+
+		// A device removal cannot be recovered by this backend.  The observer only
+		// stops new shader submissions; the existing RSX fatal path stops the frame
+		// loop.  The handler must not touch any cache or release a compiler object.
+		NS::ObserverFunction removal_handler = [this](NS::Notification*)
+		{
+			m_lost.store(true, std::memory_order_release);
+		};
+		m_removal_observer = NS::NotificationCenter::defaultCenter()->addObserver(
+			MTL::DeviceWasRemovedNotification, nullptr, nullptr, removal_handler);
+
+		m_queue = m_device->newMTL4CommandQueue();
+		if (!m_queue)
+		{
+			die("MTL4 command queue creation failed");
+		}
+
+		// The L3 driver pipeline cache (HLD-07 §4.2).  The archive path carries the
+		// GPU and the OS version, because an archive is a device slice (06 §2.4).
+		if (const std::string cache_root = rpcs3::cache::get_ppu_cache();
+			!g_cfg.video.disable_on_disk_shader_cache && !cache_root.empty())
+		{
+			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u.bin",
+			cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major());
+
+		}
+
+		MTL4::CompilerDescriptor* descriptor = MTL4::CompilerDescriptor::alloc()->init();
+
+		// The serializer is what records the compiled pipelines.  It is created on
+		// a cold start too, or nothing would ever be written.
+		if (!m_archive_path.empty())
+		{
+			MTL4::PipelineDataSetSerializerDescriptor* serializer_descriptor = MTL4::PipelineDataSetSerializerDescriptor::alloc()->init();
+			// CaptureBinaries alone.  The archive holds binaries, and asking for
+			// the descriptors as well makes the flush fail with no error at all
+			// (HLD-07 §4.2).
+			serializer_descriptor->setConfiguration(MTL4::PipelineDataSetSerializerConfigurationCaptureBinaries);
+			m_serializer = m_device->newPipelineDataSetSerializer(serializer_descriptor);
+
+			if (m_serializer)
+			{
+				descriptor->setPipelineDataSetSerializer(m_serializer);
+			}
+			else
+			{
+				rsx_log.error("Metal: the pipeline data set serializer was not created. The driver pipeline cache is off.");
+			}
+		}
+
+		// One compiler per device (docs/research/metal4/06 §2.5; workaround W11:
+		// concurrent MTL4Compiler instances corrupt the heap on macOS 26).
+		m_compiler = m_device->newCompiler(descriptor, nullptr);
+		if (!m_compiler)
+		{
+			die("MTL4 compiler creation failed");
+		}
+
+		open_pipeline_archive();
+
+		m_features.metal4_family = true;
+		m_features.compiler_ok = true;
+
+		import_guest_window();
+
+
+		rsx_log.success("Metal 4 device initialized: %s", m_device->name() ? m_device->name()->utf8String() : "unknown");
+		return true;
+	}
+
+	bool device::open_pipeline_archive()
+	{
+		if (m_archive_path.empty())
+		{
+			return false;
+		}
+
+		std::error_code error_code;
+		if (!std::filesystem::exists(m_archive_path, error_code))
+		{
+			return false;
+		}
+
+		NS::Error* error = nullptr;
+		m_archive = m_device->newArchive(NS::URL::fileURLWithPath(NS::String::string(m_archive_path.c_str(), NS::UTF8StringEncoding)), &error);
+		if (!m_archive)
+		{
+			// A rejected archive is a cold start, not a failure (HLD-07 §7).
+			rsx_log.error("Metal: the pipeline archive %s was rejected: %s", m_archive_path, archive_error_text(error));
+			return false;
+		}
+
+		m_task_options = MTL4::CompilerTaskOptions::alloc()->init();
+		m_task_options->setLookupArchives(NS::Array::array(m_archive));
+		rsx_log.notice("Metal: pipeline archive loaded from %s", m_archive_path);
+		return true;
+	}
+
+	void device::flush_pipeline_archive()
+	{
+		if (!m_serializer || m_archive_path.empty())
+		{
+			return;
+		}
+
+
+		std::error_code error_code;
+		std::filesystem::create_directories(std::filesystem::path(m_archive_path).parent_path(), error_code);
+
+		NS::Error* error = nullptr;
+		if (!m_serializer->serializeAsArchiveAndFlushToURL(NS::URL::fileURLWithPath(NS::String::string(m_archive_path.c_str(), NS::UTF8StringEncoding)), &error))
+		{
+			// The flush is destructive, so a second call reports "nothing to
+			// serialize"; this path must stay the only one (HLD-07 §4.2).
+			rsx_log.error("Metal: the pipeline archive %s was not written: %s", m_archive_path, archive_error_text(error));
+			return;
+		}
+
+		rsx_log.notice("Metal: pipeline archive written to %s", m_archive_path);
+	}
+
+	void device::import_guest_window()
+	{
+		// HLD-02 §2.1.  Import the unprotected mirror, not the guest view: the no-copy
+		// import requires every page of the range writable (Metal returns nil otherwise)
+		// and the guest view carries protection::no pages.  The mirror aliases the same
+		// guest RAM (vm.cpp:846) and is how the renderers reach guest memory
+		// (vm::get_super_ptr).  The emulator owns the region, so the deallocator must
+		// not free it.
+		m_window.buffer = m_device->newBuffer(vm::g_sudo_addr, guest_address_space, MTL::ResourceStorageModeShared, nullptr);
+		if (!m_window.buffer)
+		{
+			die(fmt::format("guest memory import failed (%llu bytes)", guest_address_space));
+		}
+
+		m_window.gpu_address = m_window.buffer->gpuAddress();
+	}
+
+	void device::fill_backend_config(rsx::backend_configuration& cfg) const
+	{
+		// Docs: no native multi-draw command (docs/research/metal4/09 §4); a
+		// host-built indirect batcher lands later, until then draw clauses loop.
+		cfg.supports_multidraw = false;
+		cfg.supports_hw_msaa = true;
+		cfg.supports_hw_a2c = true;
+		cfg.supports_hw_a2c_1spp = false; // unverified at 1 spp; GL disables it too (GLGSRender.cpp:61)
+		cfg.supports_hw_a2one = true;
+		cfg.supports_hw_instanced_rendering = true;
+		cfg.supports_programmable_blending = true; // framebuffer fetch [[color(n)]] (HLD-01 §4.3)
+		cfg.supports_normalized_barycentrics = true;
+		// Metal validates `MTLViewport.znear/zfar` to [0,1] and has no unrestricted
+		// depth range, so the general clip range is the shader zclip/depth-range
+		// transform (LLD-raster §3.2, invariant 4; VKDraw.cpp:1305-1320).
+		cfg.supports_extended_depth_range = false;
+		cfg.supports_framebufferless_rendering = true;
+		cfg.supports_asynchronous_compute = true;  // independent command buffers (HLD-04 §3.2)
+
+		// Metal has no logic-op state, so the ROP emulates it by reading the
+		// destination colour through the framebuffer fetch the programmable-blend
+		// path already owns (REVIEW-FINDINGS.md C1).
+		cfg.supports_native_logic_op = false;
+
+		// Forced-off on Metal 4 bring-up (docs/research/metal4/10 §2.2):
+		cfg.supports_hw_renormalization = false;   // Apple silicon is not NV silicon
+		cfg.supports_passthrough_dma = false;      // no host-pointer device DMA (HLD-02 §2.1)
+		cfg.supports_last_provoking_vertex = false;// no public provoking-vertex mode; smooth fallback
+		cfg.supports_hw_conditional_render = false;// bring-up: CPU skip (HLD-04 §3.6)
+		// The guest label is memory the CPU parser reads at the acquire.  A host
+		// store at the release is visible to that read immediately, which is what
+		// VK and GL do by default (VK: nv47_sync.hpp:83 with the setting off;
+		// GL: its host DMA writer).  The GPU write is the opt-in path: it is
+		// ordered against the work it releases, but the acquire must then wait
+		// for the GPU to land the word, and that wait holds the FIFO reader
+		// (L135, L138).  Honor the setting; do not force the cost on every run.
+		cfg.supports_host_gpu_labels = !!g_cfg.video.host_label_synchronization;
+	}
+} // namespace mtl
+
+#endif // RSX_ENABLE_METAL4

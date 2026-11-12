@@ -200,12 +200,18 @@ if(BUILD_RPCS3_TESTS)
             tests/test_pair.cpp
             tests/test_rsx_cfg.cpp
             tests/test_rsx_fp_asm.cpp
+            tests/test_rsx_fifo_streams.cpp
+            tests/test_rsx_metal4_pass_policy.cpp
+            tests/test_rsx_metal4_scheduler.cpp
+            tests/test_rsx_metal4_surface_writeback.cpp
+            tests/test_rsx_metal4_texture_types.cpp
             tests/test_rsx_mm_queue.cpp
             tests/test_simple_array.cpp
             tests/test_spu_analyser.cpp
             tests/test_sys_fs.cpp
             tests/test_tuple.cpp
             tests/test_types_util.cpp
+            tests/test_vk_driver_selection.cpp
     )
 
     target_link_libraries(rpcs3_test
@@ -220,6 +226,12 @@ if(BUILD_RPCS3_TESTS)
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/..
+    )
+
+    # The dial tests read the curated state space, which lives with the design docs.
+    target_compile_definitions(rpcs3_test
+        PRIVATE
+            RPCS3_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
 
     include(GoogleTest)

@@ -35,19 +35,32 @@ namespace rsx
 			const auto& sema = vm::_ref<RsxSemaphore>(addr);
 			const auto& atomic_sema = vm::_ref<atomic_t<RsxSemaphore>>(addr);
 
+
 			RSX(ctx)->last_sema_cmd = RSX(ctx)->fifo_ctrl->get_pos() - 4;
 			RSX(ctx)->last_sema_addr = addr;
 
 			if (sema == arg)
 			{
-				// Flip semaphore doesnt need wake-up delay
-				if (addr != ctx->fw.label_addr + 0x10)
+				// A release and the acquire that acknowledges it can be adjacent, and
+				// the release may be a GPU label write.  The acquire reads guest
+				// memory on the CPU, so accepting the old word here would let it pass
+				// a release the GPU has not reached yet.  The backend waits only for a
+				// label it actually has in flight at this address; other backends
+				// write labels host-side and return false.
+				const bool waited = RSX(ctx)->renderer()->sync_label(addr);
+
+				if (!waited)
 				{
-					//RSX(ctx)->flush_fifo();
-					RSX(ctx)->fifo_wake_delay(2);
+					// Flip semaphore doesnt need wake-up delay
+					if (addr != ctx->fw.label_addr + 0x10)
+					{
+						//RSX(ctx)->flush_fifo();
+						RSX(ctx)->fifo_wake_delay(2);
+					}
+
+					return;
 				}
 
-				return;
 			}
 			else
 			{

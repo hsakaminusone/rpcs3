@@ -1,7 +1,6 @@
 #pragma once
 
 
-
 // Return Codes
 enum CellUsbdError : u32
 {

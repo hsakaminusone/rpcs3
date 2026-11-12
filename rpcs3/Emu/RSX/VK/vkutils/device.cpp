@@ -449,7 +449,7 @@ namespace vk
 
 	chip_class physical_device::get_chip_class() const
 	{
-		return get_chip_family(props.vendorID, props.deviceID);
+		return get_chip_family(props.vendorID, props.deviceID, get_driver_vendor());
 	}
 
 	u32 physical_device::get_queue_count() const

@@ -586,7 +586,11 @@ namespace rsx
 		// The ZCULL unit belongs to the thread. The renderer only provides the host queries.
 		zcull_ctrl = std::make_unique<reports::ZCULL_control>();
 
-		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
+		// The in-game interface is an output pass of the renderer, so it needs the
+		// renderer's overlay tier.  Vulkan, OpenGL and Metal carry one
+		// (MTLPresent.cpp:frame_output).
+		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl ||
+			g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
 
@@ -754,6 +758,12 @@ namespace rsx
 			g_fxo->get<rsx::dma_manager>().init();
 			m_renderer->on_init();
 			create_backend_resources();
+
+			// The logical id is final only after on_init has created the device.
+			// A backend that opens its device there would otherwise keep the
+			// pre-init "NULL" id, and the display engine would replace it again
+			// on the first flip, once per frame.
+			m_renderer_info = m_renderer->logical_id();
 
 			if (m_ctx->in_begin_end)
 			{
@@ -1021,9 +1031,11 @@ namespace rsx
 			m_renderer = std::move(renderer);
 		}
 
-		m_renderer_info = m_renderer->logical_id();
 		m_renderer->on_init();
 		create_backend_resources();
+
+		// See on_task: the id is final only after the device exists.
+		m_renderer_info = m_renderer->logical_id();
 
 		// The new backend has seen nothing yet
 		for_each_context([](context* ctx)
@@ -1744,11 +1756,15 @@ namespace rsx
 		return pair;
 	}
 
+	void invalid_method(context*, u32, u32);
+
 	void thread::recover_fifo(std::source_location src_loc)
 	{
 		bool kill_itself = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::as_ps3;
 
 		const u64 current_time = get_system_time();
+
+		// The discriminating capture of a desync (RR7-FREEZE-FORENSICS.md §8.1).
 
 		if (recovered_fifo_cmds_history.size() == 20u)
 		{
@@ -1772,15 +1788,25 @@ namespace rsx
 				"\nTry increasing \"Driver Wake-Up Delay\" setting or setting \"RSX FIFO Accuracy\" to \"%s\", both in Advanced settings. Called from %s", std::min<rsx_fifo_mode>(rsx_fifo_mode{static_cast<u32>(g_cfg.core.rsx_fifo_accuracy.get()) + 1}, rsx_fifo_mode::atomic_ordered), src_loc);
 		}
 
-		// Error. Should reset the queue
-		fifo_ctrl->set_get(restore_point);
-		fifo_ret_addr = saved_fifo_ret;
-		std::this_thread::sleep_for(2ms);
-		fifo_ctrl->abort();
-
-		if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
+		// Error. Should reset the queue.  The rollback target is validated: the
+		// address restore_point was captured at may have been reused by the guest
+		// since (RR7: the word there became a data value and recovery re-entered
+		// it twenty times in two seconds).  Prefer the newest executed packet
+		// whose header is still in the ring; umax means every candidate is
+		// poisoned, so leave the cursor alone and let the watchdog below report
+		// it instead of re-executing the same word.  The check is on the word, so
+		// a producer write at that position re-arms the resume.
+		if (const u32 resume = fifo_ctrl->recovery_point(fifo_ctrl->get_pos(), restore_point); resume != umax)
 		{
-			discard_draw();
+			fifo_ctrl->set_get(resume);
+			fifo_ret_addr = saved_fifo_ret;
+			std::this_thread::sleep_for(2ms);
+			fifo_ctrl->abort();
+
+			if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
+			{
+				discard_draw();
+			}
 		}
 
 		recovered_fifo_cmds_history.push({fifo_ctrl->last_cmd(), current_time});
@@ -1874,8 +1900,6 @@ namespace rsx
 		// Last fifo cmd for logging and utility
 		return fifo_ctrl->last_cmd();
 	}
-
-	void invalid_method(context*, u32, u32);
 
 	void thread::dump_regs(std::string& result, std::any& /*custom_data*/) const
 	{

@@ -1,7 +1,6 @@
 #pragma once
 
 
-
 // L10nResult
 enum
 {

@@ -4,7 +4,6 @@
 #include "libsynth2.h"
 
 
-
 LOG_CHANNEL(libsynth2);
 
 template<>

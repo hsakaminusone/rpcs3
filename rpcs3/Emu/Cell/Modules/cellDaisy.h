@@ -1,7 +1,6 @@
 #pragma once
 
 
-
 // libDaisy = 0x80410501 - 0x804105ff
 
 // Error codes

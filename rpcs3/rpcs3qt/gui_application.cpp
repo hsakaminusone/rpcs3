@@ -60,6 +60,8 @@
 #include "Emu/system_config.h"
 #include "util/sysinfo.hpp"
 
+#include "Emu/RSX/MTL/MTLGSRender.h"
+
 #ifdef _WIN32
 #include <Usbiodef.h>
 #include <Dbt.h>
@@ -715,6 +717,7 @@ std::unique_ptr<gs_frame> gui_application::get_gs_frame()
 	}
 	case video_renderer::null:
 	case video_renderer::vulkan:
+	case video_renderer::metal:
 	{
 		frame = new gs_frame(screen, frame_geometry, app_icon, m_gui_settings, m_start_games_fullscreen);
 		break;
@@ -764,7 +767,7 @@ void gui_application::create_callbacks()
 			const bool no_gui = !m_main_window;
 
 			// Don't let CoreMIDI init race with app termination (e.g. Cocoa calling exit() on macOS)
-			midi_creator::wait_for_init();
+			midi_creator::join_init_thread();
 
 			if (m_main_window)
 			{

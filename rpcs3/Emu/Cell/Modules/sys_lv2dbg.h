@@ -12,7 +12,6 @@
 #include "Emu/Memory/vm_ptr.h"
 
 
-
 // Error Codes
 enum CellLv2DbgError : u32
 {

@@ -11,6 +11,7 @@
 #include <list>
 #include <unordered_set>
 
+
 namespace rsx
 {
 	enum section_bounds
@@ -1338,6 +1339,8 @@ namespace rsx
 			if (context == rsx::texture_upload_context::framebuffer_storage)
 			{
 				const auto surface = derived()->get_render_target();
+
+
 				return surface->has_flushable_data();
 			}
 

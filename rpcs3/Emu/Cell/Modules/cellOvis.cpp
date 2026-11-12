@@ -3,7 +3,6 @@
 #include "Emu/Cell/lv2/sys_spu.h"
 
 
-
 LOG_CHANNEL(cellOvis);
 
 // Return Codes

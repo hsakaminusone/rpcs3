@@ -1,7 +1,6 @@
 #pragma once
 
 
-
 // Error Codes
 enum CellJpgEncError : u32
 {

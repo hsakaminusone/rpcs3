@@ -135,6 +135,7 @@ namespace rsx
 		u32 last_code_jump = 0;
 		u32 last_sema_cmd = 0;
 		u32 last_sema_addr = 0;
+
 		atomic_t<u32> external_interrupt_lock{ 0 };
 		atomic_t<bool> external_interrupt_ack{ false };
 		atomic_t<u32> is_initialized{0};
@@ -152,6 +153,7 @@ namespace rsx
 
 		static void fifo_wake_delay(u64 div = 1);
 		u32 get_fifo_cmd() const;
+
 
 		void dump_regs(std::string&, std::any& custom_data) const override;
 		void cpu_wait(bs_t<cpu_flag> old) override;

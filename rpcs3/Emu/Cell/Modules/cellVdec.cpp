@@ -211,6 +211,7 @@ struct vdec_frame
 	}
 };
 
+
 struct vdec_context final
 {
 	static const u32 id_base = 0xf0000000;
@@ -247,6 +248,7 @@ struct vdec_context final
 
 	std::deque<vdec_frame> out_queue;
 	const u32 out_max = 60;
+
 
 	atomic_t<s32> au_count{0};
 
@@ -369,6 +371,7 @@ struct vdec_context final
 
 		ppu_tid.release(ppu.id);
 
+
 		for (auto slice = in_cmd.pop_all(); thread_ctrl::state() != thread_state::aborting; [&]
 		{
 			if (slice)
@@ -399,6 +402,7 @@ struct vdec_context final
 			{
 				std::lock_guard lock{mutex};
 
+
 				if (seq_state == sequence_state::resetting)
 				{
 					cellVdec.trace("Reset sequence... (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
@@ -424,6 +428,7 @@ struct vdec_context final
 			}
 			case vdec_cmd_type::end_sequence:
 			{
+
 				cellVdec.trace("End sequence... (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
 
 				{
@@ -497,6 +502,7 @@ struct vdec_context final
 					else
 					{
 						sequence_header_found = true;
+
 					}
 
 					while (!abort_decode && seq_id == cmd->seq_id)
@@ -623,6 +629,7 @@ struct vdec_context final
 						cellVdec.trace("Got picture (handle=0x%x, seq_id=%d, cmd_id=%d, pts=0x%llx[0x%llx], dts=0x%llx[0x%llx])", handle, cmd->seq_id, cmd->id, frame.pts, frame->pts, frame.dts, frame->pkt_dts);
 
 						decoded_frames.push_back(std::move(frame));
+
 					}
 
 					if (skipped_au_count && !decoded_frames.empty())
@@ -729,6 +736,7 @@ struct vdec_context final
 		// Make sure the state is closed at the end
 		std::lock_guard lock{mutex};
 		seq_state = sequence_state::closed;
+
 	}
 };
 
@@ -764,6 +772,7 @@ struct vdec_context_reaper
 	static constexpr auto thread_name = "HLE Video Decoder Reaper"sv;
 };
 
+
 extern bool check_if_vdec_contexts_exist()
 {
 	bool context_exists = false;
@@ -778,6 +787,7 @@ extern bool check_if_vdec_contexts_exist()
 
 extern void vdecEntry(ppu_thread& ppu, u32 vid)
 {
+
 	idm::get_unlocked<vdec_context>(vid)->exec(ppu, vid);
 
 	ppu.state += cpu_flag::exit;
@@ -1519,6 +1529,7 @@ static error_code vdecOpen(ppu_thread& ppu, T type, U res, vm::cptr<CellVdecCb> 
 	ensure(vdec);
 	vdec->handle = vid;
 
+
 	// Run thread
 	vm::var<u64> _tid;
 	vm::var<char[]> _name = vm::make_str("HLE Video Decoder");
@@ -1991,6 +2002,7 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 		return { CELL_VDEC_ERROR_ARG, "vdec=%d, picItem=%d", !!vdec, !!picItem };
 	}
 
+
 	u64 sequence_id{};
 
 	{
@@ -2063,6 +2075,7 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 
 	if (!info || seq_id != sequence_id)
 	{
+
 		return { CELL_VDEC_ERROR_EMPTY, " info=%d, sequence_id=%d, seq_id=%d", !!info, sequence_id, seq_id };
 	}
 
@@ -2229,6 +2242,8 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 	}
 
 	*picItem = info;
+
+
 	return CELL_OK;
 }
 
