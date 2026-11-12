@@ -245,19 +245,6 @@ namespace mtl
 			m_temporary_surfaces.clear();
 		}
 
-		static MTL::TextureType get_texture_type(rsx::texture_dimension_extended type)
-		{
-			switch (type)
-			{
-			case rsx::texture_dimension_extended::texture_dimension_cubemap:
-				return MTL::TextureTypeCube;
-			case rsx::texture_dimension_extended::texture_dimension_3d:
-				return MTL::TextureType3D;
-			default:
-				return MTL::TextureType2D;
-			}
-		}
-
 		static u64 encode_properties(MTL::PixelFormat format, MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps)
 		{
 			ensure(((width | height) & ~0x3fff) == 0, "Image dimensions are too large - lower your resolution scale.");
@@ -283,6 +270,32 @@ namespace mtl
 		}
 
 	public:
+		// The guest's texture dimension to Metal's texture type.  Exposed for the
+		// GPU-free contract tests, because the mapping is a *contract with the
+		// shader*: the guest's program declares the texture with a GLSL type
+		// (`texture1D`, `texture2D`, `texture3D`, `textureCube`), and Metal
+		// matches the bound resource against that declaration.
+		//
+		// A 1-D guest texture therefore needs a 1-D host texture.  With a 2-D
+		// texture bound to a `texture1D` read the read is a type mismatch and
+		// returns undefined data, and the presenter blit — the only draw in the
+		// frame that samples a 1-D texture — replaces all three colour channels
+		// with it, which is how the blit came to store black (L230).
+		static MTL::TextureType get_texture_type(rsx::texture_dimension_extended type)
+		{
+			switch (type)
+			{
+			case rsx::texture_dimension_extended::texture_dimension_1d:
+				return MTL::TextureType1D;
+			case rsx::texture_dimension_extended::texture_dimension_cubemap:
+				return MTL::TextureTypeCube;
+			case rsx::texture_dimension_extended::texture_dimension_3d:
+				return MTL::TextureType3D;
+			default:
+				return MTL::TextureType2D;
+			}
+		}
+
 		// Pure descriptor construction, exposed for the GPU-free contract tests.
 		static MTL::TextureDescriptor* make_descriptor(MTL::PixelFormat format, MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps)
 		{

@@ -22,6 +22,13 @@ namespace mtl
 		extent.height = std::max<u16>(height, 1);
 		extent.depth = (type == MTL::TextureType3D) ? std::max<u16>(depth, 1) : 1;
 
+		if (type == MTL::TextureType1D)
+		{
+			// A 1-D Metal texture has exactly one row; the guest's height field
+			// carries no meaning for it.
+			extent.height = 1;
+		}
+
 		if (type == MTL::TextureTypeCube)
 		{
 			// The RSX reads the face size from the width field and a cube face is
