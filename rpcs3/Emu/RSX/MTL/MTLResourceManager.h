@@ -4,6 +4,7 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -32,8 +33,10 @@ namespace mtl
 		void set_residency(residency_manager* residency);
 
 		// Return the heap that holds the span, or nullptr when the pool cannot grow.
-		MTL::Heap* allocate(u64 size, u64 alignment, u64& offset);
-		void free(MTL::Heap* heap, u64 offset, u64 size);
+		// The block index names the allocations's span list, so the release does not
+		// have to search the pool for the heap (P3).
+		MTL::Heap* allocate(u64 size, u64 alignment, u64& offset, u32& block_index);
+		void free(u32 block_index, u64 offset, u64 size);
 
 	private:
 		struct block
@@ -68,6 +71,10 @@ namespace mtl
 		void shutdown();
 
 		void make_persistent(MTL::Allocation* allocation);
+		// Publish what make_persistent added since the last commit.  The additions
+		// are batched, and the flush runs before a command buffer is committed, so
+		// nothing the buffer references reaches the GPU unpublished (P6).
+		void flush();
 		// Drop one allocation from the set when its owner is released.  A set that
 		// keeps an allocation forever retains a heap span that a later allocation
 		// can reuse (DEVIATIONS-SYNC.md, SY5).
@@ -79,6 +86,7 @@ namespace mtl
 		MTL4::CommandQueue* m_queue = nullptr;
 		MTL::ResidencySet* m_persistent = nullptr;
 		std::unordered_set<MTL::Allocation*> m_published;
+		bool m_dirty = false;
 	};
 
 	// The resource layer (HLD-01 C5, HLD-02 §2.1).  A buffer or a texture is
@@ -117,6 +125,9 @@ namespace mtl
 
 		void make_persistent(MTL::Allocation* allocation);
 
+		// Publish the allocations whose make_persistent has not reached the set yet.
+		void flush_residency();
+
 		// The frame slot that is recording, so a release lands on the slot whose
 		// command buffer can still reference the object.
 		void on_frame_begin(u32 index);
@@ -138,16 +149,17 @@ namespace mtl
 		void garbage_collect();
 
 	private:
-		// The heap span of one allocation, so a release returns it to its pool.
+		// The heap span of one allocation, so a release returns it to its pool.  The
+		// block index is the pool's own list entry, which outlives the allocation.
 		struct allocation_span
 		{
 			heap_pool* pool = nullptr;
-			MTL::Heap* heap = nullptr;
+			u32 block = 0;
 			u64 offset = 0;
 			u64 size = 0;
 		};
 
-		void track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size);
+		void track(MTL::Allocation* allocation, heap_pool& pool, u32 block, u64 offset, u64 size);
 		void release_list(std::vector<MTL::Allocation*>& list);
 		void check_residency(MTL::Heap* heap);
 
@@ -164,6 +176,9 @@ namespace mtl
 			MTL::Buffer* buffer = nullptr;
 		};
 		std::vector<label_page> m_label_pages;
+		// (length, options) -> heapBufferSizeAndAlign, which is a driver call on the
+		// allocation path but depends only on these two values.
+		std::map<std::pair<u64, u64>, MTL::SizeAndAlign> m_buffer_size_align;
 		std::unordered_map<MTL::Allocation*, allocation_span> m_spans;
 		std::vector<std::vector<MTL::Allocation*>> m_deferred;
 		std::vector<MTL::Allocation*> m_quarantine;

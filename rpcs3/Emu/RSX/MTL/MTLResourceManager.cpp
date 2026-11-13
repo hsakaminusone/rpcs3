@@ -70,7 +70,7 @@ namespace mtl
 		return heap;
 	}
 
-	MTL::Heap* heap_pool::allocate(u64 size, u64 alignment, u64& offset)
+	MTL::Heap* heap_pool::allocate(u64 size, u64 alignment, u64& offset, u32& block_index)
 	{
 		// A request over half a block gets a dedicated heap (01 §3.2), so it cannot
 		// fragment the pool.
@@ -83,12 +83,15 @@ namespace mtl
 			}
 
 			offset = 0;
+			block_index = static_cast<u32>(m_blocks.size());
 			m_blocks.push_back({ dedicated, {} });
 			return dedicated;
 		}
 
-		for (block& entry : m_blocks)
+		for (usz index = 0; index < m_blocks.size(); ++index)
 		{
+			block& entry = m_blocks[index];
+
 			for (auto span = entry.free_spans.begin(); span != entry.free_spans.end(); ++span)
 			{
 				const u64 aligned = (span->first + alignment - 1) & ~(alignment - 1);
@@ -116,6 +119,7 @@ namespace mtl
 				}
 
 				offset = aligned;
+				block_index = static_cast<u32>(index);
 				return entry.heap;
 			}
 		}
@@ -127,6 +131,7 @@ namespace mtl
 		}
 
 		// Offset zero is aligned, and the request is at most half a block.
+		block_index = static_cast<u32>(m_blocks.size());
 		block& entry = m_blocks.emplace_back();
 		entry.heap = heap;
 		entry.free_spans.push_back({ size, m_block_size - size });
@@ -135,38 +140,36 @@ namespace mtl
 		return heap;
 	}
 
-	void heap_pool::free(MTL::Heap* heap, u64 offset, u64 size)
+	void heap_pool::free(u32 block_index, u64 offset, u64 size)
 	{
-		for (block& entry : m_blocks)
+		// The index is the one the allocation recorded.  A block is only dropped at
+		// shutdown, so it still names the same heap (P3).
+		if (static_cast<usz>(block_index) >= m_blocks.size())
 		{
-			if (entry.heap != heap)
-			{
-				continue;
-			}
-
-			const auto at = std::lower_bound(entry.free_spans.begin(), entry.free_spans.end(), offset,
-				[](const std::pair<u64, u64>& span, u64 value) { return span.first < value; });
-
-			auto span = entry.free_spans.insert(at, { offset, size });
-
-			// Join the next span, then the previous one.
-			if (span + 1 != entry.free_spans.end() && span->first + span->second == (span + 1)->first)
-			{
-				span->second += (span + 1)->second;
-				entry.free_spans.erase(span + 1);
-			}
-
-			if (span != entry.free_spans.begin())
-			{
-				auto previous = span - 1;
-				if (previous->first + previous->second == span->first)
-				{
-					previous->second += span->second;
-					entry.free_spans.erase(span);
-				}
-			}
-
 			return;
+		}
+
+		std::vector<std::pair<u64, u64>>& spans = m_blocks[block_index].free_spans;
+		const auto at = std::lower_bound(spans.begin(), spans.end(), offset,
+			[](const std::pair<u64, u64>& span, u64 value) { return span.first < value; });
+
+		auto span = spans.insert(at, { offset, size });
+
+		// Join the next span, then the previous one.
+		if (span + 1 != spans.end() && span->first + span->second == (span + 1)->first)
+		{
+			span->second += (span + 1)->second;
+			spans.erase(span + 1);
+		}
+
+		if (span != spans.begin())
+		{
+			auto previous = span - 1;
+			if (previous->first + previous->second == span->first)
+			{
+				previous->second += span->second;
+				spans.erase(span);
+			}
 		}
 	}
 
@@ -210,6 +213,7 @@ namespace mtl
 		}
 
 		m_published.clear();
+		m_dirty = false;
 		m_device = nullptr;
 		m_queue = nullptr;
 	}
@@ -221,9 +225,22 @@ namespace mtl
 			return;
 		}
 
+		// The commit is deferred: a run of heap creations is one driver call, and the
+		// flush before the next command buffer commit publishes them all (P6).
 		m_persistent->addAllocation(allocation);
-		m_persistent->commit();
 		m_published.insert(allocation);
+		m_dirty = true;
+	}
+
+	void residency_manager::flush()
+	{
+		if (!m_dirty || !m_persistent)
+		{
+			return;
+		}
+
+		m_persistent->commit();
+		m_dirty = false;
 	}
 
 	void residency_manager::remove(MTL::Allocation* allocation)
@@ -300,12 +317,33 @@ namespace mtl
 		MTL_PROBE_HISTOGRAM(2, "resource buffer size",
 			length <= 4096 ? 0 : length <= 65536 ? 1 : length <= 1048576 ? 2 : 3, "buffer size bucket");
 		const MTL::ResourceOptions options = storage_options(storage);
-		const MTL::SizeAndAlign required = m_device->heapBufferSizeAndAlign(length, options);
+
+		// The answer depends only on the length and the storage options, and the
+		// pool asks for the same handful of sizes repeatedly (rings, staging, the
+		// per-frame blocks), so the driver call is memoised (P4).
+		const auto memo_key = std::pair<u64, u64>(length, static_cast<u64>(options));
+		MTL::SizeAndAlign required{};
+		const auto memo = m_buffer_size_align.find(memo_key);
+
+		if (memo != m_buffer_size_align.end())
+		{
+			required = memo->second;
+		}
+		else
+		{
+			required = m_device->heapBufferSizeAndAlign(length, options);
+
+			if (m_buffer_size_align.size() < 1024)
+			{
+				m_buffer_size_align.emplace(memo_key, required);
+			}
+		}
 
 		heap_pool& pool = (storage == MTL::StorageModePrivate) ? m_private : m_shared;
 
 		u64 offset = 0;
-		MTL::Heap* heap = pool.allocate(required.size, required.align, offset);
+		u32 block = 0;
+		MTL::Heap* heap = pool.allocate(required.size, required.align, offset, block);
 		if (!heap)
 		{
 			rsx_log.error("Metal 4: heap growth failed for a %llu byte buffer", length);
@@ -315,13 +353,17 @@ namespace mtl
 		MTL::Buffer* buffer = heap->newBuffer(length, options, offset);
 		if (!buffer)
 		{
-			pool.free(heap, offset, required.size);
+			pool.free(block, offset, required.size);
 			rsx_log.error("Metal 4: buffer allocation failed for %llu bytes", length);
 			return nullptr;
 		}
 
-		track(buffer, pool, heap, offset, required.size);
+		track(buffer, pool, block, offset, required.size);
+#ifndef NDEBUG
+		// The invariant is structural, so it belongs to a build that can assert it
+		// rather than to the allocation path (P7).
 		check_residency(heap);
+#endif
 
 		// TODO(excise): level 5; MTL_PROBE_VARIANT=poison.  A shared buffer is CPU
 		// reachable, so a never-written allocation is filled here with the word of
@@ -359,6 +401,10 @@ namespace mtl
 		constexpr u32 page_size = 0x10000;
 		const u32 base = address & ~(page_size - 1);
 
+		// A guest address is 32 bits, so its page always lies inside the imported
+		// window; the invariant is stated for the reader, not enforced at run time.
+		ensure(static_cast<u64>(base) + page_size <= guest_address_space);
+
 		for (const label_page& page : m_label_pages)
 		{
 			if (page.base == base)
@@ -366,11 +412,6 @@ namespace mtl
 				offset = address - base;
 				return page.buffer;
 			}
-		}
-
-		if (address >= guest_address_space)
-		{
-			return nullptr;
 		}
 
 		MTL::Buffer* buffer = m_device->newBuffer(vm::g_sudo_addr + base, page_size,
@@ -413,7 +454,8 @@ namespace mtl
 		heap_pool& pool = (storage == MTL::StorageModePrivate) ? m_private : m_shared;
 
 		u64 offset = 0;
-		MTL::Heap* heap = pool.allocate(required.size, required.align, offset);
+		u32 block = 0;
+		MTL::Heap* heap = pool.allocate(required.size, required.align, offset, block);
 		if (!heap)
 		{
 			rsx_log.error("Metal 4: heap growth failed for a texture");
@@ -423,19 +465,26 @@ namespace mtl
 		MTL::Texture* texture = heap->newTexture(descriptor, offset);
 		if (!texture)
 		{
-			pool.free(heap, offset, required.size);
+			pool.free(block, offset, required.size);
 			rsx_log.error("Metal 4: texture allocation failed");
 			return nullptr;
 		}
 
-		track(texture, pool, heap, offset, required.size);
+		track(texture, pool, block, offset, required.size);
+#ifndef NDEBUG
 		check_residency(heap);
+#endif
 		return texture;
 	}
 
 	void resource_manager::make_persistent(MTL::Allocation* allocation)
 	{
 		m_residency.make_persistent(allocation);
+	}
+
+	void resource_manager::flush_residency()
+	{
+		m_residency.flush();
 	}
 
 	void resource_manager::on_frame_begin(u32 index)
@@ -500,9 +549,9 @@ namespace mtl
 		}
 	}
 
-	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, MTL::Heap* heap, u64 offset, u64 size)
+	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, u32 block, u64 offset, u64 size)
 	{
-		m_spans.emplace(allocation, allocation_span{ &pool, heap, offset, size });
+		m_spans.emplace(allocation, allocation_span{ &pool, block, offset, size });
 	}
 
 	void resource_manager::defer_release(MTL::Allocation* allocation)
@@ -538,7 +587,7 @@ namespace mtl
 			if (const auto found = m_spans.find(allocation); found != m_spans.end())
 			{
 				const allocation_span& span = found->second;
-				span.pool->free(span.heap, span.offset, span.size);
+				span.pool->free(span.block, span.offset, span.size);
 				m_spans.erase(found);
 			}
 

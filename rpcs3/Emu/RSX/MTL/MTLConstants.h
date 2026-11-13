@@ -528,6 +528,7 @@ namespace mtl
 		u32 fragment_context_index() const { return m_sets[m_slot].fragment_context.index(); }
 		u32 sampler_info_index() const { return m_sets[m_slot].sampler_info.index(); }
 		u32 stipple_index() const { return m_sets[m_slot].stipple.index(); }
+		// TODO(excise): whole-unit; level 5; only the per-draw capture record prints it.
 		u32 blend_values_index() const { return m_sets[m_slot].blend_values.index(); }
 		u32 fragment_constants_index() const { return m_sets[m_slot].fragment_constants.index(); }
 		u32 transform_constants_index() const { return m_sets[m_slot].transform_constants.index(); }

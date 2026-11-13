@@ -185,6 +185,11 @@ namespace mtl
 		// orders the whole batch after the work encoded ahead of it.
 		void flush_label_writes();
 
+		// Publish the allocations the resource manager made persistent since the last
+		// commit.  Residency additions are batched, and this is the one place that
+		// has to make sure they are in the set before the buffer is committed (P6).
+		void publish_residency();
+
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
 		resource_manager* m_resources = nullptr;

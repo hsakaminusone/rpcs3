@@ -193,6 +193,7 @@ namespace mtl
 			return utils::address_range32::start_length(address, static_cast<u32>(std::min(size, limit)));
 		}
 
+		// TODO(excise): whole-unit; level 2; only the capture's raster hash reads it.
 		u32 hash_raster_state(const raster_state& state)
 		{
 			u32 hash = 2166136261u;
@@ -1474,10 +1475,10 @@ namespace mtl
 		// The open pass.  The header is metal-cpp-free, so the encoder lives here.
 		MTL4::RenderCommandEncoder* encoder = nullptr;
 
-		// TODO(excise): level 5; the state the draw path needs for the per-draw
-		// record but that only end() computes.  The pipeline is set once per
-		// clause, so emit_geometry cannot ask the program cache for it again
-		// without a second lookup.
+		// EXCISE-BEGIN draw-record-state
+		// The state the draw path needs for the per-draw record but that only
+		// end() computes.  The pipeline is set once per clause, so emit_geometry
+		// cannot ask the program cache for it again without a second lookup.
 		MTL::RenderPipelineState* current_pipeline_state = nullptr;
 		u32 current_pipeline_key = 0;
 		u32 current_vp_id = 0;
@@ -1486,6 +1487,7 @@ namespace mtl
 		u32 current_blend_hash = 0;
 		u32 current_depth_hash = 0;
 		u32 current_raster_hash = 0;
+		// EXCISE-END draw-record-state
 	};
 
 	// The deferred flush queue.  A guest write into a range the texture cache owns
@@ -2125,10 +2127,12 @@ namespace mtl
 		// colour clear.  That combination used to open the pass with a load action
 		// and wipe everything outside the scissor, so the count names the defect.
 		MTL_PROBE_LATCH(2, "clear/scissored fill");
+		// EXCISE-BEGIN clear-full-latch
 		if (clear.color_mask_full)
 		{
 			MTL_PROBE_LATCH(2, "clear/scissored fill full color");
 		}
+		// EXCISE-END clear-full-latch
 
 		// Metal has no scissored clear, so a partial clear is a full-screen fill
 		// confined by the scissor (CONFLICTS.md C1).  The core's resolve_scissor
@@ -4295,6 +4299,7 @@ namespace mtl
 			}
 			else
 			{
+				// TODO(excise): level 2; only the shader-failure probe reads it.
 				const bool failed = compiled_vertex && compiled_fragment &&
 					frame.jobs.permanently_failed(compiled_vertex->id, compiled_fragment->id, properties);
 
@@ -5991,6 +5996,7 @@ namespace mtl
 			MTL_PROBE_LATCH(2, "bind/vertex table cached");
 		}
 
+		// EXCISE-BEGIN fragment-table-latch
 		if (fragment_written)
 		{
 			MTL_PROBE_LATCH(2, "bind/fragment table written");
@@ -5999,6 +6005,7 @@ namespace mtl
 		{
 			MTL_PROBE_LATCH(2, "bind/fragment table cached");
 		}
+		// EXCISE-END fragment-table-latch
 
 #if MTL_DEBUG_LOGS
 		static u32 diagnostic_binds = 0;
@@ -6057,9 +6064,10 @@ namespace mtl
 		// encoder that carries the following draws (MTLZCULL.h).
 		frame.zcull_control.apply(encoder);
 
-		// TODO(excise): level 2; the submitted geometry and its index form (area I,
-		// area N).  A draw with no vertices and a draw with vertices are different
-		// signatures, and so are an indexed and a non-indexed draw.
+		// EXCISE-BEGIN draw-form-probes
+		// The submitted geometry and its index form (area I, area N).  A draw
+		// with no vertices and a draw with vertices are different signatures, and
+		// so are an indexed and a non-indexed draw.
 		MTL_PROBE_TOTAL(2, "draw/vertices submitted", input.vertex_draw_count);
 		if (input.has_index_buffer)
 		{
@@ -6079,6 +6087,7 @@ namespace mtl
 			MTL_PROBE_LATCH(2, "draw/empty");
 		}
 		MTL_PROBE_HISTOGRAM(2, "draw metal primitive", static_cast<u32>(primitive), "metal primitive type");
+		// EXCISE-END draw-form-probes
 
 		if (input.has_index_buffer)
 		{
@@ -6791,11 +6800,13 @@ namespace mtl
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "present/flip/composed", 1);
 		}
+		// EXCISE-BEGIN flip-no-acquire
 		else
 		{
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "present/flip/no acquire", 1);
 		}
+		// EXCISE-END flip-no-acquire
 
 		// Present submits the frame and presents the drawable it holds, so a frame
 		// that acquired one always presents it and the ring advances.
@@ -7361,6 +7372,7 @@ namespace mtl
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "fault/on RSX thread", 1);
 		}
+		// EXCISE-BEGIN fault-guest-trace
 		else
 		{
 			// TODO(excise): level 3; per-event trace line.
@@ -7368,11 +7380,13 @@ namespace mtl
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "fault/on guest thread", 1);
 		}
+		// EXCISE-END fault-guest-trace
 
 		const rsx::invalidation_cause cause = is_writing
 			? (can_flush ? rsx::invalidation_cause::write : rsx::invalidation_cause::deferred_write)
 			: (can_flush ? rsx::invalidation_cause::read : rsx::invalidation_cause::deferred_read);
 
+		// EXCISE-BEGIN fault-kind-counters
 		if (can_flush)
 		{
 			if (is_writing)
@@ -7399,6 +7413,7 @@ namespace mtl
 				MTL_PERF_COUNT(1, "fault/deferred read", 1);
 			}
 		}
+		// EXCISE-END fault-kind-counters
 
 		{
 			// TODO(excise): level 1; block timer.
@@ -7477,6 +7492,7 @@ namespace mtl
 			MTL_PERF_SCOPE(1, "fault/producer wait");
 			request->producer_wait();
 		}
+		// EXCISE-BEGIN fault-not-waited
 		else
 		{
 			// Nothing is written back, so the request carries only the sampler flags,
@@ -7486,6 +7502,7 @@ namespace mtl
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "fault/not waited", 1);
 		}
+		// EXCISE-END fault-not-waited
 
 		return true;
 	}

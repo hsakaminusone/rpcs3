@@ -15,6 +15,22 @@
 
 namespace mtl
 {
+	// A clear writes the guest's fill word into a staging buffer and copies the
+	// level whole, so the row padding carries the fill too.  A byte memset cannot
+	// express an arbitrary word, so the fill is word-wise with a short tail (a
+	// level byte size is not always a multiple of four).
+	static void fill_staging_words(void* output, u64 size, u32 word)
+	{
+		u8* out = static_cast<u8*>(output);
+
+		for (u64 index = 0; index < size;)
+		{
+			const u32 chunk = static_cast<u32>(std::min<u64>(size - index, sizeof(word)));
+			std::memcpy(out + index, &word, chunk);
+			index += chunk;
+		}
+	}
+
 	texture_extent normalize_texture_extent(MTL::TextureType type, u16 width, u16 height, u16 depth, u8 mipmaps)
 	{
 		texture_extent extent;
@@ -127,60 +143,111 @@ namespace mtl
 			return;
 		}
 
-		for (const rsx::subresource_layout& layout : layouts)
+		// The uploader decodes one subresource per call, so every level has the
+		// same decoded row shape; only the extent changes.  Size them all first and
+		// carve one staging buffer: per level, a separate allocation also costs a
+		// heap search, a residency commit and a free-list splice (P2).
+		const bool decoded_dxt = !caps.supports_dxt &&
+			(gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1 ||
+			 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
+			 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45);
+
+		// On Apple the uploader expands the packed R6G5B5 upload to one BGRA8
+		// texel per guest texel (Metal does not hold the format); the staging
+		// buffer must cover the expanded rows.
+#if defined(__APPLE__)
+		const bool expanded_r6g5b5 = gcm_format == CELL_GCM_TEXTURE_R6G5B5;
+#else
+		const bool expanded_r6g5b5 = false;
+#endif
+		const bool expanded_blocks = decoded_dxt || expanded_r6g5b5 ||
+			gcm_format == CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8 ||
+			gcm_format == CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8;
+
+		struct upload_span
 		{
+			u64 offset = 0;
+			u32 size = 0;
+			u32 row_pitch = 0;
+			u32 rows = 0;
+		};
+
+		std::vector<upload_span> spans(layouts.size());
+		u64 total_size = 0;
+
+		for (usz index = 0; index < layouts.size(); ++index)
+		{
+			const rsx::subresource_layout& layout = layouts[index];
+			upload_span& span = spans[index];
+
 			if (layout.level >= dst->value()->mipmapLevelCount())
 			{
 				rsx_log.error("Metal 4: invalid subresource definition for the output texture. Mip level does not exist.");
 				continue;
 			}
 
-			u32 row_pitch;
-			u32 rows;
-
-			const bool decoded_dxt = !caps.supports_dxt &&
-				(gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1 ||
-				 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
-				 gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45);
-
-			// On Apple the uploader expands the packed R6G5B5 upload to one BGRA8
-			// texel per guest texel (Metal does not hold the format); the staging
-			// buffer must cover the expanded rows.
-#if defined(__APPLE__)
-			const bool expanded_r6g5b5 = gcm_format == CELL_GCM_TEXTURE_R6G5B5;
-#else
-			const bool expanded_r6g5b5 = false;
-#endif
-
-			if (decoded_dxt || expanded_r6g5b5 ||
-				gcm_format == CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8 ||
-				gcm_format == CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8)
+			if (expanded_blocks)
 			{
-				// The decode path emits one BGRA texel per guest texel.  A DXT
-				// block is four by four, so its compressed row is much shorter than
-				// the expanded row the uploader writes.
-				row_pitch = utils::align<u32>(layout.width_in_texel * 4, 4);
-				rows = layout.height_in_texel * layout.depth;
+				// The decode path emits one BGRA texel per guest texel.  A DXT block
+				// is four by four, so its compressed row is much shorter than the
+				// expanded row the uploader writes.
+				span.row_pitch = utils::align<u32>(layout.width_in_texel * 4, 4);
+				span.rows = layout.height_in_texel * layout.depth;
 			}
 			else
 			{
-				row_pitch = utils::align<u32>(layout.width_in_block * rsx::get_format_block_size_in_bytes(gcm_format), 4);
-				rows = layout.height_in_block * layout.depth;
+				span.row_pitch = utils::align<u32>(layout.width_in_block * rsx::get_format_block_size_in_bytes(gcm_format), 4);
+				span.rows = layout.height_in_block * layout.depth;
 			}
 
-			const u32 size = row_pitch * rows;
-			MTL::Buffer* staging = cmd.resources().new_buffer(size, MTL::StorageModeShared);
+			span.size = span.row_pitch * span.rows;
 
-			if (!staging)
+			if (!span.size)
 			{
-				// A failed allocation skips the level rather than faulting: the
-				// destination keeps what it held, which is what the clear path
-				// already does with the same call.
-				rsx_log.error("Metal 4: the upload staging buffer for a %u byte level could not be created", size);
 				continue;
 			}
 
-			rsx::io_buffer io_buf(staging->contents(), size);
+			span.offset = total_size;
+			total_size = utils::align<u64>(total_size + span.size, 16);
+		}
+
+		if (!total_size)
+		{
+			return;
+		}
+
+		MTL::Buffer* staging = cmd.resources().new_buffer(total_size, MTL::StorageModeShared);
+		if (!staging)
+		{
+			// A failed allocation skips the upload rather than faulting: the
+			// destination keeps what it held, which is what the clear path does.
+			rsx_log.error("Metal 4: the %llu byte upload staging buffer could not be created",
+				static_cast<unsigned long long>(total_size));
+			return;
+		}
+
+		u8* const staging_base = static_cast<u8*>(staging->contents());
+		if (!staging_base)
+		{
+			rsx_log.error("Metal 4: the upload staging buffer has no CPU address");
+			cmd.resources().defer_release(staging);
+			return;
+		}
+
+		for (usz index = 0; index < layouts.size(); ++index)
+		{
+			const rsx::subresource_layout& layout = layouts[index];
+			const upload_span& span = spans[index];
+
+			if (!span.size)
+			{
+				continue;
+			}
+
+			// The uploader writes the whole subresource, so every level starts at its
+			// own carved offset and the copies below can run asynchronously.
+			u8* const staging_data = staging_base + span.offset;
+			rsx::io_buffer io_buf(staging_data, span.size);
 			rsx::upload_texture_subresource(io_buf, layout, gcm_format, is_swizzled, caps);
 
 #if MTL_DEBUG_LOGS
@@ -211,9 +278,9 @@ namespace mtl
 				}
 
 				const usz raw_size = layout.data.size();
-				const usz scan_size = std::min<usz>({ raw_size, static_cast<usz>(size), 1024u * 1024u });
+				const usz scan_size = std::min<usz>({ raw_size, static_cast<usz>(span.size), 1024u * 1024u });
 				const u8* raw = layout.data.data();
-				const u8* converted = static_cast<const u8*>(staging->contents());
+				const u8* converted = static_cast<const u8*>(staging_data);
 				u32 raw_nonzero = 0;
 				u32 converted_nonzero = 0;
 				u32 raw_distinct = 0;
@@ -269,7 +336,7 @@ namespace mtl
 				if (converted)
 				{
 					u8 seen_bytes[256] = {};
-					for (u32 index = 0; index < size; ++index)
+					for (u32 index = 0; index < span.size; ++index)
 					{
 						if (!seen_bytes[converted[index]])
 						{
@@ -279,26 +346,26 @@ namespace mtl
 					}
 				}
 
-				MTL_NOTE(5, "Metal 4: upload %u, address 0x%x fmt 0x%x swizzled %u level %u layer %u, tex %ux%u block %ux%u depth %u pitch %u rows %u size %u raw %llu, guest %u/%llu nonzero distinct %u first %08x %08x %08x %08x, staging %u/%u nonzero distinct %u first %08x %08x %08x %08x",
+				MTL_NOTE(5, "Metal 4: upload %u, address 0x%x fmt 0x%x swizzled %u level %u layer %u, tex %ux%u block %ux%u depth %u pitch %u span.rows %u span.size %u raw %llu, guest %u/%llu nonzero distinct %u first %08x %08x %08x %08x, staging %u/%u nonzero distinct %u first %08x %08x %08x %08x",
 					diagnostic_uploads++, address, gcm_format, is_swizzled ? 1u : 0u, layout.level, layout.layer,
 					static_cast<u32>(layout.width_in_texel), static_cast<u32>(layout.height_in_texel),
 					static_cast<u32>(layout.width_in_block), static_cast<u32>(layout.height_in_block),
-					static_cast<u32>(layout.depth), row_pitch, rows, size,
+					static_cast<u32>(layout.depth), span.row_pitch, span.rows, span.size,
 					static_cast<unsigned long long>(raw_size),
 					raw_nonzero, static_cast<unsigned long long>(std::max<usz>(raw_size, 1) / 4u), raw_distinct,
 					raw_first[0], raw_first[1], raw_first[2], raw_first[3],
-					converted_nonzero, size ? size / 4u : 0u, converted_distinct,
+					converted_nonzero, span.size ? span.size / 4u : 0u, converted_distinct,
 					converted_first[0], converted_first[1], converted_first[2], converted_first[3]);
 
 				if (!seen && diagnostic_key_count < 512 && layout.level == 0)
 				{
 					diagnostic_keys[diagnostic_key_count++] = key;
 
-					if (diagnostic_dumps < 512 && diagnostic_dump_bytes + raw_size + size <= 256u * 1024u * 1024u)
+					if (diagnostic_dumps < 512 && diagnostic_dump_bytes + raw_size + span.size <= 256u * 1024u * 1024u)
 					{
 						const u32 index = diagnostic_dumps++;
 						const usz raw_write_size = std::min<usz>(raw_size, 16u * 1024u * 1024u);
-						diagnostic_dump_bytes += raw_size + size;
+						diagnostic_dump_bytes += raw_size + span.size;
 						char path[512];
 
 						std::snprintf(path, sizeof(path), "%s/guest-%u-addr%x-fmt%x-sw%u-%ux%u-sz%llu.bin",
@@ -316,12 +383,12 @@ namespace mtl
 
 						std::snprintf(path, sizeof(path), "%s/conv-%u-addr%x-fmt%x-sw%u-%ux%u-sz%u.bin",
 							probe::dump_directory(), index, address, gcm_format, is_swizzled ? 1u : 0u,
-							static_cast<u32>(layout.width_in_texel), static_cast<u32>(layout.height_in_texel), size);
+							static_cast<u32>(layout.width_in_texel), static_cast<u32>(layout.height_in_texel), span.size);
 						if (std::FILE* out = std::fopen(path, "wb"))
 						{
 							if (converted)
 							{
-								std::fwrite(converted, 1, size, out);
+								std::fwrite(converted, 1, span.size, out);
 							}
 							std::fclose(out);
 						}
@@ -338,10 +405,10 @@ namespace mtl
 					gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
 					gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45;
 				const u32 census_block_bytes = (gcm_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1) ? 8u : 16u;
-				const u64 census_blocks = compressed_dxt ? (size / census_block_bytes) : 0ull;
-				const u64 census_zero = compressed_dxt ? probe::bc_zero_block_scan(converted, size, census_block_bytes) : 0ull;
+				const u64 census_blocks = compressed_dxt ? (span.size / census_block_bytes) : 0ull;
+				const u64 census_zero = compressed_dxt ? probe::bc_zero_block_scan(converted, span.size, census_block_bytes) : 0ull;
 
-				probe::census_note_upload(address, size, gcm_format, census_blocks, census_zero, census_block_bytes);
+				probe::census_note_upload(address, span.size, gcm_format, census_blocks, census_zero, census_block_bytes);
 
 				if (layout.level == 0 && probe::dump_tex_match(address))
 				{
@@ -360,15 +427,15 @@ namespace mtl
 						}
 					}
 
-					if (converted && probe::dump_tex_take(static_cast<u64>(size)))
+					if (converted && probe::dump_tex_take(static_cast<u64>(span.size)))
 					{
 						std::snprintf(path, sizeof(path), "%s/dump-tex-addr%x-conv.bin", probe::dump_directory(), address);
 
 						if (std::FILE* out = std::fopen(path, "wb"))
 						{
-							std::fwrite(converted, 1, size, out);
+							std::fwrite(converted, 1, span.size, out);
 							std::fclose(out);
-							MTL_NOTE(5, "Metal 4: dump-tex converted %s, %u bytes", path, size);
+							MTL_NOTE(5, "Metal 4: dump-tex converted %s, %u bytes", path, span.size);
 						}
 					}
 				}
@@ -386,8 +453,8 @@ namespace mtl
 				const u32 plane_rows = layout.height_in_texel * layout.depth;
 				MTL::Buffer* plane = cmd.resources().new_buffer(plane_pitch * plane_rows, MTL::StorageModeShared);
 
-				decode_depth_plane(plane->contents(), staging->contents(),
-					layout.width_in_texel, plane_rows, row_pitch,
+				decode_depth_plane(plane->contents(), staging_data,
+					layout.width_in_texel, plane_rows, span.row_pitch,
 					rsx::get_format_block_size_in_bytes(gcm_format), depth_format);
 
 				encoder->copyFromBuffer(plane, 0, plane_pitch, plane_pitch * plane_rows,
@@ -396,17 +463,16 @@ namespace mtl
 					get_depth_plane_option(dst->value()->pixelFormat(), false));
 
 				cmd.resources().defer_release(plane);
-				cmd.resources().defer_release(staging);
 			}
 			else
 			{
-				encoder->copyFromBuffer(staging, 0, row_pitch, row_pitch * rows,
+				encoder->copyFromBuffer(staging, span.offset, span.row_pitch, span.row_pitch * span.rows,
 					MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
 					dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z));
-
-				cmd.resources().defer_release(staging);
 			}
 		}
+
+		cmd.resources().defer_release(staging);
 	}
 
 	void texture_cache::clear_texture(command_recorder& cmd, const texture* image, u32 gcm_format, u8 first_level, u8 level_count, u32 fill_word) const
@@ -457,7 +523,7 @@ namespace mtl
 
 			const u64 size = static_cast<u64>(extent.row_bytes) * extent.rows * extent.depth;
 
-			// A shared buffer's contents are undefined too, so the zeroing is
+			// A shared buffer's contents are undefined too, so the fill is
 			// explicit rather than an assumption about the allocator.
 			MTL::Buffer* staging = cmd.resources().new_buffer(size, MTL::StorageModeShared);
 			if (!staging)
@@ -467,8 +533,7 @@ namespace mtl
 
 			if (void* bytes = staging->contents())
 			{
-				// TODO(excise): level 5; fill_word is the MTL_PROBE_VARIANT=poison fill, zero is the shipping clear.
-				probe::fill_words(bytes, size, fill_word);
+				fill_staging_words(bytes, size, fill_word);
 			}
 
 			// A cube keeps its six faces in the slice dimension.  A 3-D volume
@@ -989,12 +1054,14 @@ namespace mtl
 		// target, which is the path a resolved image takes to a shader.
 		MTL_PROBE_HISTOGRAM(2, "texture bind samples", desc->samples, "sample count");
 
+		// EXCISE-BEGIN bind-cyclic-latch
 		if (desc->is_cyclic_reference)
 		{
 			// TODO(excise): level 2; the section is both a render target and a
 			// sampled input, the case that needs an explicit pass boundary (I4).
 			MTL_PROBE_LATCH(2, "texture/bind cyclic");
 		}
+		// EXCISE-END bind-cyclic-latch
 
 		if (!desc->image_handle)
 		{

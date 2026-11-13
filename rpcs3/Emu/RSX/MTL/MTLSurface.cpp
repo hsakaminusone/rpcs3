@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
+#include <vector>
 
 namespace mtl
 {
@@ -20,7 +22,7 @@ namespace mtl
 	// form is the one a render pass can encode: its own tile store follows the
 	// barrier, so the consumer form would leave the window the resolve path already
 	// closes this way (REVIEW-FINDINGS.md, B6).
-	static void emit_content_barrier(MTL4::CommandEncoder* encoder, const surface& target, const char* reason)
+	static void emit_content_barrier(MTL4::CommandEncoder* encoder, [[maybe_unused]] const surface& target, [[maybe_unused]] const char* reason)
 	{
 		// TODO(excise): level 2; a surface content transfer crossed a queue edge.
 		MTL_PROBE_LATCH(2, "sync/barrier content transfer");
@@ -549,154 +551,315 @@ namespace mtl
 		msaa_flags &= ~rsx::surface_state_flags::require_unresolve;
 	}
 
+	surface_write_range clip_surface_write_range(u32 src_offset, u32 write_length, u32 pitch, u32 height)
+	{
+		surface_write_range range{};
+
+		if (!write_length || !pitch || !height)
+		{
+			return range;
+		}
+
+		const u64 begin = src_offset;
+		const u64 end = begin + write_length;
+		const u64 first_row = std::min<u64>(begin / pitch, height);
+		const u64 last_row = std::min<u64>((end + pitch - 1) / pitch, height);
+
+		if (first_row >= last_row)
+		{
+			return range;
+		}
+
+		range.first_row = static_cast<u32>(first_row);
+		range.rows = static_cast<u32>(last_row - first_row);
+		range.row_offset = static_cast<u32>(begin - first_row * pitch);
+
+		const u64 span = static_cast<u64>(range.rows) * pitch;
+		range.bytes = static_cast<u32>(std::min<u64>(write_length, span - range.row_offset));
+		return range;
+	}
+
+	// Nearest-neighbour resample of one row between planes of different widths.
+	// The scaled read-back and the format decodes both land here.
+	static void resample_plane_row(u8* dst, const u8* src, u32 dst_width, u32 src_width, u32 bytes_per_pixel)
+	{
+		if (dst_width == src_width)
+		{
+			std::memcpy(dst, src, static_cast<usz>(dst_width) * bytes_per_pixel);
+			return;
+		}
+
+		for (u32 x = 0; x < dst_width; ++x)
+		{
+			const u32 source_x = static_cast<u32>(static_cast<u64>(x) * src_width / dst_width);
+			std::memcpy(dst + static_cast<usz>(x) * bytes_per_pixel,
+				src + static_cast<usz>(source_x) * bytes_per_pixel, bytes_per_pixel);
+		}
+	}
+
+	// The guest asks for a *byte range* of the surface in guest row layout
+	// (surface_store.h:995-1014): src_offset, dst_offset and write_length are
+	// arbitrary bytes, so a range can start and end inside a row.  Mirror Vulkan
+	// (VKRenderTargets.h:635-698): materialise the rows the range touches at the
+	// guest pitch, then move exactly write_length bytes.  A row rectangle would
+	// drop a partial row and shift a range whose destination is not row aligned.
 	void surface::write_to_memory(command_recorder& cmd, MTL::Buffer* target, u32 dst_offset, u32 src_offset, u32 write_length)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "surface/write to memory");
 		// TODO(excise): level 2; a surface written back to guest memory (area G, H).
 		MTL_PROBE_LATCH(2, "surface/write back");
+
+		if (!target || !write_length || !rsx_pitch || !surface_width || !surface_height)
+		{
+			return;
+		}
+
+		const surface_write_range range = clip_surface_write_range(src_offset, write_length, rsx_pitch, surface_height);
+
+		if (!range.rows)
+		{
+			return;
+		}
+
+		const u64 first_row = range.first_row;
+		const u32 row_offset = range.row_offset;
+		u32 rows = range.rows;
+
 		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
 		if (!encoder)
 		{
 			return;
 		}
 
-		// src_offset is a byte offset into the surface row space.
-		const u32 row = src_offset / rsx_pitch;
-		const u32 column = (src_offset % rsx_pitch) / get_bpp();
-		u32 rows = write_length / rsx_pitch;
-
-		if (!rows || column >= width())
-		{
-			return;
-		}
-
 		MTL::Texture* source = get_surface(rsx::surface_access::transfer_read)->value();
-		if (row >= source->height())
+		if (!source)
 		{
 			return;
 		}
 
-		// The row pitch is the guest one.  A host surface can be wider than the
-		// guest surface under resolution scaling, so the copy is bounded by both the
-		// host extent and the guest row (REVIEW-FINDINGS.md, S10).  The scaled case
-		// still needs a downscale, but the bit-exact unscaled path must not read past
-		// the host texture or write past the guest row.
-		const u32 copy_width = std::min<u32>(width() - column, rsx_pitch / get_bpp());
-		rows = std::min<u32>(rows, static_cast<u32>(source->height()) - row);
-		if (!copy_width || !rows)
+		const u32 host_width = static_cast<u32>(source->width());
+		const u32 host_height = static_cast<u32>(source->height());
+		const bool scaled = host_width != surface_width || host_height != surface_height;
+
+		// The host rows those guest rows read.  Unscaled, one guest row is one
+		// host row; scaled, a guest row samples the nearest host row.
+		const u32 host_first = scaled
+			? std::min<u32>(static_cast<u32>(static_cast<u64>(first_row) * host_height / surface_height), host_height - 1)
+			: static_cast<u32>(first_row);
+		const u64 guest_end_row = first_row + rows;
+		const u32 host_last = scaled
+			? std::min<u32>(host_height, static_cast<u32>((guest_end_row * host_height + surface_height - 1) / surface_height))
+			: std::min<u32>(static_cast<u32>(guest_end_row), host_height);
+
+		if (host_first >= host_last)
+		{
+			return;
+		}
+
+		rows = std::min<u32>(rows, host_last - host_first);
+		const u64 span = static_cast<u64>(rows) * rsx_pitch;
+		const u32 bytes = static_cast<u32>(std::min<u64>(range.bytes, span - row_offset));
+
+		if (!bytes)
+		{
+			return;
+		}
+
+		const u32 host_rows = host_last - host_first;
+		const u32 bpp = get_bpp();
+		if (!bpp)
 		{
 			return;
 		}
 
 		const MTL::PixelFormat format = source->pixelFormat();
 		const rsx::surface_depth_format2 depth_format = get_surface_depth_format();
+		const rsx::surface_color_format color_format = get_surface_color_format();
+		const bool depth_decode = m_depth && depth_format_needs_decode(depth_format);
+		const bool packed_convert = !m_depth && packed_format_needs_convert(color_format);
 
-		// The guest depth pack is not the Metal depth plane.  z16_uint happens to use
-		// the same word, but z16_float and both z24s8 forms need the upload decode
-		// inverted (B16).  The blit copies the host plane to a shared staging buffer;
-		// the frame is committed and waited for, because the CPU encode that follows
-		// is the read-back itself.  This is the same bounded wait the texture
-		// read-back uses (B4, MTLCommandRecorder::flush_for_readback).
-		if (m_depth && depth_format_needs_decode(depth_format))
+		// The host row a guest row samples, relative to host_first.
+		const auto host_row_offset = [&](u32 guest_row)
 		{
-			const u32 plane_pitch = copy_width * 4;
-			MTL::Buffer* plane = m_resources->new_buffer(static_cast<u64>(plane_pitch) * rows, MTL::StorageModeShared);
+			return scaled
+				? static_cast<u32>(static_cast<u64>(guest_row) * host_height / surface_height) - host_first
+				: guest_row - static_cast<u32>(first_row);
+		};
+
+		// Fetch the host rows of one plane into a shared buffer, at a row pitch a
+		// buffer destination takes.  The copy is asynchronous; every path below
+		// waits once before the CPU touches it.
+		const auto fetch_host_rows = [&](u32 bytes_per_pixel, MTL::BlitOption option, u32& row_pitch) -> MTL::Buffer*
+		{
+			row_pitch = (host_width * bytes_per_pixel + 3u) & ~3u;
+
+			MTL::Buffer* plane = m_resources->new_buffer(
+				static_cast<u64>(row_pitch) * host_rows, MTL::StorageModeShared);
+			if (!plane)
+			{
+				return nullptr;
+			}
+
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(0, host_first, 0),
+				MTL::Size::Make(host_width, host_rows, 1),
+				plane, 0, row_pitch, row_pitch * host_rows,
+				option);
+			return plane;
+		};
+
+		if (!depth_decode && !packed_convert && !scaled)
+		{
+			// Unscaled colour: the guest row is the host row and the guest pitch is
+			// the blit row pitch, so the GPU can fill the staging buffer directly.
+			MTL::Buffer* scratch = m_resources->new_buffer(span, MTL::StorageModeShared);
+			if (!scratch)
+			{
+				rsx_log.error("Metal 4: the surface read-back staging buffer could not be created");
+				return;
+			}
+
+			encoder->copyFromTexture(source, 0, 0,
+				MTL::Origin::Make(0, host_first, 0),
+				MTL::Size::Make(surface_width, rows, 1),
+				scratch, 0, rsx_pitch, rsx_pitch * rows);
+
+			// A buffer-to-buffer blit needs four-byte aligned offsets and length.
+			// When the guest range is aligned the copy stays in the command stream
+			// exactly where it used to be, with no extra drain; otherwise the CPU
+			// takes the bytes after one bounded wait.
+			if (!((dst_offset | row_offset | bytes) & 3u))
+			{
+				encoder->copyFromBuffer(scratch, row_offset, target, dst_offset, bytes);
+				m_resources->defer_release(scratch);
+				return;
+			}
+
+			cmd.flush_for_readback();
+
+			if (u8* const dst = static_cast<u8*>(target->contents()))
+			{
+				std::memcpy(dst + dst_offset, static_cast<u8*>(scratch->contents()) + row_offset, bytes);
+			}
+
+			m_resources->defer_release(scratch);
+			return;
+		}
+
+		// The guest bytes of the requested rows, in guest row layout.  The last
+		// memcpy takes the requested subrange out of it.
+		std::vector<u8> staging(static_cast<usz>(span));
+
+		if (depth_decode)
+		{
+			u32 depth_pitch = 0;
+			MTL::Buffer* plane = fetch_host_rows(4, get_depth_plane_option(format, false), depth_pitch);
 			if (!plane)
 			{
 				rsx_log.error("Metal 4: the depth read-back staging buffer could not be created");
 				return;
 			}
 
-			encoder->copyFromTexture(source, 0, 0,
-				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(copy_width, rows, 1),
-				plane, 0, plane_pitch, plane_pitch * rows,
-				get_depth_plane_option(format, false));
-
-			MTL::Buffer* stencil = nullptr;
-			const u32 stencil_pitch = (copy_width + 3u) & ~3u;
 			const bool combined = rsx::is_depth_stencil_format(depth_format);
-			if (combined)
+			u32 stencil_pitch = 0;
+			MTL::Buffer* stencil = combined
+				? fetch_host_rows(1, get_depth_plane_option(format, true), stencil_pitch)
+				: nullptr;
+			if (combined && !stencil)
 			{
-				stencil = m_resources->new_buffer(static_cast<u64>(stencil_pitch) * rows, MTL::StorageModeShared);
-				if (!stencil)
-				{
-					rsx_log.error("Metal 4: the stencil read-back staging buffer could not be created");
-					m_resources->defer_release(plane);
-					return;
-				}
-
-				encoder->copyFromTexture(source, 0, 0,
-					MTL::Origin::Make(column, row, 0),
-					MTL::Size::Make(copy_width, rows, 1),
-					stencil, 0, stencil_pitch, stencil_pitch * rows,
-					get_depth_plane_option(format, true));
+				rsx_log.error("Metal 4: the stencil read-back staging buffer could not be created");
+				m_resources->defer_release(plane);
+				return;
 			}
 
 			cmd.flush_for_readback();
 
-			u8* const dst = static_cast<u8*>(target->contents()) + dst_offset;
-			encode_depth_plane(dst, plane->contents(), copy_width, rows, rsx_pitch, get_bpp(), depth_format,
-				stencil ? stencil->contents() : nullptr, stencil ? stencil_pitch : 0);
+			std::vector<u8> depth_row(static_cast<usz>(surface_width) * 4);
+			std::vector<u8> stencil_row(combined ? surface_width : 0);
+
+			for (u32 y = 0; y < rows; ++y)
+			{
+				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
+				const u8* const plane_row = static_cast<const u8*>(plane->contents())
+					+ static_cast<usz>(source_row) * depth_pitch;
+				resample_plane_row(depth_row.data(), plane_row, surface_width, host_width, 4);
+
+				if (combined)
+				{
+					const u8* const stencil_plane_row = static_cast<const u8*>(stencil->contents())
+						+ static_cast<usz>(source_row) * stencil_pitch;
+					resample_plane_row(stencil_row.data(), stencil_plane_row, surface_width, host_width, 1);
+				}
+
+				encode_depth_plane(staging.data() + static_cast<usz>(y) * rsx_pitch, depth_row.data(),
+					surface_width, 1, rsx_pitch, bpp, depth_format,
+					combined ? stencil_row.data() : nullptr, surface_width);
+			}
 
 			m_resources->defer_release(plane);
 			if (stencil)
 			{
 				m_resources->defer_release(stencil);
 			}
-			return;
 		}
-
-		// m_depth guard first: the format union aliases the depth enum, so a depth
-		// surface would compare equal to a packed colour format.
-		const rsx::surface_color_format color_format = get_surface_color_format();
-
-		if (!m_depth && packed_format_needs_convert(color_format))
+		else if (packed_convert)
 		{
-			// The Metal packed word stores blue in the high field, so a raw row copy
-			// exchanges the red and blue fields (and misaligns every x1r5g5b5 field).  The
-			// depth decode above is the model: the blit copies to a shared staging buffer,
-			// and the frame is committed and waited for, because the CPU encode that
-			// follows is the read-back itself.
-			const u32 plane_pitch = copy_width * 2;
-			MTL::Buffer* plane = m_resources->new_buffer(static_cast<u64>(plane_pitch) * rows, MTL::StorageModeShared);
+			u32 packed_pitch = 0;
+			MTL::Buffer* plane = fetch_host_rows(2, MTL::BlitOptionNone, packed_pitch);
 			if (!plane)
 			{
 				rsx_log.error("Metal 4: the packed colour read-back staging buffer could not be created");
 				return;
 			}
 
-			encoder->copyFromTexture(source, 0, 0,
-				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(copy_width, rows, 1),
-				plane, 0, plane_pitch, plane_pitch * rows);
-
 			cmd.flush_for_readback();
 
-			u8* const dst = static_cast<u8*>(target->contents()) + dst_offset;
-			encode_packed16_plane(dst, plane->contents(), copy_width, rows, rsx_pitch, color_format);
+			std::vector<u8> packed_row(static_cast<usz>(surface_width) * 2);
+
+			for (u32 y = 0; y < rows; ++y)
+			{
+				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
+				resample_plane_row(packed_row.data(),
+					static_cast<const u8*>(plane->contents()) + static_cast<usz>(source_row) * packed_pitch,
+					surface_width, host_width, 2);
+				encode_packed16_plane(staging.data() + static_cast<usz>(y) * rsx_pitch, packed_row.data(),
+					surface_width, 1, rsx_pitch, color_format);
+			}
 
 			m_resources->defer_release(plane);
-			return;
-		}
-
-		if (format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
-		{
-			encoder->copyFromTexture(source, 0, 0,
-				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(copy_width, rows, 1),
-				target, dst_offset, rsx_pitch, rsx_pitch * rows,
-				get_depth_plane_option(format, false));
 		}
 		else
 		{
-			encoder->copyFromTexture(source, 0, 0,
-				MTL::Origin::Make(column, row, 0),
-				MTL::Size::Make(copy_width, rows, 1),
-				target, dst_offset, rsx_pitch, rsx_pitch * rows);
+			// Scaled colour: a guest row samples the nearest host row.
+			u32 scaled_pitch = 0;
+			MTL::Buffer* plane = fetch_host_rows(bpp, MTL::BlitOptionNone, scaled_pitch);
+			if (!plane)
+			{
+				rsx_log.error("Metal 4: the scaled read-back staging buffer could not be created");
+				return;
+			}
+
+			cmd.flush_for_readback();
+
+			for (u32 y = 0; y < rows; ++y)
+			{
+				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
+				resample_plane_row(staging.data() + static_cast<usz>(y) * rsx_pitch,
+					static_cast<const u8*>(plane->contents()) + static_cast<usz>(source_row) * scaled_pitch,
+					surface_width, host_width, bpp);
+			}
+
+			m_resources->defer_release(plane);
 		}
+
+		if (u8* const dst = static_cast<u8*>(target->contents()))
+		{
+			std::memcpy(dst + dst_offset, staging.data() + row_offset, bytes);
+		}
+
 	}
+
 }
 
 #endif // RSX_ENABLE_METAL4

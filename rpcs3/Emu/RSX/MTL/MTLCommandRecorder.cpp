@@ -410,6 +410,7 @@ namespace mtl
 			// A label recorded after the last pass belongs to this commit.
 			flush_label_writes();
 			close_encoder();
+			publish_residency();
 		}
 
 		const u32 index = m_slot;
@@ -470,6 +471,7 @@ namespace mtl
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/readback wait/end buffer");
+			publish_residency();
 			slot.command_buffer->endCommandBuffer();
 			slot.buffer_open = false;
 		}
@@ -720,6 +722,7 @@ namespace mtl
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/commit labels/end buffer");
+			publish_residency();
 			slot.command_buffer->endCommandBuffer();
 			slot.buffer_open = false;
 		}
@@ -801,6 +804,16 @@ namespace mtl
 	bool command_recorder::wait_for_slot(u32 index)
 	{
 		return await_slot(m_slots[index], "label wait");
+	}
+
+	void command_recorder::publish_residency()
+	{
+		// A buffer that names an allocation the set has not published reads zeros in
+		// silence (HLD-02 F1), so the set is committed before the buffer is.
+		if (m_resources)
+		{
+			m_resources->flush_residency();
+		}
 	}
 
 	void command_recorder::flush_label_writes()
@@ -951,15 +964,13 @@ namespace mtl
 			rsx_log.error("Metal 4: commit failed: %s", error->localizedDescription()->utf8String());
 		}
 
+		// EXCISE-BEGIN feedback-lag
 		if (feedback->GPUEndTime() > 0.0)
 		{
 			// TODO(excise): level 1; instantaneous value.
 			MTL_PERF_GAUGE(1, "recorder/feedback lag us", (debug_now_seconds() - feedback->GPUEndTime()) * 1e6);
 		}
-
-		// The commit stamp is written on the RSX thread, so it is read once here
-		// rather than taken as a plain value on this callback thread.
-		const f64 committed = m_slots[index].debug_commit_time.load(std::memory_order_relaxed);
+		// EXCISE-END feedback-lag
 
 		// TODO(excise): temporary diagnostic; the frame's GPU execution and the time
 		// it queued behind earlier frames tell a GPU-bound frame from a display-bound
@@ -968,14 +979,19 @@ namespace mtl
 		{
 			// TODO(excise): level 1; instantaneous value.
 			MTL_PERF_GAUGE(1, "frame/gpu us", (feedback->GPUEndTime() - feedback->GPUStartTime()) * 1e6);
+			// The commit stamp is written on the RSX thread, so it is read once here
+			// rather than taken as a plain value on this callback thread.
+			const f64 committed = m_slots[index].debug_commit_time.load(std::memory_order_relaxed);
 			// TODO(excise): level 1; instantaneous value.
 			MTL_PERF_GAUGE(1, "frame/gpu wait us", (feedback->GPUStartTime() - committed) * 1e6);
 		}
 
 		// TODO(excise): level 4; deep-probe line.
 		MTL_NOTE(4, "Metal 4: feedback for slot %u: gpu %.3f..%.3f, commit %.3f, start lag %.3f, delivery lag %.3f",
-			index, feedback->GPUStartTime(), feedback->GPUEndTime(), committed,
-			feedback->GPUStartTime() - committed, debug_now_seconds() - feedback->GPUEndTime());
+			index, feedback->GPUStartTime(), feedback->GPUEndTime(),
+			m_slots[index].debug_commit_time.load(std::memory_order_relaxed),
+			feedback->GPUStartTime() - m_slots[index].debug_commit_time.load(std::memory_order_relaxed),
+			debug_now_seconds() - feedback->GPUEndTime());
 
 		// A feedback of a commit the ring already abandoned carries an older
 		// generation, so it must not count against the slot a newer commit now owns.
