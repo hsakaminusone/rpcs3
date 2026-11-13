@@ -1,0 +1,33 @@
+
+=== ds.dis ===
+instructions: 5,939,384   direct branch targets: 553,132
+contiguous chunks: 1   basic blocks: 1,070,410   blocks/chunk=1070410.00
+branch density: 11.9% of instructions end a block
+  block length (guest insns): n=1070410 mean=5.55 median=4 p90=12 p99=26 max=627
+  block-length histogram: {'1-2': 0, '3-5': 339965, '6-10': 362179, '11-20': 236905, '21-40': 109676, '41-80': 18251, '81-160': 2862, '161+': 493}
+  blocks with >1 predecessor: 8.1%   with 0 predecessors: 59.5%   branch-targeted: 49.4%
+
+  current inline chain (unconditional b only; a conditional branch ends it):
+    length: n=1070410 mean=6.34 median=4 p90=13 p99=29 max=627
+  length histogram: {'1-2': 276510, '3-5': 353529, '6-10': 267991, '11-20': 142658, '21-40': 25266, '41-80': 3761, '81+': 695}
+
+  back-edge branches: 154,407  forward branches: 190,744  back/fwd=44.7%
+  loop body span (guest insns): n=153705 mean=222.27 median=108 p90=517 p99=1759 max=8172
+  loop-body histogram: {'2-9': 5617, '10-19': 10932, '20-39': 20442, '40-79': 24985, '80-159': 33460, '160-319': 28576, '320+': 29693}
+
+  loop-header regions: 110,138 headers, 3,293,593 insns absorbed (55.5% of the section)
+    loop-region length: n=110138 mean=29.90 median=13 p90=63 p99=270 max=4908
+  loop-region histogram: {'2-9': 39038, '10-19': 31284, '20-39': 18021, '40-79': 14351, '80-159': 4818, '160-319': 1859, '320+': 767}
+  loop regions >=40 insns: 19.8%   >=100: 4.8%
+
+  region chain (conservative=False):
+    length: n=313883 mean=15.53 median=10 p90=32 p99=92 max=557
+  length histogram: {'1-9': 147507, '10-19': 85403, '20-39': 60126, '40-79': 16545, '80-159': 3310, '160-255': 612, '256+': 380}
+  stop reasons: {'external-pred': 203326, 'indirect/return': 108367, 'loop': 1140, 'syscall': 668, 'budget': 380, 'out-of-chunk': 2}
+  regions >=40 insns: 6.6%   >=100: 0.8%
+
+  region chain (conservative=True):
+    length: n=645752 mean=8.40 median=6 p90=18 p99=41 max=627
+  length histogram: {'1-9': 446073, '10-19': 146817, '20-39': 45421, '40-79': 6367, '80-159': 888, '160-255': 113, '256+': 73}
+  stop reasons: {'entry-block': 285098, 'external-pred': 229268, 'indirect/return': 130273, 'syscall': 661, 'loop': 377, 'budget': 73, 'out-of-chunk': 2}
+  regions >=40 insns: 1.2%   >=100: 0.1%
