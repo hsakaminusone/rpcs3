@@ -1,0 +1,33 @@
+
+=== rr7.dis ===
+instructions: 1,065,025   direct branch targets: 99,541
+contiguous chunks: 2   basic blocks: 189,058   blocks/chunk=94529.00
+branch density: 12.2% of instructions end a block
+  block length (guest insns): n=189058 mean=5.63 median=4 p90=11 p99=29 max=426
+  block-length histogram: {'1-2': 0, '3-5': 58211, '6-10': 65685, '11-20': 42820, '21-40': 17503, '41-80': 4032, '81-160': 707, '161+': 88}
+  blocks with >1 predecessor: 7.4%   with 0 predecessors: 58.5%   branch-targeted: 48.9%
+
+  current inline chain (unconditional b only; a conditional branch ends it):
+    length: n=189058 mean=6.41 median=5 p90=13 p99=32 max=426
+  length histogram: {'1-2': 49352, '3-5': 62027, '6-10': 47825, '11-20': 23252, '21-40': 5630, '41-80': 861, '81+': 111}
+
+  back-edge branches: 27,203  forward branches: 34,583  back/fwd=44.0%
+  loop body span (guest insns): n=27202 mean=283.55 median=98 p90=668 p99=3204 max=6776
+  loop-body histogram: {'2-9': 983, '10-19': 2555, '20-39': 3860, '40-79': 4686, '80-159': 4937, '160-319': 4349, '320+': 5832}
+
+  loop-header regions: 17,507 headers, 581,753 insns absorbed (54.6% of the section)
+    loop-region length: n=17507 mean=33.23 median=14 p90=79 p99=291 max=931
+  loop-region histogram: {'2-9': 6685, '10-19': 3926, '20-39': 3082, '40-79': 2086, '80-159': 1051, '160-319': 560, '320+': 117}
+  loop regions >=40 insns: 21.8%   >=100: 7.3%
+
+  region chain (conservative=False):
+    length: n=56482 mean=18.55 median=11 p90=41 p99=124 max=435
+  length histogram: {'1-9': 24793, '10-19': 15432, '20-39': 10296, '40-79': 4529, '80-159': 1109, '160-255': 227, '256+': 96}
+  stop reasons: {'external-pred': 35274, 'indirect/return': 20023, 'loop': 584, 'syscall': 505, 'budget': 96}
+  regions >=40 insns: 10.6%   >=100: 1.6%
+
+  region chain (conservative=True):
+    length: n=109279 mean=9.50 median=6 p90=20 p99=55 max=435
+  length histogram: {'1-9': 73797, '10-19': 23862, '20-39': 9088, '40-79': 2170, '80-159': 325, '160-255': 31, '256+': 6}
+  stop reasons: {'entry-block': 50386, 'external-pred': 37224, 'indirect/return': 20917, 'syscall': 499, 'loop': 247, 'budget': 6}
+  regions >=40 insns: 2.3%   >=100: 0.2%
