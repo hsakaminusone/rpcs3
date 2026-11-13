@@ -3824,7 +3824,19 @@ namespace mtl
 		// The per-draw trace is the largest trace source of the backend, so it prints
 		// for a bounded prefix of the run and never again.  The counters and the
 		// histograms above carry the rest of the draw stream (anti-flood rule).
-		if (diagnostic_draws < 16)
+		// TODO(excise): level 3; MTL_PROBE_VARIANT=draws-all raises the detailed
+		// cap to 64, and draws-sampled=N logs every Nth draw beyond it, so the
+		// recovered stream after the video hole is visible.
+		static const u32 diagnostic_draw_trace_limit = probe::variant("draws-all") ? 64u : 16u;
+		static const u32 diagnostic_draw_sample = []
+		{
+			const std::string arg = probe::variant_arg("draws-sampled");
+			return arg.empty() ? 0u : static_cast<u32>(std::strtoul(arg.c_str(), nullptr, 10));
+		}();
+		const bool diagnostic_draw_traced = diagnostic_draws < diagnostic_draw_trace_limit ||
+			(diagnostic_draw_sample && diagnostic_draws % diagnostic_draw_sample == 0);
+
+		if (diagnostic_draw_traced)
 		{
 			char units[512] = {};
 			u32 units_len = 0;
@@ -6450,6 +6462,50 @@ namespace mtl
 				const u32 address = rsx::get_address(m_ctx, m_ctx->display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
 				get_present_source(address, buffer_width, buffer_height, buffer_pitch, av_format, 0, image);
 
+				// EXCISE-BEGIN present-census
+				// TODO(excise): level 3; every five seconds the presented stream, its
+				// last source and one bounded thumbnail.  This is the instrument that
+				// names what the game shows after the video hole (card / movie / menu),
+				// which no log or dump of the 20261112-200536 run answered.
+				{
+					static u64 diagnostic_census_last_ns = 0;
+					static u32 diagnostic_census_presents = 0;
+					static u32 diagnostic_census_draws = 0;
+					static u32 diagnostic_census_dumps = 0;
+
+					if (!diagnostic_census_last_ns)
+					{
+						diagnostic_census_last_ns = probe::now_ns();
+						diagnostic_census_draws = diagnostic_current_draw;
+					}
+
+					++diagnostic_census_presents;
+					const u64 now = probe::now_ns();
+
+					if (now - diagnostic_census_last_ns >= 5'000'000'000ull)
+					{
+						const u32 draws = diagnostic_current_draw >= diagnostic_census_draws
+							? diagnostic_current_draw - diagnostic_census_draws
+							: diagnostic_current_draw;
+
+						MTL_NOTE(3, "Metal 4: present census presents %u draws %u last address 0x%x %ux%u image %s",
+							diagnostic_census_presents, draws, address, buffer_width, buffer_height,
+							image ? "resolved" : "none");
+
+						if (image && diagnostic_census_dumps < 48)
+						{
+							dump_host_image(resources.recorder, resources.resources, image, "census",
+								static_cast<u32>(now / 1'000'000'000ull), address);
+							++diagnostic_census_dumps;
+						}
+
+						diagnostic_census_last_ns = now;
+						diagnostic_census_presents = 0;
+						diagnostic_census_draws = diagnostic_current_draw;
+					}
+				}
+				// EXCISE-END present-census
+
 				// EXCISE-BEGIN present-trace
 				static u32 diagnostic_presents = 0;
 				// TODO(excise): level 5; the present-source dump budget, per run.
@@ -6651,10 +6707,19 @@ namespace mtl
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "present/flip/compose");
-			const areau display_area{0, 0, target_width, target_height};
+
+			// The pass writes the drawable it was handed, so the size it covers is the
+			// drawable's and not the client area the acquire asked for: a resize leaves
+			// the drawables the layer already carries at the old size until they come
+			// back round the pool, and a pass that drew past its attachment would be a
+			// validation error.  VK measures the swapchain image after the acquire for
+			// the same reason (VKPresent.cpp:658-660).
+			const u32 present_width = static_cast<u32>(drawable->width());
+			const u32 present_height = static_cast<u32>(drawable->height());
+			const areau display_area{ 0, 0, present_width, present_height };
 			const areau aspect = (g_cfg.video.stretch_to_display_area.get() || !source.width || !source.height)
 				? display_area
-				: avconfig.aspect_convert_region({ source.width, source.height }, { target_width, target_height });
+				: avconfig.aspect_convert_region({ source.width, source.height }, { present_width, present_height });
 
 			MTL4::RenderPassDescriptor* pass = MTL4::RenderPassDescriptor::alloc()->init();
 			MTL::RenderPassColorAttachmentDescriptor* attachment = pass->colorAttachments()->object(0);
