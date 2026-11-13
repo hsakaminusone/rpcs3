@@ -114,6 +114,45 @@ namespace mtl
 		{
 			ensure(!exists() || !is_managed() || vram_texture == image);
 
+			// EXCISE-BEGIN surface-diag
+			if (rsx::surface_diag::enabled() &&
+				context == rsx::texture_upload_context::framebuffer_storage &&
+				vram_texture != image)
+			{
+				const u64 old_surface = reinterpret_cast<u64>(vram_texture);
+				const u32 base = get_section_range().valid() ? get_section_range().start : 0;
+
+				rsx::surface_diag::record(rsx::surface_diag::event_kind::bind,
+					reinterpret_cast<u64>(image), base, 0,
+					static_cast<u32>(old_surface), is_locked(), false);
+
+				if (auto incoming = static_cast<surface*>(image))
+				{
+					incoming->diag_note(rsx::surface_diag::event_kind::bind, static_cast<u32>(old_surface));
+				}
+
+				if (auto outgoing = static_cast<surface*>(vram_texture))
+				{
+					outgoing->diag_note(rsx::surface_diag::event_kind::bind, static_cast<u32>(reinterpret_cast<u64>(image)));
+				}
+			}
+			// EXCISE-END surface-diag
+
+			// In-place image swap on a section that is still locked (GLTextureCache.h:78,
+			// VKTextureCache.h:56).  This is how a protected framebuffer section takes a
+			// new surface - a clone, or the same address rebound as depth/colour.  The
+			// outgoing surface gives the lock up and the incoming one takes it, so a
+			// flush can never read an attachment whose lock was silently dropped.
+			if (vram_texture && vram_texture != image && !managed_texture && get_protection() == utils::protection::no)
+			{
+				static_cast<surface*>(vram_texture)->on_swap_out();
+
+				if (!managed)
+				{
+					static_cast<surface*>(image)->on_swap_in(is_locked());
+				}
+			}
+
 			vram_texture = image;
 
 			if (managed)
@@ -171,6 +210,20 @@ namespace mtl
 
 		void destroy()
 		{
+			// EXCISE-BEGIN surface-diag
+			if (rsx::surface_diag::enabled() &&
+				context == rsx::texture_upload_context::framebuffer_storage &&
+				vram_texture)
+			{
+				static_cast<surface*>(vram_texture)->diag_note(rsx::surface_diag::event_kind::destroy_section);
+
+				rsx::surface_diag::record(rsx::surface_diag::event_kind::destroy_section,
+					reinterpret_cast<u64>(vram_texture),
+					get_section_range().valid() ? get_section_range().start : 0,
+					0, 0, is_locked(), false);
+			}
+			// EXCISE-END surface-diag
+
 			if (!is_locked() && !m_staging && vram_texture == nullptr && !managed_texture)
 			{
 				return;
