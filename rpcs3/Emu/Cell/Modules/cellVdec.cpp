@@ -211,6 +211,12 @@ struct vdec_frame
 	}
 };
 
+// EXCISE-BEGIN rca-video-decoder-probe
+// TODO(excise): level 1; forward declaration so the decoder thread body can
+// report its own liveness, independent of the monitor's idm::select.
+static bool vdec_probe_armed();
+// EXCISE-END rca-video-decoder-probe
+
 struct vdec_context final
 {
 	static const u32 id_base = 0xf0000000;
@@ -247,6 +253,16 @@ struct vdec_context final
 
 	std::deque<vdec_frame> out_queue;
 	const u32 out_max = 60;
+
+	// EXCISE-BEGIN rca-video-counters
+	// TODO(excise): level 1; the RR7 freeze RCA.  A 1 Hz heartbeat and the two
+	// bounded stall snapshots read these counters; nothing else does.
+	atomic_t<u64> diagnostic_aus{0};
+	atomic_t<u64> diagnostic_pictures{0};
+	atomic_t<u64> diagnostic_getpic_calls{0};
+	atomic_t<u64> diagnostic_last_getpic_ns{0};
+	atomic_t<u32> diagnostic_last_getpic_result{0};
+	// EXCISE-END rca-video-counters
 
 	atomic_t<s32> au_count{0};
 
@@ -369,6 +385,17 @@ struct vdec_context final
 
 		ppu_tid.release(ppu.id);
 
+		// EXCISE-BEGIN rca-video-decoder-liveness
+		// TODO(excise): level 1; the decoder thread body proving it runs at all,
+		// so a context the monitor cannot see still reports progress.
+		const bool probe = vdec_probe_armed();
+
+		if (probe)
+		{
+			cellVdec.notice("RSX video decoder: exec start (handle=0x%x, tid=0x%x)", handle, ppu.id);
+		}
+		// EXCISE-END rca-video-decoder-liveness
+
 		for (auto slice = in_cmd.pop_all(); thread_ctrl::state() != thread_state::aborting; [&]
 		{
 			if (slice)
@@ -399,6 +426,14 @@ struct vdec_context final
 			{
 				std::lock_guard lock{mutex};
 
+				// EXCISE-BEGIN rca-video-decoder-seq
+				// TODO(excise): level 1; the sequence command reaching the thread.
+				if (probe)
+				{
+					cellVdec.notice("RSX video decoder: start_sequence handled (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
+				}
+				// EXCISE-END rca-video-decoder-seq
+
 				if (seq_state == sequence_state::resetting)
 				{
 					cellVdec.trace("Reset sequence... (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
@@ -424,6 +459,14 @@ struct vdec_context final
 			}
 			case vdec_cmd_type::end_sequence:
 			{
+				// EXCISE-BEGIN rca-video-decoder-seq-end
+				// TODO(excise): level 1; the sequence teardown reaching the thread.
+				if (probe)
+				{
+					cellVdec.notice("RSX video decoder: end_sequence handled (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
+				}
+				// EXCISE-END rca-video-decoder-seq-end
+
 				cellVdec.trace("End sequence... (handle=0x%x, seq_id=%d, cmd_id=%d)", handle, cmd->seq_id, cmd->id);
 
 				{
@@ -497,6 +540,17 @@ struct vdec_context final
 					else
 					{
 						sequence_header_found = true;
+
+						// EXCISE-BEGIN rca-video-aus
+						// TODO(excise): level 1; one accepted AU, the heartbeat's progress unit.
+						diagnostic_aus++;
+
+						if (probe && !(diagnostic_aus.load() % 30))
+						{
+							cellVdec.notice("RSX video decoder: %llu AUs accepted (handle=0x%x, seq_id=%d, cmd_id=%d)",
+								static_cast<unsigned long long>(diagnostic_aus.load()), handle, cmd->seq_id, cmd->id);
+						}
+						// EXCISE-END rca-video-aus
 					}
 
 					while (!abort_decode && seq_id == cmd->seq_id)
@@ -623,6 +677,11 @@ struct vdec_context final
 						cellVdec.trace("Got picture (handle=0x%x, seq_id=%d, cmd_id=%d, pts=0x%llx[0x%llx], dts=0x%llx[0x%llx])", handle, cmd->seq_id, cmd->id, frame.pts, frame->pts, frame.dts, frame->pkt_dts);
 
 						decoded_frames.push_back(std::move(frame));
+
+						// EXCISE-BEGIN rca-video-pictures
+						// TODO(excise): level 1; one decoded picture, the heartbeat's progress unit.
+						diagnostic_pictures++;
+						// EXCISE-END rca-video-pictures
 					}
 
 					if (skipped_au_count && !decoded_frames.empty())
@@ -729,6 +788,18 @@ struct vdec_context final
 		// Make sure the state is closed at the end
 		std::lock_guard lock{mutex};
 		seq_state = sequence_state::closed;
+
+		// EXCISE-BEGIN rca-video-decoder-liveness-end
+		// TODO(excise): level 1; how the decoder thread left, with its counters.
+		if (probe)
+		{
+			cellVdec.notice("RSX video decoder: exec end (handle=0x%x, aus %llu, pictures %llu, getpic %llu, thread state %u)",
+				handle, static_cast<unsigned long long>(diagnostic_aus.load()),
+				static_cast<unsigned long long>(diagnostic_pictures.load()),
+				static_cast<unsigned long long>(diagnostic_getpic_calls.load()),
+				static_cast<u32>(thread_ctrl::state()));
+		}
+		// EXCISE-END rca-video-decoder-liveness-end
 	}
 };
 
@@ -764,6 +835,225 @@ struct vdec_context_reaper
 	static constexpr auto thread_name = "HLE Video Decoder Reaper"sv;
 };
 
+// EXCISE-BEGIN rca-video-probe
+// TODO(excise): level 1; the RR7 freeze RCA.  Default off.  RSX_VIDEO_TRACE=1
+// unlocks the video trace sites that already exist (cellVdec, cellDmux,
+// cellDmuxPamf, cellPamf, sys_interrupt); RSX_VIDEO_HEARTBEAT=1 adds the 1 Hz
+// queue heartbeat and the two bounded stall snapshots.  The whole range, every
+// diagnostic_ counter it reads and every write to those counters is removed by
+// the release scrubber.
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+
+static bool vdec_probe_armed()
+{
+	static const bool armed = []
+	{
+		const auto enabled = [](const char* name)
+		{
+			const char* value = std::getenv(name);
+			return value && *value && std::strcmp(value, "0") != 0;
+		};
+
+		return enabled("RSX_VIDEO_TRACE") || enabled("RSX_VIDEO_HEARTBEAT");
+	}();
+
+	return armed;
+}
+
+static u64 vdec_probe_now_ns()
+{
+	return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static void vdec_probe_dump_threads(u32 index, u32 contexts, const std::string& state)
+{
+	// TODO(excise): level 1; the bounded stall snapshot.  Where the guest is
+	// waiting, taken while the present path is idle, instead of inferring it from
+	// the shutdown aborted() lines.
+	cellVdec.notice("RSX video stall snapshot %u: contexts %u, %s", index, contexts,
+		state.empty() ? "no vdec state" : state.c_str());
+
+	idm::select<named_thread<ppu_thread>>([&](u32 id, ppu_thread& ppu)
+	{
+		cellVdec.notice("RSX video stall snapshot %u: PPU 0x%x \"%s\" state %s, prio %d, function %s",
+			index, id, ppu.get_name(), ppu.state.load(), ppu.prio.load().prio,
+			ppu.last_function ? ppu.last_function : "unknown");
+	}, idm::unlocked);
+}
+
+struct vdec_probe_monitor
+{
+	static constexpr auto thread_name = "Video Probe Monitor"sv;
+
+	void operator()()
+	{
+		if (!vdec_probe_armed())
+		{
+			return;
+		}
+
+		// Probe 1: the Log: section of the config is applied by
+		// rpcs3::utils::configure_logs(), but the shipped sessions observed so far
+		// never carried a video trace line, so the probe asserts the levels itself
+		// and re-asserts them: configure_logs() calls logs::reset() at Load and Run,
+		// which can undo a level set only once.
+		const auto assert_levels = []
+		{
+			logs::set_channel_levels({
+				{ "cellVdec", logs::level::trace },
+				{ "cellDmux", logs::level::trace },
+				{ "cellDmuxPamf", logs::level::trace },
+				{ "cellPamf", logs::level::trace },
+				{ "sys_interrupt", logs::level::trace },
+			});
+		};
+
+		assert_levels();
+
+		cellVdec.notice("RSX video probe: trace enabled for cellVdec, cellDmux, cellDmuxPamf, cellPamf, sys_interrupt");
+
+		bool seen_context = false;
+		bool first_context = true;
+		bool first_tick = true;
+		u32 idle_notes = 0;
+		u64 first_tick_ns = vdec_probe_now_ns();
+		u64 last_beat = vdec_probe_now_ns();
+		u64 last_level_assert = last_beat;
+		u64 last_progress = last_beat;
+		u64 last_aus = 0;
+		u64 last_pictures = 0;
+		u64 last_total_aus = 0;
+		u64 last_total_pictures = 0;
+		u64 last_stall_note = 0;
+		u32 stall_snapshots = 0;
+
+		while (thread_ctrl::state() != thread_state::aborting)
+		{
+			thread_ctrl::wait_for(250'000);
+
+			const u64 now = vdec_probe_now_ns();
+
+			if (now - last_level_assert >= 5'000'000'000ull)
+			{
+				last_level_assert = now;
+				assert_levels();
+			}
+
+			u32 contexts = 0;
+			u64 total_aus = 0;
+			u64 total_pictures = 0;
+			u64 total_getpic = 0;
+			std::string state;
+
+			idm::select<vdec_context>([&](u32 id, vdec_context& vdec)
+			{
+				++contexts;
+				seen_context = true;
+
+				const u64 aus = vdec.diagnostic_aus.load();
+				const u64 pictures = vdec.diagnostic_pictures.load();
+				const u64 getpic = vdec.diagnostic_getpic_calls.load();
+				const u64 last_getpic_ns = vdec.diagnostic_last_getpic_ns.load();
+				const u32 last_result = vdec.diagnostic_last_getpic_result.load();
+
+				total_aus += aus;
+				total_pictures += pictures;
+				total_getpic += getpic;
+
+				// The queue needs the same lock the guest uses, but the monitor
+				// must never join the hang it is meant to observe: a failed try
+				// reports the queue as unreadable and the next tick retries.
+				u32 queue = 0;
+				if (vdec.mutex.try_lock_shared())
+				{
+					queue = static_cast<u32>(vdec.out_queue.size());
+					vdec.mutex.unlock_shared();
+				}
+
+				fmt::append(state, "%s0x%x seq %s queue %u au %d aus %llu pics %llu getpic %llu last 0x%x %.1f s ago",
+					state.empty() ? "" : "; ", id, vdec.seq_state.load(), queue, vdec.au_count.load(),
+					static_cast<unsigned long long>(aus), static_cast<unsigned long long>(pictures),
+					static_cast<unsigned long long>(getpic), last_result,
+					last_getpic_ns ? static_cast<f64>(now - last_getpic_ns) / 1e9 : 0.0);
+			}, idm::unlocked);
+
+			if (first_tick)
+			{
+				first_tick = false;
+				cellVdec.notice("RSX video monitor: alive, first tick after %llu ms, contexts %u",
+					static_cast<unsigned long long>((now - first_tick_ns) / 1'000'000), contexts);
+			}
+
+			if (!seen_context)
+			{
+				// Liveness proof while no handle exists: a monitor that cannot see
+				// the context would otherwise be silent and void the A/B.  Bounded.
+				if (idle_notes < 12 && now - first_tick_ns >= (idle_notes + 1ull) * 10'000'000'000ull)
+				{
+					++idle_notes;
+					cellVdec.notice("RSX video monitor: %.0f s elapsed, no vdec context",
+						static_cast<f64>(now - first_tick_ns) / 1e9);
+				}
+
+				continue;
+			}
+
+			if (first_context)
+			{
+				first_context = false;
+				last_progress = now;
+				cellVdec.notice("RSX video monitor: first context seen after %.1f s: %s",
+					static_cast<f64>(now - first_tick_ns) / 1e9, state.c_str());
+			}
+
+			if (total_aus != last_total_aus || total_pictures != last_total_pictures)
+			{
+				last_progress = now;
+				last_total_aus = total_aus;
+				last_total_pictures = total_pictures;
+			}
+
+			if (now - last_beat >= 1'000'000'000ull)
+			{
+				last_beat = now;
+
+				// Probe 4: one line a second while a handle is open.  AUs advancing
+				// with a pinned queue is a consumer problem; no AUs is a demuxer
+				// problem; no handle at all is the teardown the game performed.
+				cellVdec.notice("RSX video heartbeat: contexts %u, aus %llu (+%llu), pictures %llu (+%llu), getpic %llu, %s",
+					contexts,
+					static_cast<unsigned long long>(total_aus), static_cast<unsigned long long>(total_aus - last_aus),
+					static_cast<unsigned long long>(total_pictures), static_cast<unsigned long long>(total_pictures - last_pictures),
+					static_cast<unsigned long long>(total_getpic),
+					state.empty() ? "no open handle" : state.c_str());
+
+				last_aus = total_aus;
+				last_pictures = total_pictures;
+			}
+
+			// Probe 2: progress means the decoder produced an AU or a picture.  A
+			// GetPicItem that keeps returning EMPTY is not progress.
+			if (now - last_progress >= 5'000'000'000ull && now - last_stall_note >= 5'000'000'000ull)
+			{
+				last_stall_note = now;
+
+				cellVdec.notice("RSX video stall: no AU or picture for %.1f s, contexts %u, %s",
+					static_cast<f64>(now - last_progress) / 1e9, contexts,
+					state.empty() ? "no open handle" : state.c_str());
+
+				if (stall_snapshots < 2)
+				{
+					vdec_probe_dump_threads(++stall_snapshots, contexts, state);
+				}
+			}
+		}
+	}
+};
+// EXCISE-END rca-video-probe
+
 extern bool check_if_vdec_contexts_exist()
 {
 	bool context_exists = false;
@@ -778,6 +1068,14 @@ extern bool check_if_vdec_contexts_exist()
 
 extern void vdecEntry(ppu_thread& ppu, u32 vid)
 {
+	// EXCISE-BEGIN rca-video-entry
+	// TODO(excise): level 1; the earliest proof the HLE decoder thread ran.
+	if (vdec_probe_armed())
+	{
+		cellVdec.notice("RSX video decoder: vdecEntry (vid=0x%x, tid=0x%x)", vid, ppu.id);
+	}
+	// EXCISE-END rca-video-entry
+
 	idm::get_unlocked<vdec_context>(vid)->exec(ppu, vid);
 
 	ppu.state += cpu_flag::exit;
@@ -1519,6 +1817,13 @@ static error_code vdecOpen(ppu_thread& ppu, T type, U res, vm::cptr<CellVdecCb> 
 	ensure(vdec);
 	vdec->handle = vid;
 
+	// EXCISE-BEGIN rca-video-monitor-arm
+	// TODO(excise): level 1; register the monitor so the bulk g_fxo pass
+	// constructs it.  It returns immediately unless RSX_VIDEO_TRACE or
+	// RSX_VIDEO_HEARTBEAT is set.
+	g_fxo->get<named_thread<vdec_probe_monitor>>();
+	// EXCISE-END rca-video-monitor-arm
+
 	// Run thread
 	vm::var<u64> _tid;
 	vm::var<char[]> _name = vm::make_str("HLE Video Decoder");
@@ -1991,6 +2296,11 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 		return { CELL_VDEC_ERROR_ARG, "vdec=%d, picItem=%d", !!vdec, !!picItem };
 	}
 
+	// EXCISE-BEGIN rca-video-getpic-count
+	// TODO(excise): level 1; the heartbeat's consumer-side counter.
+	vdec->diagnostic_getpic_calls++;
+	// EXCISE-END rca-video-getpic-count
+
 	u64 sequence_id{};
 
 	{
@@ -2063,6 +2373,12 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 
 	if (!info || seq_id != sequence_id)
 	{
+		// EXCISE-BEGIN rca-video-getpic-empty
+		// TODO(excise): level 1; the last return the guest saw, with its age.
+		vdec->diagnostic_last_getpic_ns = vdec_probe_now_ns();
+		vdec->diagnostic_last_getpic_result = static_cast<u32>(CELL_VDEC_ERROR_EMPTY);
+		// EXCISE-END rca-video-getpic-empty
+
 		return { CELL_VDEC_ERROR_EMPTY, " info=%d, sequence_id=%d, seq_id=%d", !!info, sequence_id, seq_id };
 	}
 
@@ -2229,6 +2545,13 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 	}
 
 	*picItem = info;
+
+	// EXCISE-BEGIN rca-video-getpic-ok
+	// TODO(excise): level 1; the last return the guest saw, with its age.
+	vdec->diagnostic_last_getpic_ns = vdec_probe_now_ns();
+	vdec->diagnostic_last_getpic_result = 0;
+	// EXCISE-END rca-video-getpic-ok
+
 	return CELL_OK;
 }
 
