@@ -58,4 +58,65 @@ namespace rsx::FIFO
 		// command and the normal read path follows it.
 		EXPECT_EQ(cursor_rules::decide(ring_end, ring_end + 4), action::read);
 	}
+
+	// Recovery must not trust a bare address. The guest recycles the ring, so a
+	// position that was a packet boundary when the rollback point was recorded
+	// may hold the next generation's data by the time recovery runs. RR7
+	// re-entered 0x10a588c twenty times in two seconds for exactly that reason.
+
+	TEST(FifoRecovery, RollsBackToNewestIntactBoundary)
+	{
+		// Newest first. The two newest headers were rewritten by the guest (the
+		// ring now holds 0x02062000 there); 0x1074 is the newest one that is
+		// still the packet that was parsed.
+		const packet_boundary executed[] = {
+			{0x1084, 0x00040068},
+			{0x107c, 0x00040064},
+			{0x1074, 0x00041d70},
+			{0x106c, 0x00041d6c},
+		};
+
+		const auto read_word = [](u32 pos) -> u32
+		{
+			switch (pos)
+			{
+			case 0x1074: return 0x00041d70;
+			case 0x106c: return 0x00041d6c;
+			default: return 0x02062000;
+			}
+		};
+
+		EXPECT_EQ(recovery_rules::select(executed, 4, 0x108c, read_word), 0x1074u);
+	}
+
+	TEST(FifoRecovery, NeverReentersTheFailingPacket)
+	{
+		// A boundary at the failing position is not a rollback target even when
+		// its header still matches: the parse is deterministic, so the packet
+		// fails identically and the recovery becomes a loop.
+		const packet_boundary executed[] = {{0x108c, 0x02062000}};
+		const auto read_word = [](u32) -> u32 { return 0x02062000; };
+
+		EXPECT_EQ(recovery_rules::select(executed, 1, 0x108c, read_word), umax);
+	}
+
+	TEST(FifoRecovery, IgnoresBoundariesAboveTheFailure)
+	{
+		// A boundary in the buffer the parser jumped out of is not a rollback
+		// target: resuming there would re-execute a chunk that is already done.
+		const packet_boundary executed[] = {{0x10a0000, 0x00040064}};
+		const auto read_word = [](u32) -> u32 { return 0x00040064; };
+
+		EXPECT_EQ(recovery_rules::select(executed, 1, 0xcb588c, read_word), umax);
+	}
+
+	TEST(FifoRecovery, AllowsBoundaryWhenHeaderWasRewrittenAway)
+	{
+		// The word is the discriminator, not the address: the same position is
+		// usable again once the producer has written a packet there.
+		const packet_boundary executed[] = {{0x1074, 0x00041d70}};
+		const auto read_word = [](u32) -> u32 { return 0x00041bc8; };
+
+		EXPECT_EQ(recovery_rules::select(executed, 1, 0x108c, read_word), umax);
+	}
 }

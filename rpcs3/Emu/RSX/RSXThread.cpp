@@ -1895,15 +1895,25 @@ namespace rsx
 				"\nTry increasing \"Driver Wake-Up Delay\" setting or setting \"RSX FIFO Accuracy\" to \"%s\", both in Advanced settings. Called from %s", std::min<rsx_fifo_mode>(rsx_fifo_mode{static_cast<u32>(g_cfg.core.rsx_fifo_accuracy.get()) + 1}, rsx_fifo_mode::atomic_ordered), src_loc);
 		}
 
-		// Error. Should reset the queue
-		fifo_ctrl->set_get(restore_point);
-		fifo_ret_addr = saved_fifo_ret;
-		std::this_thread::sleep_for(2ms);
-		fifo_ctrl->abort();
-
-		if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
+		// Error. Should reset the queue.  The rollback target is validated: the
+		// address restore_point was captured at may have been reused by the guest
+		// since (RR7: the word there became a data value and recovery re-entered
+		// it twenty times in two seconds).  Prefer the newest executed packet
+		// whose header is still in the ring; umax means every candidate is
+		// poisoned, so leave the cursor alone and let the watchdog below report
+		// it instead of re-executing the same word.  The check is on the word, so
+		// a producer write at that position re-arms the resume.
+		if (const u32 resume = fifo_ctrl->recovery_point(fifo_ctrl->get_pos(), restore_point); resume != umax)
 		{
-			discard_draw();
+			fifo_ctrl->set_get(resume);
+			fifo_ret_addr = saved_fifo_ret;
+			std::this_thread::sleep_for(2ms);
+			fifo_ctrl->abort();
+
+			if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
+			{
+				discard_draw();
+			}
 		}
 
 		recovered_fifo_cmds_history.push({fifo_ctrl->last_cmd(), current_time});

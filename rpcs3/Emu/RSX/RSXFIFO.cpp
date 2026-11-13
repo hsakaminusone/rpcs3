@@ -18,16 +18,6 @@ using spu_rdata_t = std::byte[128];
 extern void mov_rdata(spu_rdata_t& _dst, const spu_rdata_t& _src);
 extern bool cmp_rdata(const spu_rdata_t& _lhs, const spu_rdata_t& _rhs);
 
-// EXCISE-BEGIN fifo-upstream-ab
-// A/B switch for the whole-packet rule.  Upstream (8183f6e32) dispatches a
-// packet as soon as its header is read; the production model waits until every
-// argument of the packet is published.  RPCS3_FIFO_UPSTREAM=1 restores
-// upstream's behaviour, so one build can show whether the gate is load-bearing
-// for a given game.  The release tree has no switch: the production behaviour
-// is compiled in.
-#define RSX_FIFO_UPSTREAM_AB 1
-// EXCISE-END fifo-upstream-ab
-
 namespace rsx
 {
 	namespace FIFO
@@ -37,16 +27,6 @@ namespace rsx
 			m_thread = pctrl;
 			m_ctrl = pctrl->ctrl;
 			m_iotable = &pctrl->iomap_table;
-
-			// EXCISE-BEGIN fifo-upstream-ctor
-			// The switch is dev-only; the release tree hard-codes production.
-#if defined(RSX_FIFO_UPSTREAM_AB) && RSX_FIFO_UPSTREAM_AB
-			if (const char* e = getenv("RPCS3_FIFO_UPSTREAM"); e && e[0] == '1')
-			{
-				m_upstream_semantics = true;
-			}
-#endif
-			// EXCISE-END fifo-upstream-ctor
 		}
 
 		u32 FIFO_control::translate_address(u32 address) const
@@ -503,19 +483,17 @@ namespace rsx
 
 		std::pair<bool, u32> FIFO_control::fetch_u32(u32 addr)
 		{
-			if (addr - m_cache_addr < m_cache_size)
+			if (addr - m_cache_addr < m_cache_size &&
+				static_cast<s32>(addr - m_cache_get) >= 0 && static_cast<s32>(addr - m_cache_put) < 0)
 			{
-				// A word cached at or past the PUT that was current when the cache
-				// was filled was read ahead of the producer. If PUT has since moved
-				// past it the guest may have rewritten those bytes, so drop the
-				// cache and refill instead of serving a stale copy. Words below that
-				// PUT cannot have changed under GET.
-				if (addr < m_cache_put || read_put() <= addr)
-				{
-					return {true, read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr)};
-				}
-
-				m_cache_size = 0;
+				// Only the part of the snapshot the guest could not have touched is
+				// served: it was at or above the GET published when the block was
+				// filled (everything below that is licenced for reuse) and below the
+				// PUT that was current then (everything at or above it was read
+				// ahead of the producer).  Anything else drops to the slow path and
+				// is re-read, which is the only way to avoid stitching two
+				// generations of the same ring together.
+				return {true, read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr)};
 			}
 
 			const u32 put = read_put();
@@ -547,11 +525,13 @@ namespace rsx
 					// No GET update here
 					m_cache_addr = addr;
 					m_cache_size = 4;
-					m_cache_put = put;
 					// The cache is now the source for this position, so it has to
-					// hold the word the caller is about to receive.  Leaving the
-					// stale bytes in place made a later read at the same position
-					// (a retry, or the desync probe) return the previous command.
+					// hold the word the caller is about to receive (a retry at the
+					// same position must see the command, not the stale bytes), and
+					// it is the only word of the window: nothing above it was
+					// published or copied.
+					m_cache_get = addr;
+					m_cache_put = addr + 4;
 					const be_t<u32> raw = cmd;
 					std::memcpy(+m_cache[0], &raw, sizeof(raw));
 					return {true, cmd};
@@ -577,10 +557,31 @@ namespace rsx
 				}
 			}
 
-			m_cache_put = put;
-
 			// Make mask of cache lines to fetch
 			u8 to_fetch = static_cast<u8>((1u << (m_cache_size / 128)) - 1);
+
+			// PUT is exclusive: the word at PUT is not published. The cache is
+			// filled in 128-byte lines, so the line that contains PUT is read up
+			// to 0x7f bytes past it; hide that read-ahead from hits. Otherwise a
+			// word written by the producer after the line was fetched (the exit
+			// link at the frontier) is served from the stale copy. The check has
+			// to be positional, not a comparison of PUT against the address: the
+			// producer re-points PUT to a numerically lower offset when it wraps
+			// or reuses a command buffer (RR7: 0x10a0e20 -> 0xcb13bc after the
+			// frontier link was written), and any "PUT moved past addr" test
+			// fails open there. A frontier word is always the first byte past
+			// the exposed range, so the retry re-reads it.
+			if (addr < put)
+			{
+				m_cache_size = std::min<u32>(m_cache_size, put - m_cache_addr);
+			}
+
+			// Snapshot the window this block is valid in: from the GET that
+			// sync_get() is about to publish (the frontier word the caller is
+			// waiting on, so everything below it is licenced for reuse) up to the
+			// PUT read above. A hit outside it re-reads rather than stitches.
+			m_cache_get = addr;
+			m_cache_put = put;
 
 			// Atomic FIFO debug options
 			const bool force_cache_fill = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::atomic_ordered;
@@ -746,6 +747,49 @@ namespace rsx
 			// Update ctrl registers
 			m_ctrl->get.release(m_fifo_pos = get);
 			m_remaining_commands = 0;
+		}
+
+		void FIFO_control::note_boundary(u32 pos, u32 header)
+		{
+			m_boundaries[m_boundary_head] = {pos, header};
+
+			if (++m_boundary_head == boundary_capacity)
+			{
+				m_boundary_head = 0;
+			}
+
+			m_boundary_total = std::min<u32>(m_boundary_total + 1, boundary_capacity);
+		}
+
+		u32 FIFO_control::recovery_point(u32 failing, u32 fallback)
+		{
+			packet_boundary ordered[boundary_capacity];
+
+			for (u32 i = 0; i < m_boundary_total; i++)
+			{
+				ordered[i] = m_boundaries[(m_boundary_head + boundary_capacity - 1 - i) % boundary_capacity];
+			}
+
+			if (const u32 pos = recovery_rules::select(ordered, m_boundary_total, failing, [this](u32 addr) { return ring_word(addr); });
+				pos != umax)
+			{
+				m_recovery_pos = pos;
+				m_recovery_word = ring_word(pos);
+				return pos;
+			}
+
+			// Nothing that was executed is still intact. Re-entering the position
+			// the previous recovery already resumed at cannot make progress: the
+			// word there is the one that failed and the parse is deterministic.
+			// That is the RR7 loop; stop instead of spinning the watchdog.
+			if (fallback == m_recovery_pos && ring_word(fallback) == m_recovery_word)
+			{
+				return umax;
+			}
+
+			m_recovery_pos = fallback;
+			m_recovery_word = ring_word(fallback);
+			return fallback;
 		}
 
 		std::span<const u32> FIFO_control::get_current_arg_ptr(u32 length_in_words) const
@@ -998,6 +1042,11 @@ namespace rsx
 					// TODO(excise): level 1; a jump ends any NOP run.
 					m_diag_nop_run = 0;
 
+					// A flow-control command is a legal packet boundary too: if
+					// the stream is broken after it, resuming here re-follows the
+					// same link instead of re-entering a word that changed.
+					note_boundary(m_fifo_pos, m_cmd);
+
 					// Flow control, stop reading
 					data.reg = m_cmd;
 					return;
@@ -1018,10 +1067,14 @@ namespace rsx
 
 			// R2: dispatch a packet only when all of it is published. While the
 			// cursor is behind PUT, a packet that ends past PUT is a mid-fill:
-			// leave the header in place and wait. A cursor ahead of PUT is in a
-			// region the guest jumped to before publishing it (R3); that region
-			// is walked as hardware walks it and is not gated.
-			if (!m_upstream_semantics && m_fifo_pos < put && m_next_cmd_entry > put)
+			// leave the header in place and wait for the last argument, so no
+			// method is ever entered with a partially published argument block.
+			// Upstream dispatches on the header and parks on the first unpublished
+			// argument instead; this is the one dispatch rule we keep locally
+			// (handoff §19.4). A cursor ahead of PUT is in a region the guest
+			// jumped to before publishing it (R3); that region is walked as
+			// hardware walks it and is not gated.
+			if (m_fifo_pos < put && m_next_cmd_entry > put)
 			{
 				// Nothing of the packet was consumed. Keep the boundary on the
 				// header so the retry is not mistaken for a phase slip.
@@ -1045,6 +1098,10 @@ namespace rsx
 
 			// TODO(excise): level 1; a real method ends any NOP run.
 			m_diag_nop_run = 0;
+
+			// This packet was accepted and is about to execute, so its start is a
+			// valid rollback target while its header is still in the ring.
+			note_boundary(m_fifo_pos, m_cmd);
 
 			if (count > 1)
 			{
