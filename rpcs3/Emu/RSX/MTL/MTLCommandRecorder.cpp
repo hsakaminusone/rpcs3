@@ -428,10 +428,10 @@ namespace mtl
 
 #if MTL_DIAGNOSTICS
 		// TODO(excise): level 1; the commit stamp the feedback lag is measured from.
-		slot.debug_commit_time = debug_now_seconds();
+		slot.debug_commit_time.store(debug_now_seconds(), std::memory_order_relaxed);
 #endif
 		// TODO(excise): level 4; deep-probe line.
-		MTL_NOTE(4, "Metal 4: slot %u committed at %.3f, %s %p", m_slot, slot.debug_commit_time, m_drawable ? "with drawable" : "no drawable", static_cast<const void*>(m_drawable));
+		MTL_NOTE(4, "Metal 4: slot %u committed at %.3f, %s %p", m_slot, slot.debug_commit_time.load(std::memory_order_relaxed), m_drawable ? "with drawable" : "no drawable", static_cast<const void*>(m_drawable));
 
 		// The drawable is signalled only after the commit that fills it, so the
 		// present is ordered behind the frame (C7, HLD-03 §4.9).
@@ -533,11 +533,19 @@ namespace mtl
 		slot.allocator->reset();
 		slot.command_buffer->beginCommandBuffer(slot.allocator);
 		slot.buffer_open = true;
-		slot.label_staging_offset = 0;
-		// The feedback proves every label of the committed command buffer visible,
-		// so the next acquire on one of them needs no wait.
-		slot.labels.clear();
-		m_pending_count = 0;
+
+		// A batch that was staged but not yet encoded is not covered by the
+		// feedback of the commit that just completed, so it is kept: the buffer
+		// that has just begun is the one that will carry its copy.  The staging
+		// offset goes with it, because the staged words are still in the region.
+		if (!m_pending_count)
+		{
+			slot.label_staging_offset = 0;
+			// The feedback proves every label of the committed command buffer
+			// visible, so the next acquire on one of them needs no wait.
+			slot.labels.clear();
+		}
+
 		m_reenter_pending = false;
 		m_encoder = nullptr;
 		m_compute_encoder = nullptr;
@@ -646,6 +654,15 @@ namespace mtl
 
 		frame_slot& slot = m_slots[m_slot];
 
+		if (!slot.buffer_open)
+		{
+			// A staged label belongs to the command buffer whose copy will carry
+			// it, so the buffer is opened before the word is staged.  A label
+			// staged into an ended buffer is written by nobody, and the guest then
+			// waits on a word that never changes.
+			reenter_slot();
+		}
+
 		if (slot.label_staging_offset + sizeof(u32) > label_staging_bytes)
 		{
 			// Emitting frees nothing, because the GPU still reads the region, so the
@@ -692,6 +709,13 @@ namespace mtl
 		}
 
 		frame_slot& slot = m_slots[m_slot];
+
+		if (!slot.buffer_open)
+		{
+			// Nothing has been encoded since the last commit, so there is no buffer
+			// to end; the staged batch above was empty for the same reason.
+			return;
+		}
 
 		{
 			// TODO(excise): level 1; block timer.
@@ -789,9 +813,12 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/flush labels");
 
+		// The encoder opens first: opening it can re-enter the slot, and the batch
+		// that survives that is the one this copy must encode.
+		MTL4::ComputeCommandEncoder* encoder = open_copy_encoder();
+
 		frame_slot& slot = m_slots[m_slot];
 		const u32 first = slot.label_staging_offset - m_pending_count * sizeof(u32);
-		MTL4::ComputeCommandEncoder* encoder = open_copy_encoder();
 
 		// TODO(excise): level 2; the staged source must hold the guest word.
 		MTL_NOTE(2, "sync/label source addr=0x%x value=0x%x\n", m_pending_labels[0],
@@ -930,6 +957,10 @@ namespace mtl
 			MTL_PERF_GAUGE(1, "recorder/feedback lag us", (debug_now_seconds() - feedback->GPUEndTime()) * 1e6);
 		}
 
+		// The commit stamp is written on the RSX thread, so it is read once here
+		// rather than taken as a plain value on this callback thread.
+		const f64 committed = m_slots[index].debug_commit_time.load(std::memory_order_relaxed);
+
 		// TODO(excise): temporary diagnostic; the frame's GPU execution and the time
 		// it queued behind earlier frames tell a GPU-bound frame from a display-bound
 		// one, which the present rows alone cannot.
@@ -938,13 +969,13 @@ namespace mtl
 			// TODO(excise): level 1; instantaneous value.
 			MTL_PERF_GAUGE(1, "frame/gpu us", (feedback->GPUEndTime() - feedback->GPUStartTime()) * 1e6);
 			// TODO(excise): level 1; instantaneous value.
-			MTL_PERF_GAUGE(1, "frame/gpu wait us", (feedback->GPUStartTime() - m_slots[index].debug_commit_time) * 1e6);
+			MTL_PERF_GAUGE(1, "frame/gpu wait us", (feedback->GPUStartTime() - committed) * 1e6);
 		}
 
 		// TODO(excise): level 4; deep-probe line.
 		MTL_NOTE(4, "Metal 4: feedback for slot %u: gpu %.3f..%.3f, commit %.3f, start lag %.3f, delivery lag %.3f",
-			index, feedback->GPUStartTime(), feedback->GPUEndTime(), m_slots[index].debug_commit_time,
-			feedback->GPUStartTime() - m_slots[index].debug_commit_time, debug_now_seconds() - feedback->GPUEndTime());
+			index, feedback->GPUStartTime(), feedback->GPUEndTime(), committed,
+			feedback->GPUStartTime() - committed, debug_now_seconds() - feedback->GPUEndTime());
 
 		// A feedback of a commit the ring already abandoned carries an older
 		// generation, so it must not count against the slot a newer commit now owns.
