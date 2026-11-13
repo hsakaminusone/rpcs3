@@ -123,7 +123,14 @@ Rules that follow:
 - `MAP_JIT` requires `com.apple.security.cs.allow-jit` when the app adopts the Hardened Runtime. A plain `mprotect(PROT_EXEC)` path requires `com.apple.security.cs.allow-unsigned-executable-memory`. The two are not interchangeable.
 - macOS 26 tightened the rules: PPSSPP hit a silent `mprotect(PROT_EXEC)` failure under Hardened Runtime until it added `allow-unsigned-executable-memory`; `MAP_JIT` pages now behave like iOS and require the per-thread toggle at every compile/execute boundary.
 
-RPCS3's macOS CI ad-hoc signs with `codesign --deep -fs -` (`.ci/deploy-mac.sh:69`), and the repository has no explicit entitlements file outside third-party code. That works only if the shipped app does not enable the Hardened Runtime, or if the signing pipeline adds the entitlement out of band. **This must be made explicit and tested.** A Debug/ad-hoc build is not proof that a notarized Developer ID build can map JIT memory.
+**Constraint: the project has no Apple Developer Program membership.** There is no Developer ID certificate, no notarization, and no restricted entitlement. The design must not hinge on any of them. This is a hard input, not a preference.
+
+What that means in practice, and what was verified on the reference machine:
+
+- An ad-hoc-signed binary (`codesign --deep -fs -`, as `.ci/deploy-mac.sh:69` already does) with **no entitlements** can `mmap(RW)` then `mprotect(RX)` and execute the result. Hardened Runtime is what makes that path fail, and RPCS3 does not enable it.
+- `MAP_JIT` allocation succeeds and `pthread_jit_write_protect_supported_np()` returns 1 on the same ad-hoc binary. The per-thread toggle is therefore available without an account.
+- A **file-backed** alias mapped RX fails with `EPERM` even ad-hoc. Do not design a dual-mapping (RW file + RX alias) code allocator on macOS; use anonymous memory or `MAP_JIT`.
+- If the project ever adopts Hardened Runtime, `com.apple.security.cs.allow-jit` is a non-restricted entitlement and can be carried by an ad-hoc signature for local testing. It still cannot be notarized without an account, so a notarized Developer ID build is not a gate for this work.
 
 ### 2.3 16 KB pages are the default, not an edge case
 
@@ -455,9 +462,9 @@ The code paths are present and mostly correct:
 
 What is missing is a **contract**:
 
-- No explicit entitlements file in the repository (only a third-party wolfSSL one). macOS CI ad-hoc signs (`.ci/deploy-mac.sh:69`), which does not prove a notarized Hardened Runtime build can map JIT memory.
+- No explicit entitlements file in the repository (only a third-party wolfSSL one). That is acceptable under the no-account constraint: Hardened Runtime is off, and both `MAP_JIT` and anonymous `mprotect(RX)` were verified on an ad-hoc-signed, entitlement-free binary (§2.2). The remaining requirement is a CI smoke test of that exact configuration, not a Developer ID build.
 - No `sys_icache_invalidate` audit. LLVM's `RTDyldMemoryManager` may publish code, and `JITASM` uses `__builtin___clear_cache` in places, but there is no single choke point that proves every path invalidates before execution.
-- No nesting discipline. Nested guards toggle the thread state repeatedly; a counter-based guard is cheaper and safer.
+- ~~No nesting discipline.~~ `jit_write_guard` now counts depth per thread (`Utilities/JIT.h`), so an inner scope cannot re-enable write protection under an outer one; the remaining manual toggles were folded into scoped guards.
 - No stress test that patches code while another thread executes an adjacent region.
 
 ### 5.7 What is already good and must not be broken
@@ -1477,11 +1484,12 @@ Apple exposes two different executable-memory mechanisms, and they are not inter
 | `MAP_JIT` | `mmap(..., MAP_JIT, ...)` + `pthread_jit_write_protect_np` | `com.apple.security.cs.allow-jit` | per-thread W^X; hardware toggle on macOS 26+ |
 | Anonymous `mprotect(PROT_EXEC)` | `mmap(RW)` then `mprotect(RX)` | `com.apple.security.cs.allow-unsigned-executable-memory` | blocked under Hardened Runtime without the entitlement on macOS 26 |
 
-RPCS3 uses `MAP_JIT` in `vm_native.cpp` and the JIT allocators, and relies on the toggle. That is the right choice. The missing pieces:
+RPCS3 uses `MAP_JIT` in `vm_native.cpp` and the JIT allocators, and relies on the toggle. That is the right choice. Under the no-account constraint (§2.2) the requirements change:
 
-1. An explicit entitlements file in the repository with `allow-jit` and (if any path still uses `mprotect(PROT_EXEC)` on anonymous pages) `allow-unsigned-executable-memory`.
-2. A CI job that signs a **Hardened Runtime** build with a Developer ID identity (or an ad-hoc identity plus `--options runtime`) and runs a minimal JIT smoke test. The current `codesign --deep -fs -` does not test the failure mode.
-3. A startup check: if `pthread_jit_write_protect_supported_np()` is false, log and refuse to use MAP_JIT paths that require the toggle.
+1. **Do not enable Hardened Runtime in the shipped or CI build.** RPCS3's ad-hoc signature is the supported configuration. Hardened Runtime without a Developer ID buys nothing and breaks the anonymous `mprotect(RX)` path.
+2. **Test the configuration that actually ships.** A CI job should ad-hoc sign the bundle and run a minimal JIT smoke test that (a) allocates `MAP_JIT`, (b) flips the per-thread toggle, (c) writes, publishes, and calls a function, and (d) asserts `pthread_jit_write_protect_supported_np() == 1`. No Developer ID identity or notarization step.
+3. **Keep an entitlements file only as insurance.** If Hardened Runtime is ever enabled, add `allow-jit`; do not add `allow-unsigned-executable-memory` unless a non-`MAP_JIT` executable path is deliberately kept. Both are non-restricted and can be ad-hoc signed for local testing.
+4. **Reject file-backed RX aliases.** A file-backed `mmap` with `PROT_EXEC` returns `EPERM` on the reference machine even ad-hoc. Code memory must come from `MAP_JIT` or anonymous pages, which also settles the Phase 2 allocator design (§13.3).
 
 The PPSSPP/OpenEmu-Silicon macOS 26 failure is the cautionary tale: `mprotect(PROT_EXEC)` silently failed under Hardened Runtime, the emulator stalled waiting for a VBLANK, and the symptom was a black screen, not an error. RPCS3 must not rely on "it works in a debug build."
 
@@ -1607,7 +1615,7 @@ Each PR is independently reviewable, carries its own tests, and names the defect
 
 | PR | Title | WS | Size | Gate |
 |---|---|---|---:|---|
-| 0 | `ci: sign a Hardened Runtime build and run a JIT smoke test` | W9 | S | new CI job green |
+| 0 | `ci: ad-hoc sign and run the JIT smoke test (no Developer ID)` | W9 | S | ad-hoc CI job green |
 | 1 | `cpu: add fallback/fault/compile counters and a stats summary` | W0 | M | no behavior change; counters match logs |
 | 2 | `cpu: fix decommit/reset to use mprotect+madvise (Apple)` | W1 | S | VM tests, `vmmap` soak |
 | 3 | `jit: single RAII W^X scope with nesting + icache audit` | W9 | M | patch stress test |
@@ -2015,7 +2023,7 @@ auto lljit = llvm::orc::LLJITBuilder()
 
 The custom `JITLinkMemoryManager`:
 
-- reserves one RW arena and one RX arena per module, 64 KB-aligned;
+- reserves one anonymous arena per module, 64 KB-aligned, and publishes it RX with `mprotect` or `MAP_JIT` plus the per-thread toggle. A file-backed RX alias is not available (§8.6.1), so the arena is anonymous;
 - returns a `FinalizedAlloc` whose deleter returns pages to the code-space reuse pool;
 - toggles the RX alias with `pthread_jit_write_protect_np` inside the RAII W^X scope, not with `mprotect` per patch (measured: 1–2 ns/site batched versus 3 µs single-site, Appendix A.12);
 - splits `.text`, `.rodata`, `.stack_sizes`, and stub islands into separate `LinkGraph` blocks, so a patch touches one page and invalidation frees one block;
@@ -2668,6 +2676,7 @@ Every research question this document opened is listed below with its dispositio
 | 38 | Do guarded traces beat static loop regions? | deferred (Phase 2) | Needs the executed-edge histogram. If they do not, the static loop-first design is kept. §13.6.2 |
 | 39 | Does non-volatile T0 with alias metadata preserve correctness? | deferred (Phase 2) | Fault injection plus the v1/v2 differential; abandon if a failure is not explained by the memory model. §13.7 |
 | 40 | Will macOS ever expose SME to user space? | deferred | Re-probe `SVCR` and the count registers at startup; no codegen until the probe succeeds. §13.5, Appendix A.11 |
+| 41 | Does JIT memory work without an Apple Developer account? | answered | Yes on the reference machine. An ad-hoc, entitlement-free binary can `mmap(RW)`+`mprotect(RX)`, `MAP_JIT` succeeds, and `pthread_jit_write_protect_supported_np()==1`; a file-backed RX alias fails `EPERM`. The design assumes no Developer ID and no notarization. §2.2, §8.6.1 |
 
 ---
 
