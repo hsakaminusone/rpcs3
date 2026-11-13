@@ -252,6 +252,10 @@ jobs:
       - name: Build
         run: .ci/build-mac.sh
 
+      - name: JIT smoke test (ad-hoc, no Developer ID)
+        if: runner.arch == 'ARM64'
+        run: .ci/jit-smoke.sh
+
       - name: Upload artifacts
         uses: actions/upload-artifact@main
         with:
