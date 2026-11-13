@@ -11,6 +11,7 @@
 #include "Crypto/unzip.h"
 
 #include <charconv>
+#include <map>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -45,7 +46,10 @@ LOG_CHANNEL(jit_log, "JIT");
 #include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/SymbolSize.h"
+#include "llvm/Support/LEB128.h"
+#include "llvm/Target/TargetOptions.h"
 #ifdef _MSC_VER
 #pragma warning(pop)
 #else
@@ -182,11 +186,182 @@ static u64 make_null_function(const std::string& name)
 	}
 }
 
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+	// Decode the linker-visible .stack_sizes records emitted by LLVM: an
+	// 8-byte relocated code address followed by a ULEB128 frame size.
+	// MCJIT never loads non-allocated sections, so this runs on the object
+	// buffer before RuntimeDyld discards it. The gateway slab is 64 KB, so a
+	// frame above that cannot be run without a per-function thunk.
+	static void report_stack_sizes(const llvm::object::ObjectFile& obj)
+	{
+		using namespace llvm;
+
+		if (!isa<object::ELFObjectFileBase>(obj))
+		{
+			return;
+		}
+
+		std::optional<object::SectionRef> stack_sizes;
+
+		for (const object::SectionRef& sec : obj.sections())
+		{
+			auto name = sec.getName();
+
+			if (!name)
+			{
+				consumeError(name.takeError());
+				continue;
+			}
+
+			if (*name == ".stack_sizes")
+			{
+				stack_sizes = sec;
+				break;
+			}
+		}
+
+		if (!stack_sizes)
+		{
+			return;
+		}
+
+		auto contents = stack_sizes->getContents();
+
+		if (!contents)
+		{
+			consumeError(contents.takeError());
+			return;
+		}
+
+		// Function symbols are the only way to turn the relocation addend into
+		// a name, because MC emits relocations against the section symbol.
+		std::map<std::pair<u64, u64>, std::string> functions;
+
+		for (const object::SymbolRef& sym : obj.symbols())
+		{
+			auto type = sym.getType();
+
+			if (!type)
+			{
+				consumeError(type.takeError());
+				continue;
+			}
+
+			if (*type != object::SymbolRef::ST_Function)
+			{
+				continue;
+			}
+
+			auto name = sym.getName();
+			auto value = sym.getValue();
+			auto section = sym.getSection();
+
+			if (!name)
+			{
+				consumeError(name.takeError());
+				continue;
+			}
+
+			if (!value)
+			{
+				consumeError(value.takeError());
+				continue;
+			}
+
+			if (!section)
+			{
+				consumeError(section.takeError());
+				continue;
+			}
+
+			functions.emplace(std::make_pair((*section)->getIndex(), *value), name->str());
+		}
+
+		for (const object::RelocationRef& rel : stack_sizes->relocations())
+		{
+			const u64 offset = rel.getOffset();
+
+			if (offset + sizeof(u64) > contents->size())
+			{
+				continue;
+			}
+
+			auto symbol = rel.getSymbol();
+
+			if (symbol == obj.symbol_end())
+			{
+				continue;
+			}
+
+			auto section = symbol->getSection();
+
+			if (!section)
+			{
+				consumeError(section.takeError());
+				continue;
+			}
+
+			std::string name = "<unknown>";
+
+			if (auto type = symbol->getType(); type && *type == object::SymbolRef::ST_Function)
+			{
+				if (auto sym_name = symbol->getName())
+				{
+					name = sym_name->str();
+				}
+				else
+				{
+					consumeError(sym_name.takeError());
+				}
+			}
+			else
+			{
+				auto addend = object::ELFRelocationRef(rel).getAddend();
+
+				if (!addend)
+				{
+					consumeError(addend.takeError());
+				}
+				else if (const auto it = functions.find({(*section)->getIndex(), static_cast<u64>(*addend)}); it != functions.end())
+				{
+					name = it->second;
+				}
+			}
+
+			const u8* pos = reinterpret_cast<const u8*>(contents->data()) + offset + sizeof(u64);
+			const u8* end = reinterpret_cast<const u8*>(contents->data()) + contents->size();
+			const char* error = nullptr;
+			const u64 frame = decodeULEB128(pos, nullptr, end, &error);
+
+			if (error)
+			{
+				continue;
+			}
+
+			// Keep this in sync with cpu_thread::gateway_slab_size.
+			constexpr u64 slab = 64 * 1024;
+
+			if (frame > slab)
+			{
+				jit_log.error("LLVM: %s needs %llu bytes of GHC stack, above the %llu-byte gateway slab", name, frame, slab);
+			}
+			else if (frame >= 48 * 1024)
+			{
+				jit_log.warning("LLVM: %s needs %llu bytes of GHC stack (gateway slab is %llu bytes)", name, frame, slab);
+			}
+		}
+	}
+#endif
+
 struct JITAnnouncer : llvm::JITEventListener
 {
 	void notifyObjectLoaded(u64, const llvm::object::ObjectFile& obj, const llvm::RuntimeDyld::LoadedObjectInfo& info) override
 	{
 		using namespace llvm;
+
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+		report_stack_sizes(obj);
+#endif
 
 		object::OwningBinary<object::ObjectFile> debug_obj_ = info.getObjectForDebug(obj);
 		if (!debug_obj_.getBinary())
@@ -780,11 +955,20 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 		attributes.push_back("-sve2");
 #endif
 
+	llvm::TargetOptions target_options;
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+	// Emit .stack_sizes so the gateway slab can be audited against real frame
+	// sizes. This only adds a non-allocated section; code generation is
+	// unchanged. The JIT listener decodes it before RuntimeDyld discards it.
+	target_options.EmitStackSizeSection = true;
+#endif
+
 	{
 		m_engine.reset(llvm::EngineBuilder(std::move(null_mod))
 			.setErrorStr(&result)
 			.setEngineKind(llvm::EngineKind::JIT)
 			.setMCJITMemoryManager(std::move(mem))
+			.setTargetOptions(target_options)
 			.setOptLevel(llvm::CodeGenOptLevel::Aggressive)
 			.setCodeModel(flags & 0x2 ? llvm::CodeModel::Large : llvm::CodeModel::Small)
 #ifdef __APPLE__
