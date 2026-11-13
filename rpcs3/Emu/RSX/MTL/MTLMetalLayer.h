@@ -30,6 +30,14 @@ namespace mtl
 	// so this is the whole of vsync (HLD-06 §2.8).
 	void set_metal_layer_sync(void* layer, bool enabled);
 
+	// True when the view is on screen: it carries no hidden ancestor, its window is
+	// visible and not miniaturised, and the window server is compositing it.  The
+	// display services a drawable only for such a window, and nextDrawable blocks for
+	// its one-second timeout when it does not (CAMetalLayer.h:95-102), so the
+	// presenter asks before it acquires.  GL gates its swap on the same condition
+	// (gl_gs_frame.cpp:151).
+	bool metal_layer_visible(void* view);
+
 	// One screen refresh in seconds, which the adaptive present paces to.  Falls
 	// back to 1/60 when the view has no screen.  AppKit carries this value and
 	// metal-cpp does not, so it is read here (HLD-06 §2.8).
