@@ -169,6 +169,41 @@ namespace rsx
 			}
 		};
 
+		// A packet start the parser executed, kept so that a recovery can roll
+		// back to a boundary that is still the one that was parsed there.  The
+		// position alone proves nothing: the guest recycles the ring, so the
+		// header has to be compared as well.  RR7 re-entered 0x10a588c twenty
+		// times in two seconds because recovery trusted the address and the word
+		// there had become the next generation's data.
+		struct packet_boundary
+		{
+			u32 pos;
+			u32 header;
+		};
+
+		struct recovery_rules
+		{
+			// Newest first.  A boundary is usable when it is strictly below the
+			// failure - re-entering the failing packet reproduces the failure,
+			// because the parse is deterministic - and the word there is still
+			// the header that was parsed.
+			template <typename ReadWord>
+			static u32 select(const packet_boundary* boundaries, u32 count, u32 failing, ReadWord&& read_word)
+			{
+				for (u32 i = 0; i < count; i++)
+				{
+					const packet_boundary& boundary = boundaries[i];
+
+					if (boundary.pos < failing && read_word(boundary.pos) == boundary.header)
+					{
+						return boundary.pos;
+					}
+				}
+
+				return umax;
+			}
+		};
+
 		class FIFO_control
 		{
 		private:
@@ -187,11 +222,32 @@ namespace rsx
 			u32 m_cmd = ~0u;
 			u32 m_next_cmd_entry = ~0u;
 
+			// Last executed packet starts, used only by recovery.  Bounded: a
+			// chunk is hundreds of packets, so no finite history spans one; the
+			// point is the common case where the guest rewrote only the tail the
+			// parser had not reached yet.
+			static constexpr u32 boundary_capacity = 32;
+			packet_boundary m_boundaries[boundary_capacity] = {};
+			u32 m_boundary_head = 0;
+			u32 m_boundary_total = 0;
+			u32 m_recovery_pos = umax;
+			u32 m_recovery_word = 0;
+
+			void note_boundary(u32 pos, u32 header);
+
 			u32 m_cache_addr = 0;
 			u32 m_cache_size = 0;
-			// PUT when the cache was filled. A word cached at or past that value
-			// was read ahead of the producer; once PUT moves past it the byte may
-			// have been rewritten, so the cache must be refilled, not reused.
+
+			// The window inside which the cache snapshot may be served.  PUT is
+			// the producer's watermark and GET is the consumer's acknowledgement;
+			// the producer may rewrite anything below the GET it has seen, and the
+			// cache line start is rounded down below the frontier, so a snapshot
+			// holds words the guest is entitled to overwrite.  Only [get, put) as
+			// they were when the block was filled is immutable: the guest cannot
+			// have touched it and the producer has already written all of it.  A
+			// hit outside that window re-reads the ring instead of stitching two
+			// generations together (L145 and the cache rule are one invariant).
+			u32 m_cache_get = 0;
 			u32 m_cache_put = 0;
 			alignas(64) std::byte m_cache[8][128];
 
@@ -199,15 +255,6 @@ namespace rsx
 			// the producer's exit link is the only other way the cursor moves.
 			// See the FIFO park handoff, §17. The decision itself is
 			// cursor_rules::decide().
-			//
-			// The A/B switch for the whole-packet rule.  Upstream (8183f6e32)
-			// dispatches a packet as soon as its header is read; the production
-			// model waits until every argument of the packet is published.  The
-			// switch is read by the dispatch itself, so it is production state
-			// and stays in the release tree; the release build never sets it, so
-			// it always takes the production path.  (The scrubber removes the
-			// ctor block that sets it, not the member.)
-			bool m_upstream_semantics = false;
 
 			// A word of the command ring, read through the iomap. Used at a park
 			// (once per producer move) and by the diagnostics.
@@ -272,6 +319,13 @@ namespace rsx
 
 			u32 get_pos() const { return m_fifo_pos; }
 			u32 last_cmd() const { return m_cmd; }
+
+			// Rollback target for recover_fifo().  Prefers the newest executed
+			// packet start whose header is still intact; falls back to `fallback`
+			// unless that is the same poisoned word the previous recovery already
+			// tried, in which case there is no point in re-parsing it (returns
+			// umax and lets the caller stop).
+			u32 recovery_point(u32 failing, u32 fallback);
 			// A desync capture compares the cache snapshot with the ring, which
 			// is how a stale read is told from a mis-parse.  The accessor is
 			// production code -- the definition lives in the .cpp -- so it stays
