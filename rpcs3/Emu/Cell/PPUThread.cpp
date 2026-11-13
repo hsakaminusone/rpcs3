@@ -367,14 +367,6 @@ const auto ppu_gateway = build_function_asm<void(*)(ppu_thread*)>("ppu_gateway",
 	c.ldr(a64::x24, arm::Mem(gpr_addr_reg, 8));
 	c.ldr(a64::x25, arm::Mem(gpr_addr_reg, 16));
 
-	// Thread context save. This is needed for PPU because different functions can switch between x19 and x20 for the base register.
-	// We need a different solution to ensure that no matter which version, we get the right vaue on far return.
-	c.mov(a64::x26, ppu_t_base);
-
-	// Save thread pointer to stack. SP is the only register preserved across GHC calls.
-	c.sub(a64::sp, a64::sp, Imm(16));
-	c.str(a64::x20, arm::Mem(a64::sp));
-
 	// GHC scratchpad mem. If managed correctly (i.e no returns ever), GHC functions should never require a stack frame.
 	// We allocate a slab to use for all functions as they tail-call into each other.
 	c.sub(a64::sp, a64::sp, Imm(cpu_thread::gateway_slab_size));
@@ -382,30 +374,11 @@ const auto ppu_gateway = build_function_asm<void(*)(ppu_thread*)>("ppu_gateway",
 	// Execute LLE call
 	c.blr(call_target);
 
-	// Return address after far jump. Reset sp and start unwinding...
+	// Return address after a far jump.
+	// Compiled code may leave sp lowered by a function frame, so restore the
+	// thread pointer and the host stack from absolute slots instead of unwinding.
 	c.bind(hv_ctx_pc);
-
-	// Clear scratchpad allocation
-	c.add(a64::sp, a64::sp, Imm(cpu_thread::gateway_slab_size));
-
-	c.ldr(a64::x20, arm::Mem(a64::sp));
-	c.add(a64::sp, a64::sp, Imm(16));
-
-	// We either got here through normal "ret" which keeps our x20 intact, or we jumped here and the escape reset our x20 reg
-	// Either way, x26 contains our thread base and we forcefully reset the stack pointer
-	c.add(a64::x14, a64::x20, Imm(hv_register_array_offset));  // Per-thread context save
-
-	c.ldr(a64::x15, arm::Mem(a64::x14, 8));
-	c.ldp(a64::x18, a64::x19, arm::Mem(a64::x14, 16));
-	c.ldp(a64::x20, a64::x21, arm::Mem(a64::x14, 32));
-	c.ldp(a64::x22, a64::x23, arm::Mem(a64::x14, 48));
-	c.ldp(a64::x24, a64::x25, arm::Mem(a64::x14, 64));
-	c.ldp(a64::x26, a64::x27, arm::Mem(a64::x14, 80));
-	c.ldp(a64::x28, a64::x29, arm::Mem(a64::x14, 96));
-	c.ldr(a64::x30, arm::Mem(a64::x14, 112));
-
-	// Return
-	c.mov(a64::sp, a64::x15);
+	build_gateway_epilogue(c, static_cast<u32>(hv_register_array_offset), reinterpret_cast<u64>(&cpu_thread::get_current_raw));
 	c.ret(a64::x30);
 #endif
 });

@@ -296,6 +296,11 @@ public:
 	// Send signal to the profiler(s) to flush results
 	static void flush_profilers() noexcept;
 
+	// Get the current CPU thread without a type check.
+	// The hand-written gateways use this instead of guest registers, because
+	// compiled code may clobber every GHC argument register.
+	static cpu_thread* get_current_raw() noexcept;
+
 	template <DerivedFrom<cpu_thread> T = cpu_thread>
 	static inline T* get_current() noexcept
 	{

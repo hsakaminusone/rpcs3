@@ -216,6 +216,36 @@ namespace asmjit
 #endif
 	}
 
+#if defined(ARCH_ARM64)
+	// Restore the thread pointer, the host stack pointer, and the GHC registers
+	// from the per-thread hypervisor context. Compiled code may leave sp lowered
+	// by a function frame, so the thread pointer is read back from TLS and sp
+	// from the absolute slot that the gateway saved on entry. get_current must
+	// point to cpu_thread::get_current_raw(), which returns the current thread
+	// in x0 and preserves x19-x28.
+	inline void build_gateway_epilogue(native_asm& c, u32 hv_regs_offset, u64 get_current)
+	{
+		c.mov(a64::x0, Imm(get_current));
+		c.blr(a64::x0);
+
+		// x19 = current cpu_thread (same address as ppu_thread/spu_thread).
+		c.mov(a64::x19, a64::x0);
+		c.mov(a64::x14, Imm(hv_regs_offset));
+		c.add(a64::x14, a64::x14, a64::x19);
+
+		c.ldr(a64::x15, a64::Mem(a64::x14, 8));
+		c.ldp(a64::x18, a64::x19, a64::Mem(a64::x14, 16));
+		c.ldp(a64::x20, a64::x21, a64::Mem(a64::x14, 32));
+		c.ldp(a64::x22, a64::x23, a64::Mem(a64::x14, 48));
+		c.ldp(a64::x24, a64::x25, a64::Mem(a64::x14, 64));
+		c.ldp(a64::x26, a64::x27, a64::Mem(a64::x14, 80));
+		c.ldp(a64::x28, a64::x29, a64::Mem(a64::x14, 96));
+		c.ldr(a64::x30, a64::Mem(a64::x14, 112));
+
+		c.mov(a64::sp, a64::x15);
+	}
+#endif
+
 #if defined(ARCH_X64)
 	struct simd_builder : native_asm
 	{

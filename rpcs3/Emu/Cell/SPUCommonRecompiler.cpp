@@ -515,27 +515,11 @@ DECLARE(spu_runtime::g_gateway) = build_function_asm<spu_function_t>("spu_gatewa
 	c.mov(a64::x0, Imm(reinterpret_cast<u64>(spu_runtime::tr_all)));
 	c.blr(a64::x0);
 
-	// This is the return point for the far ret. Never jump back into host code without coming through this exit
+	// This is the return point for the far ret. Never jump back into host code without coming through this exit.
+	// Compiled code may leave sp lowered by a function frame, so restore the
+	// thread pointer and the host stack from absolute slots instead of unwinding.
 	c.bind(epilogue_addr);
-
-	// Cleanup scratchpad (not needed, we'll reload sp shortly)
-	// c.add(a64::sp, a64::sp, Imm(cpu_thread::gateway_slab_size));
-
-	// Restore thread context
-	c.mov(a64::x14, Imm(hv_regs_base));
-	c.add(a64::x14, a64::x14, a64::x19);
-
-	c.ldr(a64::x16, arm::Mem(a64::x14, 8));
-	c.ldp(a64::x18, a64::x19, arm::Mem(a64::x14, 16));
-	c.ldp(a64::x20, a64::x21, arm::Mem(a64::x14, 32));
-	c.ldp(a64::x22, a64::x23, arm::Mem(a64::x14, 48));
-	c.ldp(a64::x24, a64::x25, arm::Mem(a64::x14, 64));
-	c.ldp(a64::x26, a64::x27, arm::Mem(a64::x14, 80));
-	c.ldp(a64::x28, a64::x29, arm::Mem(a64::x14, 96));
-	c.ldr(a64::x30, arm::Mem(a64::x14, 112));
-
-	// Return
-	c.mov(a64::sp, a64::x16);
+	build_gateway_epilogue(c, hv_regs_base, reinterpret_cast<u64>(&cpu_thread::get_current_raw));
 	c.ret(a64::x30);
 #else
 #error "Unimplemented"
@@ -600,11 +584,6 @@ DECLARE(spu_runtime::g_tail_escape) = build_function_asm<void(*)(spu_thread*, sp
 	c.ldr(a64::x15, arm::Mem(a64::x19, a64::x14));
 	c.mov(a64::sp, a64::x15);
 
-	// Push context. This gateway can be returned to normally through a ret chain.
-	// FIXME: Push the current PC and "this" as part of the pseudo-frame and return here directly.
-	c.sub(a64::sp, a64::sp, Imm(16));
-	c.str(args[0], arm::Mem(a64::sp));
-
 	// Allocate scratchpad. Not needed if using per-function frames, or if we just don't care about returning to C++ (jump to gw exit instead)
 	c.sub(a64::sp, a64::sp, Imm(cpu_thread::gateway_slab_size));
 
@@ -612,19 +591,14 @@ DECLARE(spu_runtime::g_tail_escape) = build_function_asm<void(*)(spu_thread*, sp
 	c.mov(a64::x15, args[1]);
 	c.blr(a64::x15);
 
-	// Clear scratch allocation
-	c.add(a64::sp, a64::sp, Imm(cpu_thread::gateway_slab_size));
-
-	// Restore context. Escape point expects the current thread pointer at x19
-	c.ldr(a64::x19, arm::Mem(a64::sp));
-	c.add(a64::sp, a64::sp, Imm(16));
-
 	// <Optional> We could technically just emit a return here, but we may not want to for now until support is more mature.
 	// Should we attempt a normal return after this point, we'd be going back to C++ code which we really don't want.
 	// We can't guarantee stack sanity for the C++ code and it's cookies since we're basically treating stack as a scratch playground since we entered the main gateway.
 	// Instead, just fall back to hypervisor here. It also makes debugging easier.
-	c.mov(a64::x15, Imm(reg_base));
-	c.ldr(a64::x30, arm::Mem(a64::x19, a64::x15));
+	// Compiled code may leave sp lowered, so use the same absolute recovery
+	// as the main gateway and then return to its epilogue.
+	build_gateway_epilogue(c, reg_base, reinterpret_cast<u64>(&cpu_thread::get_current_raw));
+	c.ldr(a64::x30, arm::Mem(a64::x14, 0));
 	c.ret(a64::x30);
 #else
 #error "Unimplemented"

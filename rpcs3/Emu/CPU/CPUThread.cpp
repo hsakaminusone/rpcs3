@@ -502,6 +502,11 @@ extern f64 get_cpu_program_usage_percent(u64 hash)
 
 thread_local DECLARE(cpu_thread::g_tls_this_thread) = nullptr;
 
+cpu_thread* cpu_thread::get_current_raw() noexcept
+{
+	return g_tls_this_thread;
+}
+
 // Total number of CPU threads
 static atomic_t<u64, 128> s_cpu_counter{0};
 
