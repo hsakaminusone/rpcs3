@@ -49,7 +49,9 @@ namespace mtl
 		// of them must wait for this slot before it reads the old guest word.
 		std::vector<u32> labels;
 		// TODO(excise): level 4; the CPU commit time used by the feedback timings.
-		f64 debug_commit_time = 0.0;
+		// It is written on the RSX thread and read on the driver's feedback
+		// callback thread, so it is atomic like the generation beside it.
+		std::atomic<f64> debug_commit_time{0.0};
 	};
 
 	// The command recorder (HLD-01 C4, HLD-04 §3.1).  It is the single chokepoint
