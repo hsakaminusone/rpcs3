@@ -100,6 +100,15 @@ namespace
 
 const bool jit_initialize = []() -> bool
 {
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+	// Fail loud. Code memory is MAP_JIT and is written through the per-thread
+	// toggle; without it the first store into an executable page faults.
+	if (!pthread_jit_write_protect_supported_np())
+	{
+		jit_log.error("JIT: per-thread write protection is unavailable; MAP_JIT pages cannot be written");
+	}
+#endif
+
 	llvm::InitializeNativeTarget();
 	llvm::InitializeNativeTargetAsmPrinter();
 	llvm::InitializeNativeTargetAsmParser();
