@@ -7,6 +7,10 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/system_config.h"
 
+// EXCISE-BEGIN surface-diag
+#include "rsx_surface_diag.h"
+// EXCISE-END surface-diag
+
 #define ENABLE_SURFACE_CACHE_DEBUG 0
 
 namespace rsx
@@ -183,6 +187,17 @@ namespace rsx
 		}
 		texture_cache_metadata;
 
+		// EXCISE-BEGIN surface-diag
+		rsx::surface_diag::surface_ring diag_surface_ring;
+
+		void diag_note(rsx::surface_diag::event_kind kind, u32 peer = 0)
+		{
+			rsx::surface_diag::note(diag_surface_ring, kind, reinterpret_cast<u64>(this),
+				base_addr, texture_cache_metadata.timestamp, peer,
+				texture_cache_metadata.locked, has_refs());
+		}
+		// EXCISE-END surface-diag
+
 		render_target_descriptor() {}
 
 		virtual ~render_target_descriptor()
@@ -200,6 +215,9 @@ namespace rsx
 		void reset()
 		{
 			texture_cache_metadata = {};
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::reset);
+			// EXCISE-END surface-diag
 		}
 
 		template<rsx::surface_metrics Metrics = rsx::surface_metrics::pixels, typename T = u32>
@@ -774,17 +792,27 @@ namespace rsx
 			add_ref();
 			texture_cache_metadata.locked = true;
 			texture_cache_metadata.timestamp = rsx::get_shared_tag();
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::lock);
+			// EXCISE-END surface-diag
 		}
 
 		void on_unlock()
 		{
 			texture_cache_metadata.locked = false;
 			texture_cache_metadata.timestamp = rsx::get_shared_tag();
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::unlock);
+			// EXCISE-END surface-diag
 			release();
 		}
 
 		void on_swap_out()
 		{
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::swap_out);
+			// EXCISE-END surface-diag
+
 			if (is_locked())
 			{
 				on_unlock();
@@ -797,6 +825,10 @@ namespace rsx
 
 		void on_swap_in(bool lock)
 		{
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::swap_in);
+			// EXCISE-END surface-diag
+
 			if (!is_locked() && lock)
 			{
 				on_lock();
@@ -818,6 +850,10 @@ namespace rsx
 			rsx_pitch = ref->get_rsx_pitch();
 			last_use_tag = ref->last_use_tag;
 			raster_type = ref->raster_type;     // Can't actually cut up swizzled data
+
+			// EXCISE-BEGIN surface-diag
+			diag_note(rsx::surface_diag::event_kind::clone_from, ref->base_addr);
+			// EXCISE-END surface-diag
 		}
 
 		bool is_locked() const
@@ -827,6 +863,16 @@ namespace rsx
 
 		bool has_flushable_data() const
 		{
+			// EXCISE-BEGIN surface-diag
+			if (!is_locked() || !texture_cache_metadata.timestamp)
+			{
+				rsx::surface_diag::dump_surface("has_flushable_data invariant broken", diag_surface_ring,
+					reinterpret_cast<u64>(this), base_addr, texture_cache_metadata.timestamp,
+					last_use_tag, texture_cache_metadata.locked, has_refs(),
+					is_depth_surface(), surface_width, surface_height, rsx_pitch);
+			}
+			// EXCISE-END surface-diag
+
 			ensure(is_locked());
 			ensure(texture_cache_metadata.timestamp);
 			return (texture_cache_metadata.timestamp < last_use_tag);

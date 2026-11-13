@@ -11,6 +11,10 @@
 #include <list>
 #include <unordered_set>
 
+// EXCISE-BEGIN surface-diag
+#include "rsx_surface_diag.h"
+// EXCISE-END surface-diag
+
 namespace rsx
 {
 	enum section_bounds
@@ -1338,6 +1342,17 @@ namespace rsx
 			if (context == rsx::texture_upload_context::framebuffer_storage)
 			{
 				const auto surface = derived()->get_render_target();
+
+				// EXCISE-BEGIN surface-diag
+				if (!surface->is_locked())
+				{
+					rsx::surface_diag::dump_section("should_flush sees an unlocked attachment",
+						get_section_range().start, get_section_range().length(),
+						static_cast<u32>(get_protection()), static_cast<u32>(context),
+						reinterpret_cast<u64>(surface), exists(), surface->is_locked());
+				}
+				// EXCISE-END surface-diag
+
 				return surface->has_flushable_data();
 			}
 
