@@ -1028,7 +1028,9 @@ namespace mtl
 				const u32 vertex_count = (stream_length * sizeof(u32)) / layout.interleaved_blocks[0]->attribute_stride;
 
 				vertex_input_state result;
-				result.max_index = vertex_count;
+				// max_index is the last index, as it is in the other two visitors: the
+				// upload derives its vertex count as (max - min) + 1.
+				result.max_index = vertex_count ? vertex_count - 1 : 0;
 				result.vertex_draw_count = vertex_count;
 
 				if (expands_primitive(clause.primitive))
@@ -6293,7 +6295,16 @@ namespace mtl
 
 		for (u32 row = 0; row < height; ++row)
 		{
-			std::memcpy(host + (static_cast<u64>(row) * row_bytes), guest + (static_cast<u64>(row) * pitch), copy_bytes);
+			const u64 offset = static_cast<u64>(row) * row_bytes;
+			std::memcpy(host + offset, guest + (static_cast<u64>(row) * pitch), copy_bytes);
+
+			if (copy_bytes < row_bytes)
+			{
+				// A guest pitch shorter than the host row leaves a tail that the
+				// staging buffer never receives; it is carried to the display, so
+				// it is cleared rather than left as whatever the heap held.
+				std::memset(host + offset + copy_bytes, 0, row_bytes - copy_bytes);
+			}
 		}
 
 		MTL4::ComputeCommandEncoder* encoder = m_frame_resources->recorder.open_compute();

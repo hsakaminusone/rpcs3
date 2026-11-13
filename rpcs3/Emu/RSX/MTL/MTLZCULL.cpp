@@ -112,7 +112,7 @@ namespace mtl
 			const deferred_release& pending = m_deferred[index];
 			if (m_generations[pending.slot] > pending.generation)
 			{
-				m_free[m_free_count++] = pending.index;
+				push_free(pending.index);
 				m_deferred[index] = m_deferred[--m_deferred_count];
 				continue;
 			}
@@ -332,6 +332,19 @@ namespace mtl
 		release_counter(*entry);
 	}
 
+	void zcull::push_free(u32 index)
+	{
+		if (m_free_count < counter_capacity)
+		{
+			m_free[m_free_count++] = index;
+			return;
+		}
+
+		// Every released counter is logged, and a full list means the index was
+		// released twice; dropping it keeps the pool consistent.
+		rsx_log.error("Metal 4: ZCULL counter %u released with the free list full", index);
+	}
+
 	void zcull::release_counter(query_counter& entry)
 	{
 		entry.owned = false;
@@ -339,14 +352,14 @@ namespace mtl
 		if (!entry.counted)
 		{
 			// Nothing ever counted into it, so no frame can write it.
-			m_free[m_free_count++] = entry.index;
+			push_free(entry.index);
 			return;
 		}
 
 		if (entry.gated && query_ready(entry))
 		{
 			// The gate already passed, so the value is final and the index is safe.
-			m_free[m_free_count++] = entry.index;
+			push_free(entry.index);
 			return;
 		}
 

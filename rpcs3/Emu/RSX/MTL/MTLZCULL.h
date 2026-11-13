@@ -103,6 +103,10 @@ namespace mtl
 		bool query_ready(const query_counter& entry) const;
 		// Return a query's counter to the pool, or defer it until its gate passes.
 		void release_counter(query_counter& entry);
+		// Return one counter index to the free list.  The pool holds every counter,
+		// so one release each fills the list exactly; a second release of the same
+		// index would write past the array.
+		void push_free(u32 index);
 
 		command_recorder* m_recorder = nullptr;
 		resource_manager* m_resources = nullptr;
