@@ -2024,9 +2024,7 @@ spu_function_t spu_runtime::make_branch_patchpoint(u16 data) const
 
 	return reinterpret_cast<spu_function_t>(raw);
 #elif defined(ARCH_ARM64)
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(false);
-#endif
+	jit_write_guard _jit_guard;
 
 	u8* const patch_fn = ensure(jit_runtime::alloc(36, 16));
 	u8* raw = patch_fn;
@@ -2064,10 +2062,6 @@ spu_function_t spu_runtime::make_branch_patchpoint(u16 data) const
 
 	*raw++ = static_cast<u8>(data >> 8);
 	*raw++ = static_cast<u8>(data & 0xff);
-
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(true);
-#endif
 
 	// Flush all cache lines after potentially writing executable code
 	asm("ISB");
@@ -2161,15 +2155,17 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 		return;
 	}
 
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(false);
-#endif
-	auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
+	spu_function_t func = nullptr;
+	{
+		jit_write_guard _jit_guard;
+
+		auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
 #ifdef ARCH_ARM64
-	const auto func = compile_spu_llvm_with_retry(spu.jit, program);
+		func = compile_spu_llvm_with_retry(spu.jit, program);
 #else
-	const auto func = spu.jit->compile(std::move(program));
+		func = spu.jit->compile(std::move(program));
 #endif
+	}
 
 	if (!func)
 	{
@@ -2187,10 +2183,6 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 			spu_log.trace("Called from 0x%x", _info._u32[2] - 4);
 		}
 	}
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(true);
-#endif
-
 #if defined(ARCH_ARM64)
 	// Flush all cache lines after potentially writing executable code
 	asm("ISB");
@@ -2277,13 +2269,10 @@ void spu_recompiler_base::branch(spu_thread& spu, void*, u8* rip)
 
 	const u64 target = reinterpret_cast<u64>(func);
 	std::memcpy(bytes + 8, &target, 8);
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(false);
-#endif
-	atomic_storage<u128>::release(*reinterpret_cast<u128*>(rip), result);
-#if defined(__APPLE__)
-	pthread_jit_write_protect_np(true);
-#endif
+	{
+		jit_write_guard _jit_guard;
+		atomic_storage<u128>::release(*reinterpret_cast<u128*>(rip), result);
+	}
 
 	// Flush all cache lines after potentially writing executable code
 	asm("ISB");

@@ -466,20 +466,30 @@ namespace asmjit
 #ifdef __APPLE__
 struct jit_write_guard
 {
+	// Nesting counts so an inner scope does not re-enable write protection
+	// while an outer scope is still patching code.
+	static inline thread_local u32 depth = 0;
+
 	jit_write_guard() noexcept
 	{
-		pthread_jit_write_protect_np(false);
+		if (depth++ == 0)
+		{
+			pthread_jit_write_protect_np(false);
 
-		// Ensure stores are not reordered by the compiler
-		atomic_fence_acq_rel();
+			// Ensure stores are not reordered by the compiler
+			atomic_fence_acq_rel();
+		}
 	}
 
 	~jit_write_guard() noexcept
 	{
-		// Ensure stores are not reordered by the compiler
-		atomic_fence_seq_cst();
+		if (--depth == 0)
+		{
+			// Ensure stores are not reordered by the compiler
+			atomic_fence_seq_cst();
 
-		pthread_jit_write_protect_np(true);
+			pthread_jit_write_protect_np(true);
+		}
 	}
 };
 #else

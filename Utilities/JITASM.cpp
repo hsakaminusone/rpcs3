@@ -250,6 +250,12 @@ void* jit_runtime_base::_add(asmjit::CodeHolder* code, usz align) noexcept
 		}
 	}
 
+#if defined(ARCH_ARM64)
+	// Instruction and data caches are not coherent. Publish the new bytes
+	// before the write guard re-enables execute-only access.
+	__builtin___clear_cache(reinterpret_cast<char*>(p), reinterpret_cast<char*>(p + codeSize));
+#endif
+
 	return p;
 }
 

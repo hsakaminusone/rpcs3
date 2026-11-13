@@ -4210,21 +4210,9 @@ public:
 			print_ir();
 		}
 
-#if defined(__APPLE__)
-		// Apple Silicon W^X: enter write mode for JIT memory and pair
-		// it with an RAII guard so execute mode is restored on every
-		// exit path (the early "return nullptr" below would otherwise
-		// leave the thread in write mode permanently).
-		pthread_jit_write_protect_np(false);
-
-		struct jit_write_guard
-		{
-			~jit_write_guard()
-			{
-				pthread_jit_write_protect_np(true);
-			}
-		} _jit_guard;
-#endif
+		// Apple Silicon W^X: enter write mode for JIT memory. The guard restores
+		// execute mode on every exit path, including the early return below.
+		jit_write_guard _jit_guard;
 
 		{
 #ifdef ARCH_ARM64
@@ -4312,9 +4300,6 @@ public:
 			fs::write_file(m_spurt->get_cache_path() + "spu-ir.log", fs::create + fs::write + fs::append, llvm_log);
 		}
 
-#if defined(__APPLE__)
-		pthread_jit_write_protect_np(true);
-#endif
 #if defined(ARCH_ARM64)
 		// Flush all cache lines after potentially writing executable code
 		asm("ISB");
