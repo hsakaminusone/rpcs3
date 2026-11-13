@@ -67,6 +67,13 @@ public:
 	// Self identifier
 	const u32 id;
 
+	// Scratch stack reserved by the PPU and SPU gateways for GHC-compiled code.
+	// GHC treats the stack as scratch and may spill to positive offsets from sp
+	// without a prologue, so this must exceed the largest frame LLVM emits.
+	// 64 KB covers every frame observed in the issue reports with a 6x margin;
+	// the exact per-function solution is the .stack_sizes thunk.
+	static constexpr u64 gateway_slab_size = 65536;
+
 	// Public thread state
 	atomic_bs_t<cpu_flag> state{cpu_flag::stop + cpu_flag::wait};
 
