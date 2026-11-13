@@ -109,7 +109,7 @@ Consequences:
 
 Apple Silicon enforces **per-thread W^X** for `MAP_JIT` regions:
 
-1. `mmap(..., MAP_JIT, ...)` maps the region executable.
+1. `mmap(..., PROT_READ | PROT_WRITE | PROT_EXEC, MAP_JIT, ...)` maps the region executable. `PROT_EXEC` must be present in the `mmap` protection (or added later with `mprotect`); the toggle only switches an existing mapping between writable and executable.
 2. `pthread_jit_write_protect_np(false)` flips the *calling thread* to writable, non-executable.
 3. The thread writes or patches code.
 4. `pthread_jit_write_protect_np(true)` flips it back to executable.
@@ -128,7 +128,7 @@ Rules that follow:
 What that means in practice, and what was verified on the reference machine:
 
 - An ad-hoc-signed binary (`codesign --deep -fs -`, as `.ci/deploy-mac.sh:69` already does) with **no entitlements** can `mmap(RW)` then `mprotect(RX)` and execute the result. Hardened Runtime is what makes that path fail, and RPCS3 does not enable it.
-- `MAP_JIT` allocation succeeds and `pthread_jit_write_protect_supported_np()` returns 1 on the same ad-hoc binary. The per-thread toggle is therefore available without an account.
+- `MAP_JIT` allocation succeeds and `pthread_jit_write_protect_supported_np()` returns 1 on the same ad-hoc binary. The per-thread toggle is therefore available without an account. **Measured:** a `MAP_JIT` mapping created without `PROT_EXEC` allocates and accepts writes through the toggle but raises `SIGBUS` when executed; with `PROT_EXEC` in the mapping (or added by `mprotect`) it returns the expected value. The CI smoke test (`.ci/jit-smoke.sh`) asserts both code paths.
 - A **file-backed** alias mapped RX fails with `EPERM` even ad-hoc. Do not design a dual-mapping (RW file + RX alias) code allocator on macOS; use anonymous memory or `MAP_JIT`.
 - If the project ever adopts Hardened Runtime, `com.apple.security.cs.allow-jit` is a non-restricted entitlement and can be carried by an ad-hoc signature for local testing. It still cannot be notarized without an account, so a notarized Developer ID build is not a gate for this work.
 
