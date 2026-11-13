@@ -1302,12 +1302,10 @@ The ordering is deliberate. Option A is a correctness fix that lands in days and
 
 **Data flow**
 
-1. The SPU/PPU recompiler constructs its `jit_compiler` with a flag meaning "emit stack-size section."
-2. `jit_compiler` sets `llvm::TargetOptions::EmitStackSizeSection = true` and `ExecutionEngine::setProcessAllSections(true)`.
-3. `MemoryManager1/2::allocateDataSection` records `.stack_sizes`; `finalizeMemory` decodes it into `(function address, frame size)` pairs.
-4. After `getPointerToFunction(f)`, look up the address. If `frame_size > 48 KB`, record `{function_name → frame_size}` in the compile context and fail the compile.
-5. The caller sees the override set grow, preserves it across the retry, and recompiles once.
-6. On the second compile, `GHC_frame_preservation_pass::inject_frame_thunk` runs for each overridden function:
+1. `jit_compiler` sets `llvm::TargetOptions::EmitStackSizeSection = true` for Apple ARM64.
+2. The section is **non-allocated**, so RuntimeDyld never loads it and `allocateDataSection` is not called for it. `JITAnnouncer::notifyObjectLoaded` decodes the object buffer instead: each `R_AARCH64_ABS64` relocation in `.stack_sizes` gives the function's section offset (the addend), and the following ULEB128 is the frame size.
+3. Frames above 48 KB are logged today. The two-pass thunk is the remaining step: record `{function_name → frame_size}`, fail the compile, and recompile once.
+4. On the retry, `GHC_frame_preservation_pass::inject_frame_thunk` runs for each overridden function:
    - move the original body to `<name>-framed`;
    - emit a thunk that subtracts `align16(frame_size) + 16` from the current `sp` and tail-calls the body.
 
@@ -1329,7 +1327,7 @@ This is a prerequisite PR to the thunk, not part of it. Test: enter a thunked SP
 
 **Decoder requirements** (verified end-to-end; see Appendix A.2 for the multi-function experiment):
 
-- Decode **after** relocation. In the raw object the address field is an `R_AARCH64_ABS64` relocation target; `allocateDataSection` sees the relocated payload.
+- Decode the **relocation addend**, not the payload. In the object the address field is zero plus an `R_AARCH64_ABS64` relocation against the section symbol; match the addend to a function symbol's `(section, value)`.
 - Records are **packed back-to-back**, not 8-byte aligned: advance by `8 + ULEB_length`. An aligned decoder misparses a multi-function section.
 - The address is the function's code entry, and it matches `getFunctionAddress()` exactly.
 - Stop at the section end; ignore `addr == 0`; tolerate a truncated tail. A 30-byte single-function section is 10 bytes of record plus 20 bytes of zero padding, and a 3-function section is 29 bytes plus 60 bytes; the tail is padding, not phantom functions.
@@ -2003,7 +2001,7 @@ MCJIT + `RuntimeDyld` was designed for `lli`, not for an emulator:
 - symbol resolution is a string map and a linear relocation pass;
 - `finalizeObject()` is a global barrier;
 - memory is allocated in a few large slabs, so freeing one invalidated module is coarse;
-- sections are delivered to a `RTDyldMemoryManager` only after relocation, which is why `.stack_sizes` needs `setProcessAllSections` and a custom manager (§8.4);
+- sections are delivered to a `RTDyldMemoryManager` only after relocation, and non-allocated sections such as `.stack_sizes` are never delivered at all, which is why Phase 1 decodes it from the JIT listener (§8.4);
 - there is no supported way to compile concurrently into the same JIT.
 
 None of that is fatal; all of it is avoidable.
