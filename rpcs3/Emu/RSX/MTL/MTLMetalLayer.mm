@@ -236,6 +236,36 @@ namespace mtl
 		return nullptr;
 	}
 
+	bool metal_layer_visible(void* view)
+	{
+		// The window owns the visibility, so a detached view, a hidden view and a
+		// window the window server is not compositing all answer false.
+		if (!view)
+		{
+			return false;
+		}
+
+		NSView* ns_view = static_cast<NSView*>(view);
+
+		if (ns_view.hiddenOrHasHiddenAncestor)
+		{
+			return false;
+		}
+
+		NSWindow* window = ns_view.window;
+
+		// A miniaturised window still has a layer, but the display takes no drawable
+		// from it, which is the case that would wait out the acquire timeout.
+		if (!window || !window.visible || window.miniaturized)
+		{
+			return false;
+		}
+
+		// A window the window server reports as not visible is fully covered or off
+		// screen, and a drawable it would give is one the display never takes.
+		return (window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+	}
+
 #if MTL_DEBUG_LOGS
 	// TODO(excise): level 4; the layer-state walk of one stall.
 	void metal_layer_log_state(void* view, void* layer)

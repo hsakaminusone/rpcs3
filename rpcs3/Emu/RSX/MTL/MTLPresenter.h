@@ -29,8 +29,10 @@ namespace mtl
 		bool valid() const { return m_layer != nullptr; }
 
 		// Acquire the frame's drawable, sized to the client area, and return its
-		// texture as the render target.  False when no drawable is available, which
-		// means the frame is dropped.
+		// texture as the render target.  False when no drawable is available or the
+		// window is not on screen, which means the frame is dropped: the display
+		// services only a window it composites, and waiting on one it does not would
+		// block the RSX thread for the layer's whole acquire timeout.
 		bool acquire(command_recorder& recorder, u32 width, u32 height, MTL::Texture*& target);
 
 		// Submit the frame and present the acquired drawable.  This is the only way a

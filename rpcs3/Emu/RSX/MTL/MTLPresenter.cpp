@@ -110,6 +110,20 @@ namespace mtl
 			return false;
 		}
 
+		// A drawable belongs to the display, and the display services the layer only
+		// while it composites the window.  An invisible window would otherwise take
+		// the whole one-second timeout of nextDrawable (CAMetalLayer.h:95-102) on the
+		// RSX thread for every flip, which GL avoids by not swapping a window that is
+		// not exposed (gl_gs_frame.cpp:151) and VK avoids by letting the surface go
+		// out of date.  The frame is dropped instead, and m_frame->flip still runs, so
+		// the first flip shows the window and the next acquire finds it visible.
+		if (!metal_layer_visible(m_view))
+		{
+			// TODO(excise): level 1; running total.
+			MTL_PERF_COUNT(1, "present/acquire/not visible", 1);
+			return false;
+		}
+
 		// The drawable is the client area, so a resize sizes the drawable and the
 		// output path scales the RSX image into it (HLD-06 §2.3).
 		if (width != m_width || height != m_height)
