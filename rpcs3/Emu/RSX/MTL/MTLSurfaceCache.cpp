@@ -87,6 +87,19 @@ namespace mtl
 	void surface_cache_traits::invalidate_surface_contents(command_list_type, surface_type surface, rsx::surface_color_format format, u32 address, u32 pitch)
 	{
 		surface->set_format(format);
+
+		// The channel meaning follows the new format, not the one the allocation
+		// was created for (GLRenderTargets.h:379, VKRenderTargets.h:538).  A surface
+		// retagged from one colour layout to another would otherwise sample with
+		// the previous layout's swizzle.
+		const std::array<MTL::TextureSwizzle, 4> layout = mtl::get_surface_component_layout(format);
+		surface->set_native_component_layout(layout);
+
+		if (surface->resolve_surface)
+		{
+			surface->resolve_surface->set_native_component_layout(layout);
+		}
+
 		retag(surface, address, pitch);
 	}
 
@@ -170,8 +183,31 @@ namespace mtl
 			sink->surface_width = prev.width;
 			sink->surface_height = prev.height;
 			sink->native_pitch = static_cast<u32>(prev.width) * ref->get_bpp() * ref->samples_x;
+
+			// A reused sink was created for some earlier region, so its scaling and
+			// channel layout are stale.  GL and VK copy both here
+			// (GLRenderTargets.h:288/295, VKRenderTargets.h:423/429); without it a
+			// clone's dimensions and sampled channels come from the previous life.
+			sink->set_resolution_scaling_config(scaling);
+			sink->set_native_component_layout(ref->get_native_component_layout());
+
+			if (sink->resolve_surface)
+			{
+				sink->resolve_surface->set_native_component_layout(ref->get_native_component_layout());
+			}
+
 			sink->queue_tag(address);
 		}
+
+		// A clone of a locked surface inherits the lock (GLRenderTargets.h:303,
+		// VKRenderTargets.h:449).  queue_tag() above clears texture_cache_metadata,
+		// so this has to run after the initialisation block, or the clone stays
+		// unlocked while the section it backs is still protected.
+		sink->on_clone_from(ref);
+
+		// EXCISE-BEGIN surface-diag
+		ref->diag_note(rsx::surface_diag::event_kind::clone_from, static_cast<u32>(address));
+		// EXCISE-END surface-diag
 
 		if (!sink->old_contents.empty())
 		{
