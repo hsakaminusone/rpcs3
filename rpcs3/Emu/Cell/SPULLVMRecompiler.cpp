@@ -10,6 +10,7 @@
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
 #include "Crypto/sha1.h"
 #include "Utilities/JIT.h"
+#include "Utilities/CPUStats.h"
 
 #include "SPUThread.h"
 #include "SPUAnalyser.h"
@@ -4274,6 +4275,7 @@ public:
 
 		// Register function pointer
 		const spu_function_t fn = reinterpret_cast<spu_function_t>(m_jit.get_engine().getPointerToFunction(main_func));
+		cpu_stats::g_counters.spu_functions++;
 
 		// Install unconditionally, possibly replacing existing one from spu_fast
 		add_loc->compiled = fn;

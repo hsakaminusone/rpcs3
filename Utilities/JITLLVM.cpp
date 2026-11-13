@@ -9,6 +9,7 @@
 #include "util/vm.hpp"
 #include "util/asm.hpp"
 #include "Crypto/unzip.h"
+#include "CPUStats.h"
 
 #include <charconv>
 #include <map>
@@ -352,10 +353,12 @@ static u64 make_null_function(const std::string& name)
 
 			if (frame > slab)
 			{
+				cpu_stats::g_counters.frame_overflows++;
 				jit_log.error("LLVM: %s needs %llu bytes of GHC stack, above the %llu-byte gateway slab", name, frame, slab);
 			}
 			else if (frame >= 48 * 1024)
 			{
+				cpu_stats::g_counters.frame_warnings++;
 				jit_log.warning("LLVM: %s needs %llu bytes of GHC stack (gateway slab is %llu bytes)", name, frame, slab);
 			}
 		}
@@ -1034,6 +1037,7 @@ jit_compiler::~jit_compiler() noexcept
 
 void jit_compiler::add(std::unique_ptr<llvm::Module> _module, const std::string& path)
 {
+	const auto compile_start = std::chrono::steady_clock::now();
 	ObjectCache cache{path, this};
 	m_engine->setObjectCache(&cache);
 
@@ -1047,10 +1051,13 @@ void jit_compiler::add(std::unique_ptr<llvm::Module> _module, const std::string&
 		// Delete IR to lower memory consumption
 		func.deleteBody();
 	}
+
+	cpu_stats::g_counters.jit_compile_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compile_start).count();
 }
 
 bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::string& path, std::string& error)
 {
+	const auto compile_start = std::chrono::steady_clock::now();
 	ObjectCache cache{path, this};
 	m_engine->setObjectCache(&cache);
 
@@ -1062,6 +1069,7 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 		m_engine->generateCodeForModule(ptr);
 	}, error))
 	{
+		cpu_stats::g_counters.compile_failures++;
 		return false;
 	}
 
@@ -1072,12 +1080,15 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 		// Delete IR to lower memory consumption
 		func.deleteBody();
 	}
+
+	cpu_stats::g_counters.jit_compile_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compile_start).count();
 
 	return true;
 }
 
 void jit_compiler::add(std::unique_ptr<llvm::Module> _module)
 {
+	const auto compile_start = std::chrono::steady_clock::now();
 	const auto ptr = _module.get();
 	m_engine->addModule(std::move(_module));
 	m_engine->generateCodeForModule(ptr);
@@ -1087,10 +1098,13 @@ void jit_compiler::add(std::unique_ptr<llvm::Module> _module)
 		// Delete IR to lower memory consumption
 		func.deleteBody();
 	}
+
+	cpu_stats::g_counters.jit_compile_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compile_start).count();
 }
 
 bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, std::string& error)
 {
+	const auto compile_start = std::chrono::steady_clock::now();
 	const auto ptr = _module.get();
 	m_engine->addModule(std::move(_module));
 
@@ -1099,6 +1113,7 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, std::string& e
 		m_engine->generateCodeForModule(ptr);
 	}, error))
 	{
+		cpu_stats::g_counters.compile_failures++;
 		return false;
 	}
 
@@ -1107,6 +1122,8 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, std::string& e
 		// Delete IR to lower memory consumption
 		func.deleteBody();
 	}
+
+	cpu_stats::g_counters.jit_compile_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compile_start).count();
 
 	return true;
 }

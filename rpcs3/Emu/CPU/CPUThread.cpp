@@ -13,6 +13,7 @@
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/perf_meter.hpp"
+#include "Utilities/CPUStats.h"
 
 #include "util/asm.hpp"
 #include <thread>
@@ -1557,6 +1558,13 @@ void cpu_thread::cleanup() noexcept
 	}
 
 	sys_log.notice("All CPU threads have been stopped. [+: %u]", +g_threads_created);
+
+	const auto& c = cpu_stats::g_counters;
+	sys_log.notice("CPU stats: PPU modules: %u, SPU functions: %u, compile failures: %u, invalidations: %u, fallbacks: [ppu:%u, spu:%u], faults: %u [rsx:%u, spu:%u], oversized frames: [warn:%u, over:%u], JIT compile: %.3fs",
+		+c.ppu_modules, +c.spu_functions, +c.compile_failures, +c.block_invalidations,
+		+c.ppu_fallbacks, +c.spu_fallbacks, +c.faults_all, +c.faults_rsx, +c.faults_spu,
+		+c.frame_warnings, +c.frame_overflows, +c.jit_compile_ns / 1e9);
+	cpu_stats::reset();
 
 	g_threads_deleted -= g_threads_created.load();
 	g_threads_created = 0;

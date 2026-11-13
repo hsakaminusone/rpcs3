@@ -11,6 +11,7 @@
 #include "Crypto/sha1.h"
 #include "Utilities/StrUtil.h"
 #include "Utilities/JIT.h"
+#include "Utilities/CPUStats.h"
 #include "util/init_mutex.hpp"
 #include "util/shared_ptr.hpp"
 
@@ -2284,6 +2285,8 @@ void spu_recompiler_base::branch(spu_thread& spu, void*, u8* rip)
 
 void spu_recompiler_base::old_interpreter(spu_thread& spu, void* ls, u8* /*rip*/)
 {
+	cpu_stats::g_counters.spu_fallbacks++;
+
 	if (g_cfg.core.spu_decoder != spu_decoder_type::_static)
 	{
 		fmt::throw_exception("Invalid SPU decoder");

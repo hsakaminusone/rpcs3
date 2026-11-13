@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Utilities/ppu_patch.h"
 #include "Utilities/JIT.h"
+#include "Utilities/CPUStats.h"
 #include "Utilities/StrUtil.h"
 #include "util/serialization.hpp"
 #include "Crypto/sha1.h"
@@ -488,6 +489,7 @@ static void ppu_fallback(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
 void ppu_recompiler_fallback(ppu_thread& ppu)
 {
 	perf_meter<"PPUFALL1"_u64> perf0;
+	cpu_stats::g_counters.ppu_fallbacks++;
 
 	if (g_cfg.core.ppu_debug)
 	{
@@ -3938,6 +3940,7 @@ namespace
 			to_destroy.symbol_resolvers = std::move(found->second.symbol_resolvers);
 
 			bucket.map.erase(found);
+			cpu_stats::g_counters.block_invalidations++;
 		}
 
 		jit_module_manager& operator=(thread_state s) noexcept
@@ -6396,5 +6399,6 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 
 	// Load or compile module
 	jit.add(std::move(_module), cache_path);
+	cpu_stats::g_counters.ppu_modules++;
 #endif // LLVM_AVAILABLE
 }

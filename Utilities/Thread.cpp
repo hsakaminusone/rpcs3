@@ -9,6 +9,7 @@
 #include "Emu/system_config.h"
 #include "Thread.h"
 #include "Utilities/JIT.h"
+#include "Utilities/CPUStats.h"
 #include <cfenv>
 
 #ifdef ARCH_ARM64
@@ -3060,6 +3061,10 @@ u64 thread_base::finalize(thread_state result_state) noexcept
 
 thread_base::native_entry thread_base::finalize(u64 _self) noexcept
 {
+	cpu_stats::g_counters.faults_all += g_tls_fault_all;
+	cpu_stats::g_counters.faults_rsx += g_tls_fault_rsx;
+	cpu_stats::g_counters.faults_spu += g_tls_fault_spu;
+
 	g_tls_fault_all = 0;
 	g_tls_fault_rsx = 0;
 	g_tls_fault_spu = 0;
