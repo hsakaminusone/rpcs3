@@ -288,11 +288,13 @@ namespace mtl
 			"present gap bucket");
 #endif // MTL_DIAGNOSTICS
 
+		// EXCISE-BEGIN display-dropped
 		if (!drawable)
 		{
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "present/display/dropped", 1);
 		}
+		// EXCISE-END display-dropped
 
 		// The present is a framework call on the RSX thread, which runs no pool.
 		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();

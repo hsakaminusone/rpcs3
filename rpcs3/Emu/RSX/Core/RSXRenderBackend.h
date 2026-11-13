@@ -47,11 +47,13 @@ namespace rsx
 		u32 position = 0;
 	};
 
+	// EXCISE-BEGIN dispatch-history-size
 	// The ring is 256 entries so that a capture can reach from the error back to
 	// the jump target: the error is a fixed distance after the target in three of
 	// the four captures (0x39c bytes, L58), and the commands in between are what
 	// the host has to show.
 	static constexpr u32 dispatch_history_size = 256;
+	// EXCISE-END dispatch-history-size
 
 	// TODO(excise): whole-unit; level 1; what the shared code knows about a desync when it
 	// recovers. The backend prints it; removing it removes this struct and the

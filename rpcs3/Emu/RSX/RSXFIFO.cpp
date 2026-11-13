@@ -996,12 +996,12 @@ namespace rsx
 			// is no per-stream frontier; PUT gates whole-packet dispatch below.
 			if (!g_cfg.core.rsx_fifo_accuracy) [[ likely ]]
 			{
+				// EXCISE-BEGIN fifo-read-ahead
 				if (m_fifo_pos > put)
 				{
-					// EXCISE-BEGIN fifo-read-ahead
 					diag_read_ahead(m_fifo_pos, put);
-					// EXCISE-END fifo-read-ahead
 				}
+				// EXCISE-END fifo-read-ahead
 
 				if (const u32 addr = translate_address(m_fifo_pos); addr + 1)
 				{

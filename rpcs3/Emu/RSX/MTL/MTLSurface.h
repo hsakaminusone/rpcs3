@@ -10,6 +10,21 @@
 
 namespace mtl
 {
+	// The guest rows a surface write-back touches (surface_store.h:995-1014).  The
+	// shared code hands the backend a byte range, so the first and last row can be
+	// partial and the offset inside the first row is arbitrary.
+	struct surface_write_range
+	{
+		u32 first_row = 0;
+		u32 rows = 0;
+		u32 row_offset = 0;
+		u32 bytes = 0;
+	};
+
+	// Clip a byte range of the surface to the rows it covers.  rows == 0 means
+	// the range lies outside the surface and there is nothing to copy.
+	surface_write_range clip_surface_write_range(u32 src_offset, u32 write_length, u32 pitch, u32 height);
+
 	// One RSX surface (HLD-02 §3.2).  The surface *is* the image handle, because the
 	// generic store recovers a surface from an image pointer (surface_store.h:391).
 	// The guest bytes stay canonical, so this object is the Metal projection of a

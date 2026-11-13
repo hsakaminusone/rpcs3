@@ -782,10 +782,12 @@ namespace mtl
 			MTL_PROBE_HISTOGRAM(2, "texture upload subresources", supplied, "uploaded subresource count");
 			MTL_PROBE_HISTOGRAM(2, "texture upload format", gcm_format, "gcm upload format");
 
+			// EXCISE-BEGIN upload-partial-latch
 			if (supplied < expected)
 			{
 				MTL_PROBE_LATCH(2, "texture/upload partial");
 			}
+			// EXCISE-END upload-partial-latch
 
 			// An upload that does not cover every level leaves the rest of the
 			// image with whatever the previous occupant of the address left in it,

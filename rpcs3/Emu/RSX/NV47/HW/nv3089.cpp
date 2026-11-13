@@ -40,12 +40,14 @@ namespace rsx
 			const f32 raw_scale_x = REGS(ctx)->blit_engine_ds_dx();
 			const f32 raw_scale_y = REGS(ctx)->blit_engine_dt_dy();
 
+			// EXCISE-BEGIN zero-scale-warning
 			if (raw_scale_x == 0.f || raw_scale_y == 0.f)
 			{
 				// TODO(excise): level 2; one line per blit, and the blit is rare.
 				rsx_log.warning("NV3089_IMAGE_IN: DS DX or DT DY is 0, using the default scale of 1.0 (ds_dx=%f, dt_dy=%f)",
 					raw_scale_x, raw_scale_y);
 			}
+			// EXCISE-END zero-scale-warning
 
 			const f32 scale_x = (raw_scale_x == 0.f) ? 1.f : raw_scale_x;
 			const f32 scale_y = (raw_scale_y == 0.f) ? 1.f : raw_scale_y;

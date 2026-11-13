@@ -21,7 +21,7 @@
 
 namespace mtl
 {
-	MTLFragmentDecompilerThread::MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader, u32 id)
+	MTLFragmentDecompilerThread::MTLFragmentDecompilerThread(const RSXFragmentProgram& prog, u32& size, std::string& shader, [[maybe_unused]] u32 id)
 		: FragmentProgramDecompiler(prog, size)
 		, m_shader(shader)
 	{
