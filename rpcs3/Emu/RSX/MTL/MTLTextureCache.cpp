@@ -171,6 +171,15 @@ namespace mtl
 			const u32 size = row_pitch * rows;
 			MTL::Buffer* staging = cmd.resources().new_buffer(size, MTL::StorageModeShared);
 
+			if (!staging)
+			{
+				// A failed allocation skips the level rather than faulting: the
+				// destination keeps what it held, which is what the clear path
+				// already does with the same call.
+				rsx_log.error("Metal 4: the upload staging buffer for a %u byte level could not be created", size);
+				continue;
+			}
+
 			rsx::io_buffer io_buf(staging->contents(), size);
 			rsx::upload_texture_subresource(io_buf, layout, gcm_format, is_swizzled, caps);
 
