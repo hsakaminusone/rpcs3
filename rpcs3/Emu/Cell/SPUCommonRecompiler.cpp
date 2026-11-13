@@ -2123,13 +2123,11 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 
 		const u64 target = reinterpret_cast<u64>(spu_runtime::tr_all);
 		std::memcpy(bytes + 8, &target, 8);
-#if defined(__APPLE__)
-		pthread_jit_write_protect_np(false);
-#endif
-		atomic_storage<u128>::release(*reinterpret_cast<u128*>(rip), result);
-#if defined(__APPLE__)
-		pthread_jit_write_protect_np(true);
-#endif
+
+		{
+			jit_write_guard _jit_guard;
+			atomic_storage<u128>::release(*reinterpret_cast<u128*>(rip), result);
+		}
 
 		// Flush all cache lines after potentially writing executable code
 		asm("ISB");

@@ -5499,10 +5499,8 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 #endif
 		}, runtime.get(), true);
 
-#ifdef __APPLE__
-		// Restore write-protection state (modified by build_function_asm)
-		pthread_jit_write_protect_np(false);
-#endif
+		// build_function_asm uses a nested jit_write_guard, so this thread is
+		// still inside the write window opened above.
 
 		// Full sample may exist already, but is very far away
 		// So in this case, a new sample is written
@@ -5951,9 +5949,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				// Set low priority
 				thread_ctrl::scoped_priority low_prio(-1);
 
-#ifdef __APPLE__
-				pthread_jit_write_protect_np(false);
-#endif
+				// Worker threads do not inherit the caller's write window.
+				jit_write_guard jit_guard;
+
 				for (usz i = (*work_cv)++; i < workload.size(); i = (*work_cv)++, (*work_done)++, g_progr_pdone++)
 				{
 					if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
@@ -6111,9 +6109,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 	}
 
 	// Jit can be null if the loop doesn't ever enter.
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(false);
-#endif
+	// The enclosing jit_write_guard already holds the write window for this
+	// thread, so no extra toggle is needed here.
+
 	// Try to patch all single and unregistered BLRs with the same function (TODO: Maybe generalize it into PIC code detection and patching)
 	ppu_intrp_func_t BLR_func = nullptr;
 
@@ -6144,32 +6142,30 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 #ifdef __APPLE__
 		named_thread sym_worker("PPU Symbol Resolver", [&]()
 		{
-			// jit_compiler::get() may write to executable memory (relocations)
-			pthread_jit_write_protect_np(false);
 #else
 		{
 #endif
-			if (is_first)
+			// Resolving relocations writes to executable memory.
 			{
-				ppu_log.notice("Resolving %u symbol resolver functions", jit_mod.symbol_resolvers.size());
+				jit_write_guard _jit_guard;
 
-				for (auto& sim : jit_mod.symbol_resolvers)
+				if (is_first)
 				{
-					index++;
+					ppu_log.notice("Resolving %u symbol resolver functions", jit_mod.symbol_resolvers.size());
 
-					ensure(!sim);
-					sim = ensure(reinterpret_cast<void(*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
+					for (auto& sim : jit_mod.symbol_resolvers)
+					{
+						index++;
 
-					ppu_log.notice("Resolved symbol resolver function #%u", index);
+						ensure(!sim);
+						sim = ensure(reinterpret_cast<void(*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
+
+						ppu_log.notice("Resolved symbol resolver function #%u", index);
+					}
 				}
 			}
 
 			ppu_log.notice("Executing %u symbol resolvers", jit_mod.symbol_resolvers.size());
-
-#ifdef __APPLE__
-			// Virtual memory mapped by MAP_JIT cannot be executed until pthread_jit_write_protect_np(true)
-			pthread_jit_write_protect_np(true);
-#endif
 
 			index = umax;
 
