@@ -347,12 +347,10 @@ namespace utils
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 #if defined(__APPLE__) && defined(ARCH_ARM64)
-		// Hack: on macOS, Apple explicitly fails mmap if you combine MAP_FIXED and MAP_JIT.
-		// So we unmap the space and just hope it maps to the same address we got before instead.
-		// The Xcode manpage says the pointer is a hint and the OS will try to map at the hint location
-		// so this isn't completely undefined behavior.
-		ensure(::munmap(pointer, size) != -1);
-		ensure(::mmap(pointer, size, PROT_NONE,  MAP_ANON | MAP_PRIVATE | (can_be_jit ? MAP_JIT : 0), -1, 0) == pointer);
+		// Keep the mapping. Unmapping a MAP_JIT range while another thread can
+		// still execute it is a crash, and munmap+mmap is not atomic: the
+		// address can be taken before we map it back.
+		ensure(::mprotect(pointer, size, PROT_NONE) != -1);
 #else
 		ensure(::mmap(pointer, size, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE | c_map_noreserve, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
 #endif
@@ -381,8 +379,9 @@ namespace utils
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 #if defined(__APPLE__) && defined(ARCH_ARM64)
-		ensure(::munmap(pointer, size) != -1);
-		ensure(::mmap(pointer, size, +prot,  MAP_ANON | MAP_PRIVATE | (can_be_jit ? MAP_JIT : 0), -1, 0) == pointer);
+		// Reuse the reservation. Never unmap a range that another thread may
+		// still reference or execute.
+		ensure(::mprotect(pointer, size, +prot) != -1);
 #else
 		ensure(::mmap(pointer, size, +prot, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
 #endif
