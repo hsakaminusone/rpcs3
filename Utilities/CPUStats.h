@@ -19,7 +19,8 @@ namespace cpu_stats
 		atomic_t<u64> faults_all{};
 		atomic_t<u64> faults_rsx{};
 		atomic_t<u64> faults_spu{};
-		atomic_t<u64> frame_warnings{};    // frames above 48 KB
+		atomic_t<u64> mmio_sites{};        // accesses classified as the MMIO tier
+		atomic_t<u64> frame_warnings{};    // frames above 75% of the gateway slab
 		atomic_t<u64> frame_overflows{};   // frames above the gateway slab
 		atomic_t<u64> jit_compile_ns{};
 	};
@@ -37,6 +38,7 @@ namespace cpu_stats
 		g_counters.faults_all = 0;
 		g_counters.faults_rsx = 0;
 		g_counters.faults_spu = 0;
+		g_counters.mmio_sites = 0;
 		g_counters.frame_warnings = 0;
 		g_counters.frame_overflows = 0;
 		g_counters.jit_compile_ns = 0;

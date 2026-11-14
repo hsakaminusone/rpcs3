@@ -75,6 +75,18 @@ class PPUTranslator final : public cpu_translator
 	llvm::Value* nan_vec4;
 	bool m_may_be_mmio = false;
 
+	// Memory tier of one translated access (§8.1.1).
+	enum class memory_tier : u8
+	{
+		direct, // T0/T1: ordinary guest RAM, non-volatile
+		mmio,   // T2: device register, volatile helper call
+	};
+
+	// Classify the current access. Only the 32-bit heuristic below can prove T2
+	// at translation time; everything else starts as T1 and is promoted to T0
+	// by the fault path.
+	memory_tier classify_memory(u32 size);
+
 #define DEF_VALUE(loc, glb, pos)\
 	llvm::Value*& loc = m_locals[pos];\
 	llvm::Value*& glb = m_globals[pos];

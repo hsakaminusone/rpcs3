@@ -7,6 +7,8 @@
 #include "PPUThread.h"
 #include "SPUThread.h"
 
+#include "Utilities/CPUStats.h"
+
 #include "util/types.hpp"
 #include "util/endian.hpp"
 #include "util/logs.hpp"
@@ -881,28 +883,42 @@ void PPUTranslator::TestAborted()
 	m_ir->SetInsertPoint(body);
 }
 
+PPUTranslator::memory_tier PPUTranslator::classify_memory(u32 size)
+{
+	// The translator cannot prove that a dynamic address is ordinary RAM, so
+	// only the existing "this looks like a device register" heuristic decides
+	// T2 at translation time. Everything else is emitted as a bare access: T1
+	// until the fault path has seen it run fault-free, then T0.
+	if (!m_may_be_mmio || size != 32)
+	{
+		return memory_tier::direct;
+	}
+
+	struct instructions_to_test
+	{
+		be_t<u32> insts[128];
+	};
+
+	m_may_be_mmio = false;
+
+	if (auto ptr = m_info.get_ptr<instructions_to_test>(std::max<u32>(m_info.segs[0].addr, (m_reloc ? m_reloc->addr : 0) + utils::sub_saturate<u32>(::narrow<u32>(m_addr), sizeof(instructions_to_test) / 2))))
+	{
+		m_may_be_mmio = ppu_test_address_may_be_mmio(std::span(ptr->insts));
+	}
+
+	if (m_may_be_mmio)
+	{
+		cpu_stats::g_counters.mmio_sites++;
+		return memory_tier::mmio;
+	}
+
+	return memory_tier::direct;
+}
+
 Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 {
 	const u32 size = ::narrow<u32>(+type->getPrimitiveSizeInBits());
-
-	if (m_may_be_mmio && size == 32)
-	{
-		// Test for MMIO patterns
-		struct instructions_to_test
-		{
-			be_t<u32> insts[128];
-		};
-
-		m_may_be_mmio = false;
-
-		if (auto ptr = m_info.get_ptr<instructions_to_test>(std::max<u32>(m_info.segs[0].addr, (m_reloc ? m_reloc->addr : 0) + utils::sub_saturate<u32>(::narrow<u32>(m_addr), sizeof(instructions_to_test) / 2))))
-		{
-			if (ppu_test_address_may_be_mmio(std::span(ptr->insts)))
-			{
-				m_may_be_mmio = true;
-			}
-		}
-	}
+	const memory_tier tier = classify_memory(size);
 
 	if (is_be ^ m_is_be && size > 8)
 	{
@@ -911,7 +927,7 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 		// Read, byteswap, bitcast
 		const auto int_type = m_ir->getIntNTy(size);
 
-		if (m_may_be_mmio && size == 32)
+		if (tier == memory_tier::mmio)
 		{
 			FlushRegisters();
 			RegStore(Trunc(GetAddr()), m_cia);
@@ -923,15 +939,13 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 		}
 		else
 		{
-			const auto inst = m_ir->CreateAlignedLoad(int_type, GetMemory(addr), llvm::MaybeAlign{align});
-			inst->setVolatile(true);
-			value = inst;
+			value = m_ir->CreateAlignedLoad(int_type, GetMemory(addr), llvm::MaybeAlign{align});
 		}
 
 		return bitcast(Call(int_type, fmt::format("llvm.bswap.i%u", size), value), type);
 	}
 
-	if (m_may_be_mmio && size == 32)
+	if (tier == memory_tier::mmio)
 	{
 		FlushRegisters();
 		RegStore(Trunc(GetAddr()), m_cia);
@@ -942,16 +956,19 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 		return r;
 	}
 
-	// Read normally
-	const auto r = m_ir->CreateAlignedLoad(type, GetMemory(addr), llvm::MaybeAlign{align});
-	r->setVolatile(true);
-	return r;
+	// Read normally. Ordinary guest RAM is non-volatile: LLVM may merge and
+	// reorder these accesses within a block, subject to the fences emitted for
+	// guest sync/lwsync and to the opaque helpers used by atomics. The fault
+	// handler re-executes the faulting access, which is still present and has
+	// not produced a value yet.
+	return m_ir->CreateAlignedLoad(type, GetMemory(addr), llvm::MaybeAlign{align});
 }
 
 void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align)
 {
 	const auto type = value->getType();
 	const u32 size = ::narrow<u32>(+type->getPrimitiveSizeInBits());
+	const memory_tier tier = classify_memory(size);
 
 	if (is_be ^ m_is_be && size > 8)
 	{
@@ -960,31 +977,19 @@ void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align
 		value = Call(int_type, fmt::format("llvm.bswap.i%u", size), bitcast(value, int_type));
 	}
 
-	if (m_may_be_mmio && size == 32)
+	if (tier == memory_tier::mmio)
 	{
-		// Test for MMIO patterns
-		struct instructions_to_test
-		{
-			be_t<u32> insts[128];
-		};
+		FlushRegisters();
+		RegStore(Trunc(GetAddr()), m_cia);
 
-		if (auto ptr = m_info.get_ptr<instructions_to_test>(std::max<u32>(m_info.segs[0].addr, (m_reloc ? m_reloc->addr : 0) + utils::sub_saturate<u32>(::narrow<u32>(m_addr), sizeof(instructions_to_test) / 2))))
-		{
-			if (ppu_test_address_may_be_mmio(std::span(ptr->insts)))
-			{
-				FlushRegisters();
-				RegStore(Trunc(GetAddr()), m_cia);
-
-				ppu_log.notice("LLVM: Detected potential MMIO32 write at [0x%08x]", m_addr + (m_reloc ? m_reloc->addr : 0));
-				Call(GetType<void>(), "__write_maybe_mmio32", m_base, addr, value);
-				TestAborted();
-				return;
-			}
-		}
+		ppu_log.notice("LLVM: Detected potential MMIO32 write at [0x%08x]", m_addr + (m_reloc ? m_reloc->addr : 0));
+		Call(GetType<void>(), "__write_maybe_mmio32", m_base, addr, value);
+		TestAborted();
+		return;
 	}
 
-	// Write
-	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align})->setVolatile(true);
+	// Write. See ReadMemory: the direct tier is non-volatile.
+	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align});
 }
 
 void PPUTranslator::CompilationError(std::string_view error)
