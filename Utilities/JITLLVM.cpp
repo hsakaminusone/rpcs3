@@ -349,14 +349,17 @@ static u64 make_null_function(const std::string& name)
 			}
 
 			// Keep this in sync with cpu_thread::gateway_slab_size.
-			constexpr u64 slab = 64 * 1024;
+			// The gateway reserves the whole 1 MiB supported frame budget, so
+			// warn once a frame consumes most of it and fail loudly above it.
+			constexpr u64 slab = 0x100000;
+			constexpr u64 warn = slab * 3 / 4;
 
 			if (frame > slab)
 			{
 				cpu_stats::g_counters.frame_overflows++;
 				jit_log.error("LLVM: %s needs %llu bytes of GHC stack, above the %llu-byte gateway slab", name, frame, slab);
 			}
-			else if (frame >= 48 * 1024)
+			else if (frame >= warn)
 			{
 				cpu_stats::g_counters.frame_warnings++;
 				jit_log.warning("LLVM: %s needs %llu bytes of GHC stack (gateway slab is %llu bytes)", name, frame, slab);
