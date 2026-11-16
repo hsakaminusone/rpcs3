@@ -10,6 +10,7 @@
 #include "util/asm.hpp"
 #include "Crypto/unzip.h"
 #include "CPUStats.h"
+#include "fastmem.h"
 
 #include <charconv>
 #include <map>
@@ -517,6 +518,12 @@ struct MemoryManager1 final : llvm::RTDyldMemoryManager, jit_code_publisher
 
 	~MemoryManager1() override
 	{
+		// A host PC only identifies a fault site while this module's code is
+		// mapped. The reservation is kept below to stop the address space being
+		// reused, but the site records have to go: a new module at the same
+		// address would otherwise inherit the old history.
+		fastmem::invalidate_range(reinterpret_cast<uptr>(m_code_mems), reinterpret_cast<uptr>(m_code_mems) + c_max_size);
+
 		// Hack: don't release to prevent reuse of address space, see jit_announce
 		// constexpr auto how_much = [](u64 pos) { return utils::align(pos, pos < c_page_size ? c_page_size / 4 : c_page_size); };
 		// utils::memory_decommit(m_code_mems, how_much(code_ptr));

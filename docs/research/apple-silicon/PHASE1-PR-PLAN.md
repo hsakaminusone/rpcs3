@@ -14,13 +14,32 @@ before the piece is called done.
 | 9a | `jit: 4-byte AArch64 branch patch primitive` | `Utilities/jit_patch.h` | S | encoder matches the system assembler; a patched page redirects execution |
 | 9b | `cpu: record a site for every direct access` | `PPUTranslator.*`, `CPUTranslator.*` | M | recorded sites equal the static access count of a known function |
 | 9c | `cpu: emit the per-site stub island` | `PPUTranslator.cpp`, `JIT.h` | L | stub calls the helper and resumes after the access, with `x30` saved |
-| 9d | `cpu: patch a recurring site after the threshold` | `Thread.cpp`, `fastmem.*` | M | the third fault at one site does not fault |
+| 9d | `cpu: patch a recurring site after the threshold` | `Thread.cpp`, `fastmem.*` | M | blocked: needs T2 classification first (below) |
 | 9e | `cpu: recompile a patched block so LLVM sees the helper` | `PPUTranslator.cpp`, `PPUThread.cpp` | M | patched site survives invalidation; no flapping |
 
 9a is the only piece that needs no translator metadata, so it goes first. 9b has
 to land before 9c: a stub needs the access width and direction at fault time and
 those are known at translation time, not decodable safely from the patched
 instruction.
+
+### Why 9d is blocked, and on what
+
+Decoding the instruction gives the width and the direction but not two things the
+patch decision needs:
+
+1. **Whether the address is RAM or a device register.** A patched stub re-executes
+the access or calls a helper; doing that to an MMIO address bypasses the device
+emulation and reads or writes the register file directly. The instruction cannot
+tell us, and neither can the fault. T2 classification has to exist before any site
+is patched, which means the translator-side metadata of PR 8 rather than the
+decoder.
+2. **The destination register, for a load.** Replacing a load with a call loses the
+result: the helper would have to write the guest register, which is a host
+register the stub does not name. Stores avoid this, so a store-only patch is the
+smallest correct slice if 9d is pulled forward.
+
+A `stub_provider` interface with no implementation was drafted and discarded: it
+would have compiled, been tested nowhere, and looked like a working tier.
 
 ## W3 — sub-page notification map (PR 10)
 
