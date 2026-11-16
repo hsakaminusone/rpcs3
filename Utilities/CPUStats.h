@@ -3,9 +3,9 @@
 #include "util/atomic.hpp"
 #include "util/types.hpp"
 
-// Always-on counters for the native CPU runtime. They are relaxed atomics and
-// are incremented once per event, never per instruction, so they stay off the
-// hot path. The summary is printed when the last CPU thread exits.
+// Always-on counters for the native CPU runtime. They are atomic and are
+// incremented once per event, never per instruction, so they stay off the hot
+// path. The summary is printed when the last CPU thread exits.
 namespace cpu_stats
 {
 	struct counter_set
@@ -19,7 +19,10 @@ namespace cpu_stats
 		atomic_t<u64> faults_all{};
 		atomic_t<u64> faults_rsx{};
 		atomic_t<u64> faults_spu{};
-		atomic_t<u64> mmio_sites{};        // accesses classified as the MMIO tier
+		atomic_t<u64> mmio_sites{};        // accesses compiled as the MMIO tier
+		atomic_t<u64> fastmem_first{};     // first fault at a site
+		atomic_t<u64> fastmem_recurring{}; // later faults at the same site
+		atomic_t<u64> fastmem_overflow{};  // faults dropped because the site table was full
 		atomic_t<u64> frame_warnings{};    // frames above 75% of the gateway slab
 		atomic_t<u64> frame_overflows{};   // frames above the gateway slab
 		atomic_t<u64> jit_compile_ns{};
@@ -39,6 +42,9 @@ namespace cpu_stats
 		g_counters.faults_rsx = 0;
 		g_counters.faults_spu = 0;
 		g_counters.mmio_sites = 0;
+		g_counters.fastmem_first = 0;
+		g_counters.fastmem_recurring = 0;
+		g_counters.fastmem_overflow = 0;
 		g_counters.frame_warnings = 0;
 		g_counters.frame_overflows = 0;
 		g_counters.jit_compile_ns = 0;
