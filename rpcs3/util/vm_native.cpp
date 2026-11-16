@@ -349,11 +349,22 @@ namespace utils
 #if defined(__APPLE__) && defined(ARCH_ARM64)
 		// Keep the mapping. Unmapping a MAP_JIT range while another thread can
 		// still execute it is a crash, and munmap+mmap is not atomic: the
-		// address can be taken before we map it back.
+		// address is only a hint and another thread can claim it.
 		ensure(::mprotect(pointer, size, PROT_NONE) != -1);
+
+		// The generic advice below is MADV_NOCORE on macOS, which only excludes
+		// the range from core dumps and reclaims nothing. MADV_FREE_REUSABLE is
+		// the advice that returns the pages while keeping the address valid. It
+		// is best effort: a rejection costs footprint, never correctness, and
+		// this also runs over MAP_JIT ranges at teardown where aborting would be
+		// worse than keeping the pages.
+#if defined(MADV_FREE_REUSABLE)
+		::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_FREE_REUSABLE);
+#elif defined(MADV_FREE)
+		::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_FREE);
+#endif
 #else
 		ensure(::mmap(pointer, size, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE | c_map_noreserve, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
-#endif
 
 		if constexpr (c_madv_no_dump != 0)
 		{
@@ -363,6 +374,7 @@ namespace utils
 		{
 			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), c_madv_free) != -1);
 		}
+#endif
 #endif
 	}
 
@@ -379,12 +391,20 @@ namespace utils
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 #if defined(__APPLE__) && defined(ARCH_ARM64)
-		// Reuse the reservation. Never unmap a range that another thread may
-		// still reference or execute.
+		// Reuse the reservation. Never unmap a range that another thread may still
+		// reference or execute, and never hand back a mapping that still holds the
+		// previous contents: the caller expects freshly committed memory. Dropping
+		// the pages while the range is inaccessible gives both properties.
+		ensure(::mprotect(pointer, size, PROT_NONE) != -1);
+#if defined(MADV_FREE_REUSABLE)
+		::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_FREE_REUSABLE);
+#elif defined(MADV_FREE)
+		::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_FREE);
+#endif
 		ensure(::mprotect(pointer, size, +prot) != -1);
+		ensure(::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_WILLNEED) != -1);
 #else
 		ensure(::mmap(pointer, size, +prot, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
-#endif
 
 		if constexpr (c_madv_hugepage != 0)
 		{
@@ -402,6 +422,7 @@ namespace utils
 		{
 			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), MADV_WILLNEED) != -1);
 		}
+#endif
 #endif
 	}
 
