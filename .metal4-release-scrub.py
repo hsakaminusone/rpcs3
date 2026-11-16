@@ -86,6 +86,7 @@ DELETE_FILES = {
     # The tool itself: a release checkout is the input, not another dev tree.
     ".metal4-release-scrub.py",
     "rpcs3/Emu/RSX/MTL/MTLInstrumentation.h",
+    "rpcs3/Emu/RSX/Core/RSXProgramWriteWatch.h",
     "rpcs3/Emu/RSX/Common/rsx_surface_diag.h",
     # Tests whose authority is the dev inventory, not the production contract.
     "rpcs3/tests/test_rsx_metal4_dials.cpp",
@@ -113,7 +114,7 @@ DELETED_TEST_LINES = (
 FORBIDDEN = (
     ("diagnostic macro", re.compile(r"\bMTL_(?:NOTE_WITNESS|NOTE_DUMP|NOTE|WARN|ERROR|PERF_[A-Z_]+|PROBE_[A-Z_]+)\b")),
     ("diagnostic guard", re.compile(r"\bMTL_(?:DEBUG_LOGS|PERF_ENABLED|DIAGNOSTICS)\b")),
-    ("instrumentation include", re.compile(r"MTLInstrumentation\.h")),
+    ("instrumentation include", re.compile(r"(?:MTLInstrumentation|RSXProgramWriteWatch)\.h")),
     ("probe facility", re.compile(r"\b(?:mtl::)?probe::")),
     ("excise marker", re.compile(r"TODO\(excise\)")),
     ("diagnostic symbol", re.compile(r"\b(?:diagnostic_[a-z0-9_]+|m_diag_[a-z0-9_]+|diag_[a-z0-9_]+)")),
@@ -816,7 +817,7 @@ def collect_include_spans(text: str, path: str) -> list[Span]:
     spans: list[Span] = []
     lines = text.splitlines(True)
     offsets = line_offsets(text)
-    for m in re.finditer(r'(?m)^[ \t]*#\s*include\s*"MTLInstrumentation\.h"[ \t]*\n?', text):
+    for m in re.finditer(r'(?m)^[ \t]*#\s*include\s*"(?:MTLInstrumentation|RSXProgramWriteWatch)\.h"[ \t]*\n?', text):
         begin = _comment_block_start(lines, line_of(text, m.start()) - 1)
         spans.append((offsets[begin], m.end(), "include"))
     return spans
