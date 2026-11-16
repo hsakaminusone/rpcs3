@@ -61,6 +61,10 @@ LOG_CHANNEL(jit_log, "JIT");
 #include "Emu/CPU/Backends/AArch64/AArch64Common.h"
 #endif
 
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+#include "Emu/CPU/CPUThread.h"
+#endif
+
 namespace
 {
 	thread_local std::string* g_llvm_fatal_message = nullptr;
@@ -74,17 +78,18 @@ namespace
 		// handler, only this helper thread exits.
 		named_thread worker("LLVM JIT", [&]()
 		{
-#if defined(__APPLE__)
-			pthread_jit_write_protect_np(false);
-#endif
+			// Codegen writes MAP_JIT pages, so the window must be opened on this
+			// thread. It has to be a scope, not a pair of raw toggles: symbol
+			// resolution during codegen builds asmjit helpers that take their
+			// own scope, and those must nest inside this one instead of closing
+			// the write window halfway through the compile.
+			jit_write_guard write_guard;
+
 			g_llvm_fatal_message = &error;
 
 			std::forward<F>(func)();
 
 			g_llvm_fatal_message = nullptr;
-#if defined(__APPLE__)
-			pthread_jit_write_protect_np(true);
-#endif
 		});
 
 		worker();
@@ -102,11 +107,12 @@ namespace
 const bool jit_initialize = []() -> bool
 {
 #if defined(__APPLE__) && defined(ARCH_ARM64)
-	// Fail loud. Code memory is MAP_JIT and is written through the per-thread
-	// toggle; without it the first store into an executable page faults.
+	// Code memory is MAP_JIT and is written through the per-thread toggle. Without
+	// it the first store into an executable page faults, so refuse to start
+	// rather than log and fail later in a signal handler.
 	if (!pthread_jit_write_protect_supported_np())
 	{
-		jit_log.error("JIT: per-thread write protection is unavailable; MAP_JIT pages cannot be written");
+		fmt::throw_exception("JIT: per-thread write protection is unavailable; MAP_JIT pages cannot be written");
 	}
 #endif
 
@@ -200,15 +206,20 @@ static u64 make_null_function(const std::string& name)
 	// Decode the linker-visible .stack_sizes records emitted by LLVM: an
 	// 8-byte relocated code address followed by a ULEB128 frame size.
 	// MCJIT never loads non-allocated sections, so this runs on the object
-	// buffer before RuntimeDyld discards it. The gateway slab is 64 KB, so a
-	// frame above that cannot be run without a per-function thunk.
-	static void report_stack_sizes(const llvm::object::ObjectFile& obj)
+	// buffer before RuntimeDyld discards it.
+	//
+	// Returns true when a frame does not fit the gateway slab. Such a function
+	// would write past the slab into the gateway's own stack, so the caller must
+	// refuse the module and let the interpreter run it instead (§8.4.3).
+	static bool report_stack_sizes(const llvm::object::ObjectFile& obj)
 	{
+		bool overflowed = false;
+
 		using namespace llvm;
 
 		if (!isa<object::ELFObjectFileBase>(obj))
 		{
-			return;
+			return false;
 		}
 
 		std::optional<object::SectionRef> stack_sizes;
@@ -232,7 +243,7 @@ static u64 make_null_function(const std::string& name)
 
 		if (!stack_sizes)
 		{
-			return;
+			return false;
 		}
 
 		auto contents = stack_sizes->getContents();
@@ -240,7 +251,7 @@ static u64 make_null_function(const std::string& name)
 		if (!contents)
 		{
 			consumeError(contents.takeError());
-			return;
+			return false;
 		}
 
 		// Function symbols are the only way to turn the relocation addend into
@@ -348,35 +359,55 @@ static u64 make_null_function(const std::string& name)
 				continue;
 			}
 
-			// Keep this in sync with cpu_thread::gateway_slab_size.
-			// The gateway reserves the whole 1 MiB supported frame budget, so
-			// warn once a frame consumes most of it and fail loudly above it.
-			constexpr u64 slab = 0x100000;
-			constexpr u64 warn = slab * 3 / 4;
+			// The gateway reserves the whole supported frame budget in one
+			// `sub sp`, so a frame at or below cpu_thread::max_frame_size cannot
+			// overflow it. Anything above that is a decode or codegen bug and is
+			// rejected by the caller rather than run with a corrupted host stack.
+			const u64 slab = cpu_thread::gateway_slab_size;
 
-			if (frame > slab)
+			if (frame > cpu_thread::max_frame_size)
 			{
 				cpu_stats::g_counters.frame_overflows++;
 				jit_log.error("LLVM: %s needs %llu bytes of GHC stack, above the %llu-byte gateway slab", name, frame, slab);
+				overflowed = true;
 			}
-			else if (frame >= warn)
+			else if (frame >= slab * 3 / 4)
 			{
 				cpu_stats::g_counters.frame_warnings++;
 				jit_log.warning("LLVM: %s needs %llu bytes of GHC stack (gateway slab is %llu bytes)", name, frame, slab);
 			}
 		}
+
+		return overflowed;
 	}
 #endif
 
 struct JITAnnouncer : llvm::JITEventListener
 {
+	jit_compiler& m_owner;
+	const bool m_announce_symbols;
+
+	explicit JITAnnouncer(jit_compiler& owner, bool announce_symbols = true) noexcept
+		: m_owner(owner)
+		, m_announce_symbols(announce_symbols)
+	{
+	}
+
 	void notifyObjectLoaded(u64, const llvm::object::ObjectFile& obj, const llvm::RuntimeDyld::LoadedObjectInfo& info) override
 	{
 		using namespace llvm;
 
 #if defined(ARCH_ARM64) && defined(__APPLE__)
-		report_stack_sizes(obj);
+		if (report_stack_sizes(obj))
+		{
+			m_owner.note_frame_overflow();
+		}
 #endif
+
+		if (!m_announce_symbols)
+		{
+			return;
+		}
 
 		object::OwningBinary<object::ObjectFile> debug_obj_ = info.getObjectForDebug(obj);
 		if (!debug_obj_.getBinary())
@@ -408,8 +439,44 @@ struct JITAnnouncer : llvm::JITEventListener
 	}
 };
 
+namespace
+{
+	// Code written since the last publish point, kept so the flush covers exactly
+	// the object that was just loaded instead of the whole arena.
+	struct code_flush_range
+	{
+		u8* begin = nullptr;
+		u8* end = nullptr;
+
+		void note(u8* p, uptr size) noexcept
+		{
+			if (!p)
+			{
+				return;
+			}
+
+			if (!begin)
+			{
+				begin = p;
+			}
+
+			end = p + size;
+		}
+
+		void flush() noexcept
+		{
+			if (begin)
+			{
+				jit_flush_icache(begin, static_cast<usz>(end - begin));
+				begin = nullptr;
+				end = nullptr;
+			}
+		}
+	};
+}
+
 // Simple memory manager
-struct MemoryManager1 : llvm::RTDyldMemoryManager
+struct MemoryManager1 final : llvm::RTDyldMemoryManager, jit_code_publisher
 {
 	// 256 MiB for code or data
 	static constexpr u64 c_max_size = 0x1000'0000;
@@ -425,6 +492,9 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 	u64 code_ptr = 0;
 	u64 data_ro_ptr = 0;
 	u64 data_rw_ptr = 0;
+
+	// Code written since the last publish point, needed by the icache flush.
+	code_flush_range m_flush;
 
 	// First fallback for non-existing symbols
 	// May be a memory container internally
@@ -538,7 +608,9 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 
 	u8* allocateCodeSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/) override
 	{
-		return allocate(code_ptr, m_code_mems, size, align, utils::protection::wx);
+		u8* const p = allocate(code_ptr, m_code_mems, size, align, utils::protection::wx);
+		m_flush.note(p, size);
+		return p;
 	}
 
 	u8* allocateDataSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/, bool is_ro) override
@@ -552,8 +624,16 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 		return allocate(data_rw_ptr, m_data_rw_mems, size, align, utils::protection::rw);
 	}
 
+	void publish_code() noexcept override
+	{
+		m_flush.flush();
+	}
+
 	bool finalizeMemory(std::string* = nullptr) override
 	{
+		// RuntimeDyld has written this object's code and applied its relocations,
+		// so sections may execute after this call. See also publish_code().
+		m_flush.flush();
 		return false;
 	}
 
@@ -567,11 +647,14 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 };
 
 // Simple memory manager
-struct MemoryManager2 : llvm::RTDyldMemoryManager
+struct MemoryManager2 final : llvm::RTDyldMemoryManager, jit_code_publisher
 {
 	// First fallback for non-existing symbols
 	// May be a memory container internally
 	std::function<u64(const std::string&)> m_symbols_cement;
+
+	// Code written since the last publish point, needed by the icache flush.
+	code_flush_range m_flush;
 
 	MemoryManager2(std::function<u64(const std::string&)> symbols_cement = {}) noexcept
 		: m_symbols_cement(std::move(symbols_cement))
@@ -606,7 +689,9 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 
 	u8* allocateCodeSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/) override
 	{
-		return jit_runtime::alloc(size, align, true);
+		u8* const p = jit_runtime::alloc(size, align, true);
+		m_flush.note(p, size);
+		return p;
 	}
 
 	u8* allocateDataSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/, bool /*is_ro*/) override
@@ -614,8 +699,15 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 		return jit_runtime::alloc(size, align, false);
 	}
 
+	void publish_code() noexcept override
+	{
+		m_flush.flush();
+	}
+
 	bool finalizeMemory(std::string* = nullptr) override
 	{
+		// See MemoryManager1::finalizeMemory.
+		m_flush.flush();
 		return false;
 	}
 
@@ -936,6 +1028,9 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 		mem = std::make_unique<MemoryManager1>(std::move(symbols_cement));
 	}
 
+	// Both managers implement it; the engine owns the object for its lifetime.
+	m_code_publisher = dynamic_cast<jit_code_publisher*>(mem.get());
+
 	std::vector<std::string> attributes;
 
 #if defined(ARCH_ARM64)
@@ -1006,8 +1101,12 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 	if (!_link.empty() || !(flags & 0x1))
 	{
 		m_engine->RegisterJITEventListener(llvm::JITEventListener::createIntelJITEventListener());
-		m_engine->RegisterJITEventListener(new JITAnnouncer);
 	}
+
+	// Registered for every instance, including the object-only compiler: the
+	// frame report has to run on a cold compile, not only when the object is
+	// loaded again from the cache. Symbol announcement stays with real engines.
+	m_engine->RegisterJITEventListener(new JITAnnouncer(*this, !_link.empty() || !(flags & 0x1)));
 
 	if (!m_engine)
 	{
@@ -1036,6 +1135,27 @@ jit_compiler& jit_compiler::operator=(thread_state s) noexcept
 
 jit_compiler::~jit_compiler() noexcept
 {
+}
+
+namespace
+{
+	// A decoded frame above the gateway budget cannot be run: the gateway reserves
+	// that budget with one `sub sp` and GHC code writes at positive offsets from
+	// it. Refuse the module so the caller falls back to the interpreter (§8.4.3).
+	bool reject_on_frame_overflow(jit_compiler& jit, u64 before, const std::string& path) noexcept
+	{
+		if (jit.frame_overflows() == before)
+		{
+			return false;
+		}
+
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+		jit_log.error("LLVM: Refusing %s: a function frame exceeds the %llu-byte gateway slab", path, cpu_thread::gateway_slab_size);
+#else
+		jit_log.error("LLVM: Refusing %s: a function frame exceeds the gateway slab", path);
+#endif
+		return true;
+	}
 }
 
 void jit_compiler::add(std::unique_ptr<llvm::Module> _module, const std::string& path)
@@ -1067,6 +1187,8 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 	const auto ptr = _module.get();
 	m_engine->addModule(std::move(_module));
 
+	const u64 frame_overflows_before = frame_overflows();
+
 	if (!run_recoverable_llvm([&]()
 	{
 		m_engine->generateCodeForModule(ptr);
@@ -1077,6 +1199,11 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 	}
 
 	m_engine->setObjectCache(nullptr);
+
+	if (reject_on_frame_overflow(*this, frame_overflows_before, path))
+	{
+		return false;
+	}
 
 	for (auto& func : ptr->functions())
 	{
@@ -1111,12 +1238,19 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, std::string& e
 	const auto ptr = _module.get();
 	m_engine->addModule(std::move(_module));
 
+	const u64 frame_overflows_before = frame_overflows();
+
 	if (!run_recoverable_llvm([&]()
 	{
 		m_engine->generateCodeForModule(ptr);
 	}, error))
 	{
 		cpu_stats::g_counters.compile_failures++;
+		return false;
+	}
+
+	if (reject_on_frame_overflow(*this, frame_overflows_before, "module"))
+	{
 		return false;
 	}
 
@@ -1154,7 +1288,22 @@ bool jit_compiler::add(std::unique_ptr<llvm::MemoryBuffer> object, const std::st
 
 	if (auto object_file = llvm::object::ObjectFile::createObjectFile(*object))
 	{
+		const u64 frame_overflows_before = frame_overflows();
 		m_engine->addObjectFile(llvm::object::OwningBinary<llvm::object::ObjectFile>(std::move(*object_file), std::move(object)));
+
+		if (reject_on_frame_overflow(*this, frame_overflows_before, path))
+		{
+			return false;
+		}
+
+		if (m_code_publisher)
+		{
+			// addObjectFile has applied the relocations but RuntimeDyld does not
+			// call finalizeMemory for it, so publish the bytes explicitly before
+			// anything can branch into them.
+			m_code_publisher->publish_code();
+		}
+
 		jit_log.trace("ObjectCache: Successfully added %s", path);
 		return true;
 	}

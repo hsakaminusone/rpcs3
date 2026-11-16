@@ -315,11 +315,23 @@ void jit_runtime::initialize()
 	std::memcpy(s_data_init.data(), alloc(0, 0, false), s_data_init.size());
 }
 
+[[noreturn]] void jit_gateway_context_lost()
+{
+	// The gateway could not recover the cpu_thread pointer on the way out of
+	// compiled code. Restoring the host stack needs that pointer, so stop here
+	// with a reason instead of loading from a null base.
+	jit_log.fatal("JIT: gateway lost the cpu_thread pointer; the host stack cannot be restored");
+	logs::listener::sync_all();
+	std::abort();
+}
+
 void jit_runtime::finalize() noexcept
 {
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(false);
-#endif
+	// The reservation is reset and refilled from the snapshot under one write
+	// window. Publishing the restored code before the guard closes the window
+	// keeps the icache coherent with what will execute.
+	jit_write_guard write_guard;
+
 	// Reset JIT memory
 #ifdef CAN_OVERCOMMIT
 	utils::memory_reset(get_jit_memory(), 0x80000000, true);
@@ -332,17 +344,11 @@ void jit_runtime::finalize() noexcept
 	s_data_pos = 0;
 
 	// Restore code/data snapshot
-	std::memcpy(alloc(s_code_init.size(), 1, true), s_code_init.data(), s_code_init.size());
+	u8* const code = alloc(s_code_init.size(), 1, true);
+	std::memcpy(code, s_code_init.data(), s_code_init.size());
 	std::memcpy(alloc(s_data_init.size(), 1, false), s_data_init.data(), s_data_init.size());
 
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(true);
-#endif
-#ifdef ARCH_ARM64
-	// Flush all cache lines after potentially writing executable code
-	asm("ISB");
-	asm("DSB ISH");
-#endif
+	jit_flush_icache(code, s_code_init.size());
 }
 
 jit_runtime_base& asmjit::get_global_runtime()

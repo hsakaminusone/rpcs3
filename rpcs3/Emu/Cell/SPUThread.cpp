@@ -1475,9 +1475,10 @@ extern thread_local std::string(*g_tls_log_prefix)();
 
 void spu_thread::cpu_task()
 {
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(true);
-#endif
+	// Enter execute mode for this guest task. A task must not inherit a write
+	// window left open by whatever ran on this host thread before.
+	jit_write_guard::enable_execute();
+
 	start_time = 0;
 
 	// Get next PC and SPU Interrupt status

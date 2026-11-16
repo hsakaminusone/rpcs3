@@ -60,6 +60,35 @@ void jit_announce(auto* func, usz size, std::string_view name)
 	jit_announce(uptr(func), size, name);
 }
 
+// Last resort for the gateway epilogue: the per-thread cpu_thread pointer was
+// lost before it could be restored. The process cannot continue safely, so
+// report the exact reason instead of faulting on the bogus register loads.
+[[noreturn]] void jit_gateway_context_lost();
+
+// Publish instruction bytes written into an executable mapping. AArch64 does
+// not keep instruction fetch coherent with data writes, so every path that
+// generates or patches code must flush before the code can run.
+inline void jit_flush_icache(const void* ptr, usz size) noexcept
+{
+#if defined(ARCH_ARM64)
+	auto begin = reinterpret_cast<char*>(const_cast<void*>(ptr));
+	__builtin___clear_cache(begin, begin + size);
+#else
+	static_cast<void>(ptr);
+	static_cast<void>(size);
+#endif
+}
+
+// Publishes code that RuntimeDyld has written. It calls finalizeMemory for a
+// module compiled in-process, but not for an object added with addObjectFile,
+// which is how a cached module is loaded, so the compiler asks for an explicit
+// publish after such a load.
+struct jit_code_publisher
+{
+	virtual ~jit_code_publisher() = default;
+	virtual void publish_code() noexcept = 0;
+};
+
 enum class jit_class
 {
 	ppu_code,
@@ -227,6 +256,15 @@ namespace asmjit
 	{
 		c.mov(a64::x0, Imm(get_current));
 		c.blr(a64::x0);
+
+		// The lookup reads thread-local state and cannot fail inside a gateway
+		// call, but if it ever does, the loads below would read from a bogus base
+		// and fault with no diagnostic. Fail with the reason instead.
+		Label context_ok = c.newLabel();
+		c.cbnz(a64::x0, context_ok);
+		c.mov(a64::x0, Imm(reinterpret_cast<u64>(&jit_gateway_context_lost)));
+		c.blr(a64::x0);
+		c.bind(context_ok);
 
 		// x19 = current cpu_thread (same address as ppu_thread/spu_thread).
 		c.mov(a64::x19, a64::x0);
@@ -463,9 +501,14 @@ namespace asmjit
 #endif
 }
 
-#ifdef __APPLE__
+// The only place that may toggle the per-thread W^X state. Every code writer
+// takes a scope; the counter keeps an inner scope from closing a window an
+// outer scope still owns. The two out-of-band transitions (start of a guest
+// task, recovery from a fault inside a signal handler) go through the static
+// helpers so a raw toggle cannot corrupt the counter invariant.
 struct jit_write_guard
 {
+#ifdef __APPLE__
 	// Nesting counts so an inner scope does not re-enable write protection
 	// while an outer scope is still patching code.
 	static inline thread_local u32 depth = 0;
@@ -491,10 +534,32 @@ struct jit_write_guard
 			pthread_jit_write_protect_np(true);
 		}
 	}
-};
+
+	// Enter execute mode for a guest task. A task must never inherit a write
+	// window from whatever ran on this thread before, and no scope belonging to
+	// a previous task can still be live, so the counter starts over.
+	static void enable_execute() noexcept
+	{
+		depth = 0;
+		pthread_jit_write_protect_np(true);
+	}
+
+	// Re-open the window from a signal handler after a W^X fault so the faulting
+	// store can be retried. The counter is deliberately not touched: an enclosing
+	// scope, if any, still owns the transition back to execute mode and runs after
+	// the retried instruction has completed.
+	static void recover(bool is_executing) noexcept
+	{
+		pthread_jit_write_protect_np(is_executing);
+	}
 #else
-#define jit_write_guard [[maybe_unused]] int
+	// No per-thread toggle outside Apple; the type still marks a scope.
+	jit_write_guard() noexcept {}
+	~jit_write_guard() noexcept {}
+	static void enable_execute() noexcept {}
+	static void recover(bool) noexcept {}
 #endif
+};
 
 // Build runtime function with asmjit::X86Assembler
 template <typename FT, typename Asm = native_asm, typename F>
@@ -586,6 +651,15 @@ class jit_compiler final
 	// Disk Space left
 	atomic_t<usz> m_disk_space = umax;
 
+	// Set by the object listener when a decoded function frame does not fit the
+	// gateway slab. Code from such a module must not run: under the GHC calling
+	// convention its frame would be written past the slab, into the gateway's
+	// own stack frame.
+	atomic_t<u64> m_frame_overflows{};
+
+	// Non-owning; both memory managers implement it. Set in the constructor.
+	jit_code_publisher* m_code_publisher = nullptr;
+
 public:
 	jit_compiler(const std::unordered_map<std::string, u64>& _link, std::string_view _cpu, u32 flags = 0, std::function<u64(const std::string&)> symbols_cement = {}) noexcept;
 	jit_compiler& operator=(thread_state) noexcept;
@@ -643,6 +717,18 @@ public:
 	static std::string triple2();
 
 	bool add_sub_disk_space(ssz space);
+
+	// Called from the object listener when .stack_sizes reports a frame above the
+	// gateway budget. See m_frame_overflows.
+	void note_frame_overflow() noexcept
+	{
+		m_frame_overflows++;
+	}
+
+	u64 frame_overflows() const noexcept
+	{
+		return m_frame_overflows;
+	}
 };
 
 const char *fallback_cpu_detection();

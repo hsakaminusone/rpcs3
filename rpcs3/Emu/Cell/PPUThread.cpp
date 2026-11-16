@@ -2760,10 +2760,9 @@ void ppu_thread::cpu_wait(bs_t<cpu_flag> old)
 
 void ppu_thread::exec_task()
 {
-#ifdef __APPLE__
-	// Ensure correct state before executing JIT code
-	pthread_jit_write_protect_np(true);
-#endif
+	// Enter execute mode for this guest task. A task must not inherit a write
+	// window left open by whatever ran on this host thread before.
+	jit_write_guard::enable_execute();
 
 	if (g_cfg.core.ppu_decoder != ppu_decoder_type::_static)
 	{

@@ -10,6 +10,7 @@
 #include "Thread.h"
 #include "Utilities/JIT.h"
 #include "Utilities/CPUStats.h"
+#include "Utilities/fastmem.h"
 #include <cfenv>
 
 #ifdef ARCH_ARM64
@@ -1612,6 +1613,19 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 		}
 	}
 
+#if defined(ARCH_ARM64)
+	if (!is_exec)
+	{
+		// Record the faulting host PC before the generic decoder resolves it.
+		// This is the site table the memory tiers are built on (§8.1.2); at this
+		// stage it only observes, because every data access is still a plain
+		// access that the handler can retry. It sees every ARM64 data fault, so
+		// it is a superset of the fastmem sites: RSX, mmapper and MMIO faults are
+		// counted too until the tiers are wired up.
+		fastmem::note_fault(uptr(RIP(context)), addr, is_writing);
+	}
+#endif
+
 #if defined(ARCH_X64)
 	const u8* const code = reinterpret_cast<u8*>(RIP(context));
 
@@ -2717,7 +2731,11 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 		{
 			s_tls_last_cause_is_executing = is_executing;
 			s_tls_is_attempting_recovery = true;
-			pthread_jit_write_protect_np(is_executing ? true : false);
+
+			// Out-of-band W^X transition: the handler returns and the faulting
+			// instruction is retried, so this cannot be a scoped guard. Going
+			// through the helper keeps the nesting counter consistent.
+			jit_write_guard::recover(is_executing);
 
 			sys_log.error("\n%s", msg);
 			sys_log.notice("\n%s", dump_useful_thread_info());
