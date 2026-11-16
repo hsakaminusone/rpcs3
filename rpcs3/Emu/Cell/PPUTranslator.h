@@ -78,9 +78,16 @@ class PPUTranslator final : public cpu_translator
 	// Memory tier of one translated access (§8.1.1).
 	enum class memory_tier : u8
 	{
-		direct, // T0/T1: ordinary guest RAM, non-volatile
+		direct, // T1: ordinary guest RAM, guarded by the fault handler
 		mmio,   // T2: device register, volatile helper call
 	};
+
+	// Direct-tier accesses are emitted non-volatile only when the fault-site
+	// contract exists: the handler has to attribute a fault to one access and
+	// re-execute it, which needs the per-site metadata of PR 8/9. Until that
+	// lands they stay volatile, which is the pre-tier behaviour and correct on
+	// every host. See g_cfg.core.ppu_nonvolatile_memory.
+	bool m_direct_nonvolatile = false;
 
 	// Classify the current access. Only the 32-bit heuristic below can prove T2
 	// at translation time; everything else starts as T1 and is promoted to T0

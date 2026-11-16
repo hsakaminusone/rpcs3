@@ -74,6 +74,11 @@ struct cfg_root : cfg::node
 		cfg::_bool ppu_set_vnan{ this, "PPU Accurate Vector NaN Values", false }; // Accuracy. Implies ppu_fix_vnan.
 		cfg::_bool ppu_set_fpcc{ this, "PPU Set FPCC Bits", false }; // Accuracy.
 		cfg::_bool ppu_set_vest{ this, "PPU Accurate Vector Estimates", false }; // Accuracy. Hardware exact vrefp and vrsqrtefp.
+		// Emit ordinary PPU memory accesses without volatile. Only correct once the
+		// fault-site table can attribute a fault to one access (design §8.1.2, PR
+		// 8/9); until then a merged or hoisted load cannot be re-executed and the
+		// handler may resume with a stale value. Diagnostic flag, not a tuning knob.
+		cfg::_bool ppu_nonvolatile_memory{ this, "PPU Non-Volatile Memory Access", false, true };
 
 		cfg::_bool debug_console_mode{ this, "Debug Console Mode", false }; // Debug console emulation, not recommended
 		cfg::_bool hook_functions{ this, "Hook static functions" };

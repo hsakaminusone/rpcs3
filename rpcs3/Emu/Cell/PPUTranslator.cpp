@@ -38,6 +38,11 @@ PPUTranslator::PPUTranslator(LLVMContext& context, Module* _module, const ppu_mo
 	// Bind context
 	cpu_translator::initialize(context, engine);
 
+	// Off by default: a non-volatile access can be merged or hoisted by LLVM, so
+	// a fault no longer identifies one re-executable instruction. Enabling this
+	// before the site table exists is a correctness bug, not a tuning knob.
+	m_direct_nonvolatile = g_cfg.core.ppu_nonvolatile_memory.get();
+
 	// Initialize transform passes
 	clear_transforms();
 
@@ -887,8 +892,8 @@ PPUTranslator::memory_tier PPUTranslator::classify_memory(u32 size)
 {
 	// The translator cannot prove that a dynamic address is ordinary RAM, so
 	// only the existing "this looks like a device register" heuristic decides
-	// T2 at translation time. Everything else is emitted as a bare access: T1
-	// until the fault path has seen it run fault-free, then T0.
+	// T2 at translation time. Everything else is a bare access: T1, guarded by
+	// the fault handler, promoted to T0 only once the site table exists.
 	if (!m_may_be_mmio || size != 32)
 	{
 		return memory_tier::direct;
@@ -939,7 +944,9 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 		}
 		else
 		{
-			value = m_ir->CreateAlignedLoad(int_type, GetMemory(addr), llvm::MaybeAlign{align});
+			const auto inst = m_ir->CreateAlignedLoad(int_type, GetMemory(addr), llvm::MaybeAlign{align});
+			inst->setVolatile(!m_direct_nonvolatile);
+			value = inst;
 		}
 
 		return bitcast(Call(int_type, fmt::format("llvm.bswap.i%u", size), value), type);
@@ -956,12 +963,15 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 		return r;
 	}
 
-	// Read normally. Ordinary guest RAM is non-volatile: LLVM may merge and
-	// reorder these accesses within a block, subject to the fences emitted for
-	// guest sync/lwsync and to the opaque helpers used by atomics. The fault
-	// handler re-executes the faulting access, which is still present and has
-	// not produced a value yet.
-	return m_ir->CreateAlignedLoad(type, GetMemory(addr), llvm::MaybeAlign{align});
+	// Read normally. Non-volatile only when the fault-site contract is in place:
+	// LLVM may then merge and reorder these accesses within a block (guest
+	// fences and the opaque atomic helpers still order them), and the handler
+	// re-executes the single access the site record points at. Without the site
+	// record the access stays volatile so a fault always identifies the
+	// instruction that caused it.
+	const auto inst = m_ir->CreateAlignedLoad(type, GetMemory(addr), llvm::MaybeAlign{align});
+	inst->setVolatile(!m_direct_nonvolatile);
+	return inst;
 }
 
 void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align)
@@ -988,8 +998,8 @@ void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align
 		return;
 	}
 
-	// Write. See ReadMemory: the direct tier is non-volatile.
-	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align});
+	// Write. See ReadMemory: non-volatile only with the fault-site contract.
+	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align})->setVolatile(!m_direct_nonvolatile);
 }
 
 void PPUTranslator::CompilationError(std::string_view error)
