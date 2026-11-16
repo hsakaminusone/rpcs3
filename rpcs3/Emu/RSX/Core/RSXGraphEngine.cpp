@@ -3,7 +3,9 @@
 
 #include "Emu/RSX/Common/surface_store.h"
 #include "Emu/RSX/Common/TextureUtils.h"
+// EXCISE-BEGIN fp-literal-write-watch-include
 #include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-literal-write-watch-include
 #include "Emu/RSX/Program/ProgramStateCache.h"
 #include "Emu/RSX/Program/RSXFragmentProgram.h"
 #include "Emu/RSX/Program/RSXVertexProgram.h"

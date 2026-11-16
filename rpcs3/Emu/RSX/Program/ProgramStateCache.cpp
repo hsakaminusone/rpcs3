@@ -4,7 +4,9 @@
 #include "Emu/system_config.h"
 #include "Emu/RSX/Core/RSXDriverState.h"
 #include "Emu/RSX/RSXThread.h"
+// EXCISE-BEGIN fp-literal-write-watch-include
 #include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-literal-write-watch-include
 #include "util/sysinfo.hpp"
 
 #include <bit>

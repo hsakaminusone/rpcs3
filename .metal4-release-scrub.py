@@ -817,7 +817,7 @@ def collect_include_spans(text: str, path: str) -> list[Span]:
     spans: list[Span] = []
     lines = text.splitlines(True)
     offsets = line_offsets(text)
-    for m in re.finditer(r'(?m)^[ \t]*#\s*include\s*"(?:MTLInstrumentation|RSXProgramWriteWatch)\.h"[ \t]*\n?', text):
+    for m in re.finditer(r'(?m)^[ \t]*#\s*include\s*"MTLInstrumentation\.h"[ \t]*\n?', text):
         begin = _comment_block_start(lines, line_of(text, m.start()) - 1)
         spans.append((offsets[begin], m.end(), "include"))
     return spans

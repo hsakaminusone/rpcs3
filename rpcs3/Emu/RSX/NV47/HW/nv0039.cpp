@@ -3,7 +3,9 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+// EXCISE-BEGIN fp-literal-write-watch-include
 #include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-literal-write-watch-include
 #include "Emu/RSX/Host/MM.h"
 
 #include "Utilities/deferred_op.hpp"
