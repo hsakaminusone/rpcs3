@@ -34,7 +34,7 @@ namespace utils
 namespace
 {
 
-#if !defined(__APPLE__) || !defined(ARCH_X64)
+#if !defined(__APPLE__)
 u16 convert_rgb655_to_rgb565(const u16 bits)
 {
 	// g6 = g5
@@ -935,6 +935,25 @@ namespace rsx
 			break;
 		}
 
+		case CELL_GCM_TEXTURE_R6G5B5:
+		{
+			// The guest stores six bits of red, which no packed Metal host holds.
+			// Apple expands the upload to BGRA8 with the existing converter, the same
+			// expansion the Intel build takes; other targets keep the raw packed path.
+#if defined(__APPLE__)
+			if (is_swizzled)
+				convert_16_block_32_swizzled::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u32>(w, caps.alignment), &convert_rgb655_to_bgra8);
+			else
+				convert_16_block_32::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u32>(w, caps.alignment), src_layout.pitch_in_block, &convert_rgb655_to_bgra8);
+#else
+			if (is_swizzled)
+				copy_rgb655_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u16>(w, caps.alignment));
+			else
+				copy_rgb655_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u16>(w, caps.alignment), src_layout.pitch_in_block);
+#endif
+			break;
+		}
+
 		case CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
 		{
 			copy_decoded_rb_rg_block::copy_mipmap_level<true>(dst_buffer.as_span<u32>(), src_layout.data.as_span<const u32>(), w, h, depth, get_row_pitch_in_block<u32>(src_layout.width_in_texel, caps.alignment), src_layout.pitch_in_block);
@@ -948,15 +967,7 @@ namespace rsx
 		}
 
 #if !defined(__APPLE__) || !defined(ARCH_X64)
-		case CELL_GCM_TEXTURE_R6G5B5:
-		{
-			if (is_swizzled)
-				copy_rgb655_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u16>(w, caps.alignment));
-			else
-				copy_rgb655_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u16>(w, caps.alignment), src_layout.pitch_in_block);
-			break;
-		}
-
+		// (R6G5B5 is handled above: Apple expands it like Intel, other targets copy raw.)
 		case CELL_GCM_TEXTURE_D1R5G5B5:
 		case CELL_GCM_TEXTURE_A1R5G5B5:
 		case CELL_GCM_TEXTURE_A4R4G4B4:
@@ -964,14 +975,6 @@ namespace rsx
 		case CELL_GCM_TEXTURE_R5G6B5:
 #else
 		// convert the following formats to B8G8R8A8_UNORM, because they are not supported by Metal
-		case CELL_GCM_TEXTURE_R6G5B5:
-		{
-			if (is_swizzled)
-				convert_16_block_32_swizzled::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u32>(w, caps.alignment), &convert_rgb655_to_bgra8);
-			else
-				convert_16_block_32::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u16>>(), w, h, depth, src_layout.border, get_row_pitch_in_block<u32>(w, caps.alignment), src_layout.pitch_in_block, &convert_rgb655_to_bgra8);
-			break;
-		}
 		case CELL_GCM_TEXTURE_D1R5G5B5:
 		{
 			if (is_swizzled)

@@ -205,6 +205,35 @@ if(USE_VULKAN)
 	endif()
 endif()
 
+# Metal 4 (docs/research/metal4/06 §3, §5: Apple silicon + macOS 26 at runtime,
+# deployment target stays 15.0, x86_64 excluded)
+set(METAL_TARGET 3rdparty_dummy_lib)
+if(USE_METAL4)
+	if(NOT APPLE)
+		message(STATUS "RPCS3: USE_METAL4 ignored on non-Apple platforms.")
+	elseif(CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+		message(STATUS "RPCS3: USE_METAL4 skipped for the non-arm64 slice (Metal 4 does not run on Intel GPUs).")
+	else()
+		add_library(3rdparty_metal_impl STATIC metal-cpp/metal.cpp)
+		# SYSTEM: metal-cpp is third-party.  Its headers use old-style casts and
+		# other constructs that RPCS3 compiles with -Werror (as with the other
+		# vendored dependencies, which are all -isystem).
+		target_include_directories(3rdparty_metal_impl SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal-cpp)
+
+		add_library(3rdparty_metal INTERFACE)
+		target_compile_definitions(3rdparty_metal INTERFACE -DHAVE_METAL)
+		target_link_libraries(3rdparty_metal INTERFACE 3rdparty_metal_impl
+			"-framework Metal" "-framework QuartzCore" "-framework CoreFoundation" "-framework Foundation")
+		set(METAL_TARGET 3rdparty_metal)
+	endif()
+endif()
+
+# SPIRV-Cross (docs/research/metal4/design/HLD-05 §2.3 route A: the shared
+# frontend already emits SPIR-V, and Metal needs MSL).  Plain files, on the
+# model 06 used for metal-cpp.  Metal only, and it reuses the Metal block's
+# platform decision.
+include(${CMAKE_CURRENT_SOURCE_DIR}/spirv-cross/rpcs3.cmake)
+
 # AsmJit
 add_subdirectory(asmjit EXCLUDE_FROM_ALL)
 
@@ -350,6 +379,8 @@ add_library(3rdparty::discordRPC ALIAS 3rdparty_discordRPC)
 add_library(3rdparty::faudio ALIAS ${FAUDIO_TARGET})
 add_library(3rdparty::libevdev ALIAS ${LIBEVDEV_TARGET})
 add_library(3rdparty::vulkan ALIAS ${VULKAN_TARGET})
+add_library(3rdparty::metal ALIAS ${METAL_TARGET})
+add_library(3rdparty::spirv_cross ALIAS ${SPIRV_CROSS_TARGET})
 add_library(3rdparty::openal ALIAS 3rdparty_openal)
 add_library(3rdparty::ffmpeg ALIAS 3rdparty_ffmpeg)
 add_library(3rdparty::glew ALIAS 3rdparty_glew)

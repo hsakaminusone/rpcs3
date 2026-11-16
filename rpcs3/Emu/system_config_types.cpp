@@ -27,6 +27,7 @@ void fmt_class_string<video_renderer>::format(std::string& out, u64 arg)
 		case video_renderer::null: return "Null";
 		case video_renderer::opengl: return "OpenGL";
 		case video_renderer::vulkan: return "Vulkan";
+		case video_renderer::metal: return "Metal";
 		}
 
 		return unknown;
@@ -626,6 +627,22 @@ void fmt_class_string<vk_gpu_scheduler_mode>::format(std::string& out, u64 arg)
 		{
 		case vk_gpu_scheduler_mode::safe: return "Safe";
 		case vk_gpu_scheduler_mode::fast: return "Fast";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vulkan_apple_driver>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vulkan_apple_driver value)
+	{
+		switch (value)
+		{
+		case vulkan_apple_driver::auto_: return "Auto";
+		case vulkan_apple_driver::moltenvk: return "MoltenVK";
+		case vulkan_apple_driver::kosmickrisp: return "KosmicKrisp";
 		}
 
 		return unknown;

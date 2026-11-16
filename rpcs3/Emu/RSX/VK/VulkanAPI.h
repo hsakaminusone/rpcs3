@@ -40,7 +40,7 @@
 constexpr VkDriverId VK_DRIVER_ID_MESA_HONEYKRISP = static_cast<VkDriverId>(26);
 #endif
 
-#if VK_HEADER_VERSION < 287
+#if VK_HEADER_VERSION < 330
 constexpr VkDriverId VK_DRIVER_ID_MESA_KOSMICKRISP = static_cast<VkDriverId>(28);
 #endif
 

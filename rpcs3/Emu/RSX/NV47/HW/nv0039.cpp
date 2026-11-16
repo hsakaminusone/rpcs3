@@ -101,7 +101,7 @@ namespace rsx
 			const auto read_length = in_pitch * (line_count - 1) + in_width_in_bytes;
 			const auto write_length = out_pitch * (line_count - 1) + out_width_in_bytes;
 
-			RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, write_length);
+			RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, write_length, "nv0039");
 
 			if (const auto result = RSX(ctx)->read_barrier(read_address, read_length, !is_block_transfer);
 				result == rsx::result_zcull_intr)
@@ -125,6 +125,7 @@ namespace rsx
 
 			u8* dst = vm::_ptr<u8>(write_address);
 			const u8* src = vm::_ptr<u8>(read_address);
+
 
 			const rsx::simple_array<utils::address_range64> flush_mm_ranges =
 			{

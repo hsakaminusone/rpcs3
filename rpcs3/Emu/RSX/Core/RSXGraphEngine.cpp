@@ -1007,6 +1007,7 @@ namespace rsx
 		m_ctx->program.fragment_program.texture_state.import(m_ctx->program.fp_texture_state, m_ctx->program.fp_metadata.referenced_textures_mask);
 		m_ctx->program.fragment_program.valid = true;
 
+
 		// Verify current texture state is valid
 		if (m_ctx->textures.fragment_textures_dirty & m_ctx->program.fp_metadata.referenced_textures_mask)
 		{
@@ -1020,6 +1021,7 @@ namespace rsx
 			// The texture parameters transfer routine is optimized and only writes data for textures consumed by the ucode.
 			m_ctx->graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
 		}
+
 	}
 
 	void graph_engine::prefetch_vertex_program()
@@ -1179,6 +1181,14 @@ namespace rsx
 		if (REGS(m_ctx)->alpha_test_enabled())
 		{
 			m_ctx->program.fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TEST;
+		}
+
+		if (REGS(m_ctx)->logic_op_enabled() && !RSX(m_ctx)->get_backend_config().supports_native_logic_op)
+		{
+			// The host has no logic-op state, so the ROP reads the destination colour
+			// and applies the op in the shader (REVIEW-FINDINGS.md C1).  The op
+			// replaces blending, which the blend state disables when it is enabled.
+			m_ctx->program.fragment_program.ctrl |= RSX_SHADER_CONTROL_LOGIC_OP;
 		}
 
 		if (REGS(m_ctx)->msaa_alpha_to_coverage_enabled())
@@ -1432,7 +1442,7 @@ namespace rsx
 		}
 	}
 
-	bool graph_engine::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
+	bool graph_engine::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer)
 	{
 		if (!m_ctx->program.fragment_program.total_length)
 		{
@@ -1456,6 +1466,8 @@ namespace rsx
 
 		// Data overlaps. Force ucode reload.
 		m_ctx->graphics_state |= rsx::pipeline_state::fragment_program_ucode_dirty;
+
+
 		return true;
 	}
 }

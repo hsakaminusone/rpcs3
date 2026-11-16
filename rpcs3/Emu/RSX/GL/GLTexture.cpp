@@ -86,23 +86,59 @@ namespace gl
 		switch (texture_format)
 		{
 		case CELL_GCM_TEXTURE_B8: return GL_R8;
-		case CELL_GCM_TEXTURE_A1R5G5B5: return GL_BGR5_A1;
-		case CELL_GCM_TEXTURE_A4R4G4B4: return GL_RGBA4;
-		case CELL_GCM_TEXTURE_R5G6B5: return GL_RGB565;
+		case CELL_GCM_TEXTURE_A1R5G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_BGR5_A1;
+#endif
+		case CELL_GCM_TEXTURE_A4R4G4B4:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_RGBA4;
+#endif
+		case CELL_GCM_TEXTURE_R5G6B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_RGB565;
+#endif
 		case CELL_GCM_TEXTURE_A8R8G8B8: return GL_BGRA8;
 		case CELL_GCM_TEXTURE_G8B8: return GL_RG8;
-		case CELL_GCM_TEXTURE_R6G5B5: return GL_RGB565;
+		case CELL_GCM_TEXTURE_R6G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_RGB565;
+#endif
 		case CELL_GCM_TEXTURE_DEPTH24_D8: return GL_DEPTH24_STENCIL8;
 		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT: return GL_DEPTH32F_STENCIL8;
 		case CELL_GCM_TEXTURE_DEPTH16: return GL_DEPTH_COMPONENT16;
 		case CELL_GCM_TEXTURE_DEPTH16_FLOAT: return GL_DEPTH_COMPONENT32F;
 		case CELL_GCM_TEXTURE_X16: return GL_R16;
 		case CELL_GCM_TEXTURE_Y16_X16: return GL_RG16;
-		case CELL_GCM_TEXTURE_R5G5B5A1: return GL_RGB5_A1;
+		case CELL_GCM_TEXTURE_R5G5B5A1:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_RGB5_A1;
+#endif
 		case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT: return GL_RGBA16F;
 		case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT: return GL_RGBA32F;
 		case CELL_GCM_TEXTURE_X32_FLOAT: return GL_R32F;
-		case CELL_GCM_TEXTURE_D1R5G5B5: return GL_BGR5_A1;
+		case CELL_GCM_TEXTURE_D1R5G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return GL_BGRA8;
+#else
+			return GL_BGR5_A1;
+#endif
 		case CELL_GCM_TEXTURE_D8R8G8B8: return GL_BGRA8;
 		case CELL_GCM_TEXTURE_Y16_X16_FLOAT: return GL_RG16F;
 		case CELL_GCM_TEXTURE_COMPRESSED_DXT1: return supports_dxt ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT : GL_BGRA8;
@@ -122,23 +158,59 @@ namespace gl
 		switch (texture_format)
 		{
 		case CELL_GCM_TEXTURE_B8: return std::make_tuple(GL_RED, GL_UNSIGNED_BYTE);
-		case CELL_GCM_TEXTURE_A1R5G5B5: return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV);
-		case CELL_GCM_TEXTURE_A4R4G4B4: return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4);
-		case CELL_GCM_TEXTURE_R5G6B5: return std::make_tuple(GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
+		case CELL_GCM_TEXTURE_A1R5G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV);
+#endif
+		case CELL_GCM_TEXTURE_A4R4G4B4:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4);
+#endif
+		case CELL_GCM_TEXTURE_R5G6B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
+#endif
 		case CELL_GCM_TEXTURE_A8R8G8B8: return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
 		case CELL_GCM_TEXTURE_G8B8: return std::make_tuple(GL_RG, GL_UNSIGNED_BYTE);
-		case CELL_GCM_TEXTURE_R6G5B5: return std::make_tuple(GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
+		case CELL_GCM_TEXTURE_R6G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
+#endif
 		case CELL_GCM_TEXTURE_DEPTH24_D8: return std::make_tuple(GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8);
 		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT: return std::make_tuple(GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV);
 		case CELL_GCM_TEXTURE_DEPTH16: return std::make_tuple(GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT);
 		case CELL_GCM_TEXTURE_DEPTH16_FLOAT: return std::make_tuple(GL_DEPTH_COMPONENT, GL_FLOAT);
 		case CELL_GCM_TEXTURE_X16: return std::make_tuple(GL_RED, GL_UNSIGNED_SHORT);
 		case CELL_GCM_TEXTURE_Y16_X16: return std::make_tuple(GL_RG, GL_UNSIGNED_SHORT);
-		case CELL_GCM_TEXTURE_R5G5B5A1: return std::make_tuple(GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1);
+		case CELL_GCM_TEXTURE_R5G5B5A1:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1);
+#endif
 		case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT: return std::make_tuple(GL_RGBA, GL_HALF_FLOAT);
 		case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT: return std::make_tuple(GL_RGBA, GL_FLOAT);
 		case CELL_GCM_TEXTURE_X32_FLOAT: return std::make_tuple(GL_RED, GL_FLOAT);
-		case CELL_GCM_TEXTURE_D1R5G5B5: return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV);
+		case CELL_GCM_TEXTURE_D1R5G5B5:
+#if defined(__APPLE__)
+			// The uploader expands the upload to BGRA8 on Apple (Metal does not hold the format).
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+#else
+			return std::make_tuple(GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV);
+#endif
 		case CELL_GCM_TEXTURE_D8R8G8B8: return std::make_tuple(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
 		case CELL_GCM_TEXTURE_Y16_X16_FLOAT: return std::make_tuple(GL_RG, GL_HALF_FLOAT);
 		case CELL_GCM_TEXTURE_COMPRESSED_DXT1: return std::make_tuple(supports_dxt ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT : GL_BGRA, GL_UNSIGNED_BYTE);

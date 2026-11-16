@@ -4,51 +4,30 @@
 #include "Utilities/StrFmt.h"
 #include "Utilities/StrUtil.h"
 
-#include "util/midi_types.h"
-
-#include <mutex>
-#include <thread>
+#include <rtmidi_c.h>
 
 LOG_CHANNEL(cfg_log, "CFG");
 
-namespace
+inline constexpr auto midi_deleter = [](RtMidiWrapper* ptr) { if (ptr) rtmidi_in_free(ptr); };
+using midi_ptr = std::unique_ptr<RtMidiWrapper, decltype(midi_deleter)>;
+
+std::mutex midi_creator::m_midi_init_mutex = {};
+std::unique_ptr<std::thread> midi_creator::m_midi_init_thread = {};
+midi_creator::init_thread_guard midi_creator::m_midi_init_thread_guard = {};
+
+midi_creator::init_thread_guard::~init_thread_guard()
 {
-	// Joins on static destruction, which also runs when exit() is called directly (e.g. by Cocoa on macOS).
-	struct midi_init_thread
+	join_init_thread();
+}
+
+void midi_creator::join_init_thread()
+{
+	std::lock_guard lock(m_midi_init_mutex);
+
+	if (m_midi_init_thread && m_midi_init_thread->joinable())
 	{
-	public:
-		~midi_init_thread()
-		{
-			join();
-		}
-
-		void init_async()
-		{
-			std::lock_guard lock(m_mutex);
-			if (!m_started)
-			{
-				m_started = true;
-				m_thread = std::thread([]
-				{
-					[[maybe_unused]] midi_ptr midi_in(rtmidi_in_create_default());
-				});
-			}
-		}
-
-		void join()
-		{
-			std::lock_guard lock(m_mutex);
-			if (m_thread.joinable())
-			{
-				m_thread.join();
-			}
-		}
-
-	private:
-		std::mutex m_mutex;
-		std::thread m_thread;
-		bool m_started = false;
-	} g_midi_init = {};
+		m_midi_init_thread->join();
+	}
 }
 
 midi_creator::midi_creator()
@@ -56,17 +35,19 @@ midi_creator::midi_creator()
 	setObjectName("midi_creator");
 
 	// Initialize rtmidi async. This can take 10+ seconds on a cold start.
-	g_midi_init.init_async();
+	std::lock_guard lock(m_midi_init_mutex);
+	if (!m_midi_init_thread)
+	{
+		m_midi_init_thread = std::make_unique<std::thread>([]
+		{
+			[[maybe_unused]] midi_ptr midi_in(rtmidi_in_create_default());
+		});
+	}
 }
 
 midi_creator::~midi_creator()
 {
-	g_midi_init.join();
-}
-
-void midi_creator::wait_for_init()
-{
-	g_midi_init.join();
+	join_init_thread();
 }
 
 // We need to recreate the localized string because the midi creator is currently only created once.
@@ -78,7 +59,7 @@ QString midi_creator::get_none() const
 void midi_creator::refresh_list()
 {
 	// Wait for initial initialization
-	g_midi_init.join();
+	join_init_thread();
 
 	m_midi_list.clear();
 	m_midi_list.append(get_none());

@@ -27,6 +27,7 @@ namespace rsx
 	class display_output;
 	class RSXDMAWriter;
 
+
 	struct backend_configuration
 	{
 		bool supports_multidraw;                 // Draw call batching
@@ -45,6 +46,10 @@ namespace rsx
 		bool supports_programmable_blending;     // Can handle programmable blending requests
 		bool supports_extended_depth_range;      // Depth values above 1 can be stored and tested. Float depth targets are emulated otherwise.
 		bool supports_framebufferless_rendering; // Can rasterize without any attachments bound (e.g for occlusion queries)
+		// The default member initializer is the default for a backend that does not
+		// know the flag: Vulkan and OpenGL have a native logic op, so only a backend
+		// without one sets it false (REVIEW-FINDINGS.md C1).
+		bool supports_native_logic_op = true;    // Host has a logic-op state. Emulated in the ROP otherwise.
 	};
 
 	enum class device_status
@@ -130,11 +135,18 @@ namespace rsx
 		virtual bool release_GCM_label(u32 /*type*/, u32 /*address*/, u32 /*value*/) { return false; }
 		virtual void on_semaphore_acquire_wait() {}
 
+		// A semaphore acquire reads guest memory on the CPU, so a release this
+		// backend still has in flight at `address` must complete first.
+		virtual bool sync_label(u32 /*address*/) { return false; }
+
 		// Host part of a sync hint. The core forwards the hint to ZCULL first.
 		virtual void on_sync_hint(FIFO::interrupt_hint /*hint*/, reports::sync_hint_payload_t /*payload*/) {}
 
 		// Backend housekeeping at the start of a local task invocation. Returns false to skip the rest of the task, e.g. when re-entered while the backend is flushing.
 		virtual bool on_local_task(FIFO::state /*state*/) { return true; }
+
+		// Backend housekeeping for the FIFO desync capture. The shared code gathers
+		// the data; a backend that does not care ignores it.
 
 		// Backend-specific control requests. Returns false if the request code is not handled.
 		virtual bool on_renderctl(u32 /*request_code*/, void* /*args*/) { return false; }

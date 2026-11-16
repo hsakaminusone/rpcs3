@@ -45,9 +45,31 @@ render_creator::render_creator()
 
 			if (!work_done) // The spawning thread gave up, do not attempt to modify vulkan_adapters
 			{
+				// Collapse duplicate ICDs (bundled + system enumerate the same GPU).
+				// On Apple the driver is selected by its own setting, so the adapter list
+				// names devices; elsewhere it keeps the per-driver (tagged) labels.
+				std::vector<vk::driver_selection::device_info> devices;
+				devices.reserve(gpus.size());
+
 				for (const auto& gpu : gpus)
 				{
-					adapters->append(QString::fromStdString(gpu.get_name()));
+					vk::driver_selection::device_info info;
+					info.kind = gpu.get_driver_kind();
+					info.name = gpu.get_name();
+					info.driver_id = static_cast<std::uint32_t>(gpu.get_driver_id());
+					info.index = static_cast<int>(devices.size());
+					devices.push_back(std::move(info));
+				}
+
+#ifdef __APPLE__
+				const std::vector<std::string> labels = vk::driver_selection::build_device_labels(devices);
+#else
+				const std::vector<std::string> labels = vk::driver_selection::build_adapter_labels(devices);
+#endif
+
+				for (const std::string& label : labels)
+				{
+					adapters->append(QString::fromStdString(label));
 				}
 			}
 		}

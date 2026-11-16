@@ -2547,7 +2547,7 @@ namespace rsx
 					const bool force_convert = !render_target_format_is_compatible(texptr, attr.gcm_format);
 
 					auto result = helpers::process_framebuffer_resource_fast<sampled_image_descriptor>(
-						cmd, texptr, attr, {}, scale, extended_dimension, remap, true, force_convert);
+						cmd, texptr, attr, {}, scale, extended_dimension, remap, true, force_convert, traits::requires_feedback_loop_copy);
 
 					if (!options.skip_texture_barriers && result.is_cyclic_reference)
 					{
@@ -2575,7 +2575,7 @@ namespace rsx
 					const bool surface_is_rop_target = m_rtts.address_is_bound(last.base_address);
 
 					auto result = helpers::process_framebuffer_resource_fast<sampled_image_descriptor>(
-						cmd, last.surface, attr, position2u(last.src_area.x, last.src_area.y), scale, extended_dimension, remap, surface_is_rop_target, force_convert);
+						cmd, last.surface, attr, position2u(last.src_area.x, last.src_area.y), scale, extended_dimension, remap, surface_is_rop_target, force_convert, traits::requires_feedback_loop_copy);
 
 					if (!options.skip_texture_barriers && result.is_cyclic_reference)
 					{
@@ -2890,7 +2890,9 @@ namespace rsx
 				 * 3. Surface is swapped back in. Surface cache resets layout to optimal rasterization layout
 				 * 4. During bind, the surface is converted to shader layout because it is not in GENERAL layout
 				 */
-				if (!texture_cache_helpers::force_strict_fbo_sampling(result.second->samples()))
+				const bool force_copy = traits::requires_feedback_loop_copy ||
+					texture_cache_helpers::force_strict_fbo_sampling(result.second->samples());
+				if (!force_copy)
 				{
 					insert_texture_barrier(cmd, result.second, false);
 				}
@@ -3398,7 +3400,6 @@ namespace rsx
 
 			// Check if src/dst are parts of render targets
 			typename surface_store_type::surface_overlap_info dst_subres;
-			bool use_null_region = false;
 
 			// TODO: Handle cases where src or dst can be a depth texture while the other is a color texture - requires a render pass to emulate
 			// NOTE: Grab the src first as requirements for reading are more strict than requirements for writing
@@ -3409,12 +3410,102 @@ namespace rsx
 			dst_subres = blit_engine_internals::rtt_lookup(m_rtts, cmd, dst_address, dst_w, dst_h, dst.pitch, dst_bpp, surface_access::transfer_write, false, scale_x, scale_y);
 			dst_is_render_target = dst_subres.surface != nullptr;
 
+			// A plain copy into main memory is the DMA path: it has no host image, so
+			// the transfer is a CPU-side mirror.  Resolved here because a backend that
+			// declines the GPU route must see it before any mutation (MTLBlit.h).
+			const bool copy_to_main_memory =
+				!dst_is_render_target &&
+				get_location(dst_address) != CELL_GCM_LOCATION_LOCAL &&
+				is_copy_op && !is_format_convert && !is_graphics2d;
+
+			// The destination's host extent, and every decision that can turn this
+			// transfer into a guest-memory mirror.  All of it is decided before the
+			// backend gate: a backend whose API has no DMA section has to decline that
+			// route while the cache is still untouched, and the display-buffer overlap
+			// below is the second way into it.
+			size2i dst_dimensions = { static_cast<s32>(dst.pitch / dst_bpp), dst.height };
+			position2i dst_offset = { dst.offset_x, dst.offset_y };
+			u32 dst_base_address = dst.rsx_address;
+
+			const auto dst_payload_length = (dst.pitch * (dst_h - 1) + (dst_w * dst_bpp));
+			const auto dst_range = address_range32::start_length(dst_address, dst_payload_length);
+
+			bool use_null_region = copy_to_main_memory;
+
+			if (!use_null_region && !dst_is_render_target)
+			{
+				size2u src_dimensions = { 0, 0 };
+				if (src_is_render_target)
+				{
+					src_dimensions.width = src_subres.surface->template get_surface_width<rsx::surface_metrics::samples>();
+					src_dimensions.height = src_subres.surface->template get_surface_height<rsx::surface_metrics::samples>();
+				}
+
+				const auto props = texture_cache_helpers::get_optimal_blit_target_properties(
+					m_ctx,
+					src_is_render_target,
+					dst_range,
+					dst.pitch,
+					src_dimensions,
+					static_cast<size2u>(dst_dimensions),
+					dst_tile
+				);
+
+				if (props.use_dma_region)
+				{
+					// Try to use a dma flush
+					use_null_region = (is_copy_op && !is_format_convert);
+				}
+				else
+				{
+					if (props.offset)
+					{
+						// Calculate new offsets
+						dst_base_address = props.offset;
+						const auto new_offset = (dst_address - dst_base_address);
+
+						// Generate new offsets
+						dst_offset.y = new_offset / dst.pitch;
+						dst_offset.x = (new_offset % dst.pitch) / dst_bpp;
+					}
+
+					dst_dimensions.width = static_cast<s32>(props.width);
+					dst_dimensions.height = static_cast<s32>(props.height);
+				}
+			}
+
+			// A backend whose host API cannot express this transfer exactly runs the
+			// caller's CPU fallback instead, so it must decide here: everything below
+			// invalidates, locks and creates host state that the fallback does not
+			// expect.  Both lookups above are read-only, and the predicate must be too.
+			// A backend with no opinion (GL, VK) has no such hook and is unchanged.
+			if constexpr (requires (blitter_type& b)
+			{
+				b.supports_transfer(src, dst,
+					src_subres.surface ? src_subres.surface->get_bpp() : u8{ 0 },
+					dst_subres.surface ? dst_subres.surface->get_bpp() : u8{ 0 },
+					src_subres.is_depth, dst_subres.is_depth,
+					is_copy_op, is_format_convert, is_graphics2d,
+					src_is_tiled, dst_is_tiled, use_null_region);
+			})
+			{
+				if (!blitter.supports_transfer(src, dst,
+					src_subres.surface ? src_subres.surface->get_bpp() : u8{ 0 },
+					dst_subres.surface ? dst_subres.surface->get_bpp() : u8{ 0 },
+					src_subres.is_depth, dst_subres.is_depth,
+					is_copy_op, is_format_convert, is_graphics2d,
+					src_is_tiled, dst_is_tiled, use_null_region))
+				{
+					return blit_op_result(false);
+				}
+			}
+
 			if (!dst_is_render_target && get_location(dst_address) != CELL_GCM_LOCATION_LOCAL)
 			{
 				// Surface only exists in main memory.
 				// Now we have a blit write into main memory. This really could be anything, so we need to be careful here.
 				// If we have a pitched write, or a suspiciously large transfer, we likely have a valid write.
-				if (use_null_region = (is_copy_op && !is_format_convert && !is_graphics2d); use_null_region)
+				if (copy_to_main_memory)
 				{
 					// Invalidate surfaces in range. Sample tests should catch overlaps in theory.
 					// We only do this for non-2D sections though, since blit_dst targets now live in the surface cache always.
@@ -3488,55 +3579,7 @@ namespace rsx
 			areai src_area = { 0, 0, src_w, src_h };
 			areai dst_area = { 0, 0, dst_w, dst_h };
 
-			size2i dst_dimensions = { static_cast<s32>(dst.pitch / dst_bpp), dst.height };
-			position2i dst_offset = { dst.offset_x, dst.offset_y };
-			u32 dst_base_address = dst.rsx_address;
-
 			const auto src_payload_length = (src.pitch * (src_h - 1) + (src_w * src_bpp));
-			const auto dst_payload_length = (dst.pitch * (dst_h - 1) + (dst_w * dst_bpp));
-			const auto dst_range = address_range32::start_length(dst_address, dst_payload_length);
-
-			if (!use_null_region && !dst_is_render_target)
-			{
-				size2u src_dimensions = { 0, 0 };
-				if (src_is_render_target)
-				{
-					src_dimensions.width = src_subres.surface->template get_surface_width<rsx::surface_metrics::samples>();
-					src_dimensions.height = src_subres.surface->template get_surface_height<rsx::surface_metrics::samples>();
-				}
-
-				const auto props = texture_cache_helpers::get_optimal_blit_target_properties(
-					m_ctx,
-					src_is_render_target,
-					dst_range,
-					dst.pitch,
-					src_dimensions,
-					static_cast<size2u>(dst_dimensions),
-					dst_tile
-				);
-
-				if (props.use_dma_region)
-				{
-					// Try to use a dma flush
-					use_null_region = (is_copy_op && !is_format_convert);
-				}
-				else
-				{
-					if (props.offset)
-					{
-						// Calculate new offsets
-						dst_base_address = props.offset;
-						const auto new_offset = (dst_address - dst_base_address);
-
-						// Generate new offsets
-						dst_offset.y = new_offset / dst.pitch;
-						dst_offset.x = (new_offset % dst.pitch) / dst_bpp;
-					}
-
-					dst_dimensions.width = static_cast<s32>(props.width);
-					dst_dimensions.height = static_cast<s32>(props.height);
-				}
-			}
 
 			reader_lock lock(m_cache_mutex);
 
@@ -3816,7 +3859,13 @@ namespace rsx
 			}
 			else if (cached_dest)
 			{
-				cached_dest->dma_transfer(cmd, vram_texture, src_area, dst_range, dst.pitch);
+				// A backend that has a DMA section reaches this only when it accepted
+				// the route in supports_transfer; one that has none declined above, so
+				// its section type need not provide the method.
+				if constexpr (requires { cached_dest->dma_transfer(cmd, vram_texture, src_area, dst_range, dst.pitch); })
+				{
+					cached_dest->dma_transfer(cmd, vram_texture, src_area, dst_range, dst.pitch);
+				}
 			}
 
 			if (cached_src)

@@ -3,8 +3,11 @@
 #include "ProgramStateCache512.h"
 #include "Emu/system_config.h"
 #include "Emu/RSX/Core/RSXDriverState.h"
+#include "Emu/RSX/RSXThread.h"
 #include "util/sysinfo.hpp"
 
+#include <bit>
+#include <cmath>
 #include <stack>
 
 #if defined(ARCH_X64)
@@ -697,6 +700,8 @@ namespace rsx
 #else
 		write_fragment_constants_to_buffer_fallback(buffer, rsx_prog, offsets_cache, sanitize);
 #endif
+
+
 	}
 
 	void program_cache_hint_t::invalidate(u32 flags)

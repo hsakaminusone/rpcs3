@@ -46,6 +46,7 @@ enum class video_renderer
 	null,
 	opengl,
 	vulkan,
+	metal, // Apple silicon + macOS 26 at runtime (docs/research/metal4/10 §4.7)
 };
 
 enum class audio_renderer
@@ -317,6 +318,13 @@ enum class vk_gpu_scheduler_mode
 {
 	safe,
 	fast
+};
+
+enum class vulkan_apple_driver
+{
+	auto_,
+	moltenvk,
+	kosmickrisp
 };
 
 enum class thread_scheduler_mode
