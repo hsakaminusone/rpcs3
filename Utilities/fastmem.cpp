@@ -46,7 +46,6 @@ namespace fastmem
 			for (usz i = 0; i < c_probe_limit; ++i)
 			{
 				entry& e = g_table[(start + i) & (c_table_size - 1)];
-
 				if (e.host_pc == host_pc)
 				{
 					return &e;
@@ -59,13 +58,31 @@ namespace fastmem
 						return nullptr;
 					}
 
+					// Publish the key with one CAS: that is what makes the entry
+					// findable.
 					if (e.host_pc.compare_and_swap_test(0, host_pc))
 					{
+						// A searcher that walked past this slot while another thread
+						// was inserting can have claimed a later slot for the same
+						// key. Two entries would split one site's history, so keep
+						// the earliest probe position and release this one.
+						for (usz j = 0; j < i; ++j)
+						{
+							entry& earlier = g_table[(start + j) & (c_table_size - 1)];
+
+							if (earlier.host_pc == host_pc)
+							{
+								e.host_pc = 0;
+								return &earlier;
+							}
+						}
+
 						g_sites++;
 						return &e;
 					}
 
-					// Another thread inserted at this slot; re-read it.
+					// Another thread inserted at this slot; re-read it before
+					// moving on, it may be the site being looked for.
 					if (e.host_pc == host_pc)
 					{
 						return &e;
@@ -100,9 +117,13 @@ namespace fastmem
 				return site_state::recurring;
 			}
 
+			// The key is already visible, so these fields are the only thing a
+			// concurrent reader can beat. They are advisory history, not state the
+			// handler acts on, so a reader seeing the old values is harmless.
 			e->guest_page = guest_addr >> 12;
 			e->flags = write ? is_write : 0;
 			e->faults = 1;
+
 			cpu_stats::g_counters.fastmem_first++;
 			return site_state::first;
 		}
@@ -117,6 +138,37 @@ namespace fastmem
 	u64 site_count() noexcept
 	{
 		return g_sites;
+	}
+
+	void invalidate_range(uptr host_begin, uptr host_end) noexcept
+	{
+		u64 removed = 0;
+
+		for (entry& e : g_table)
+		{
+			const uptr key = e.host_pc;
+
+			if (key == 0)
+			{
+				continue;
+			}
+
+			if (key >= host_begin && key < host_end)
+		{
+				// Only the thread that clears the key should count it, and a
+				// concurrent reader may still be inside the entry: clear the key
+				// first so it stops matching, then drop the payload.
+				if (e.host_pc.compare_and_swap_test(key, 0))
+				{
+					e.guest_page = 0;
+					e.flags = 0;
+					e.faults = 0;
+					removed++;
+				}
+			}
+		}
+
+		g_sites -= removed;
 	}
 
 	void reset() noexcept
