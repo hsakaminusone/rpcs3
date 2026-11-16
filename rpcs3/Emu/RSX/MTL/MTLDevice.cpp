@@ -359,9 +359,17 @@ namespace mtl
 		// Docs: no native multi-draw command (docs/research/metal4/09 §4); a
 		// host-built indirect batcher lands later, until then draw clauses loop.
 		cfg.supports_multidraw = false;
-		cfg.supports_hw_msaa = true;
-		cfg.supports_hw_a2c = true;
-		cfg.supports_hw_a2c_1spp = false; // unverified at 1 spp; GL disables it too (GLGSRender.cpp:61)
+
+		// The host sample count follows the video MSAA setting (surface::create,
+		// MTLSurface.cpp:63-65), so a 1-sample target must not claim hardware MSAA
+		// or hardware A2C: the core would then set ROP_MULTISAMPLED and declare a
+		// multisample texture against a single-sample surface (RSXGraphEngine.cpp:
+		// 933-970), and hardware A2C would be a silent no-op.  VK and GL gate the
+		// same two flags (VKGSRender.cpp:746-752, GLGSRender.cpp:50-56).
+		const bool host_multisampled = g_cfg.video.antialiasing_level != msaa_level::none;
+		cfg.supports_hw_msaa = host_multisampled;
+		cfg.supports_hw_a2c = host_multisampled;
+		cfg.supports_hw_a2c_1spp = false; // unverified at 1 spp; GL disables it too (GLGSRender.cpp:54)
 		cfg.supports_hw_a2one = true;
 		cfg.supports_hw_instanced_rendering = true;
 		cfg.supports_programmable_blending = true; // framebuffer fetch [[color(n)]] (HLD-01 §4.3)
@@ -381,7 +389,10 @@ namespace mtl
 		// Forced-off on Metal 4 bring-up (docs/research/metal4/10 §2.2):
 		cfg.supports_hw_renormalization = false;   // Apple silicon is not NV silicon
 		cfg.supports_passthrough_dma = false;      // no host-pointer device DMA (HLD-02 §2.1)
-		cfg.supports_last_provoking_vertex = false;// no public provoking-vertex mode; smooth fallback
+		// Metal's [[flat]] interpolant comes from the first vertex, while RSX takes
+		// the last; the draw path rotates every primitive group so the two agree
+		// (MTL/MTLGSRender.cpp, Common/BufferUtils.cpp expand_indexed_flat).
+		cfg.supports_last_provoking_vertex = true;
 		cfg.supports_hw_conditional_render = false;// bring-up: CPU skip (HLD-04 §3.6)
 		// The guest label is memory the CPU parser reads at the acquire.  A host
 		// store at the release is visible to that read immediately, which is what

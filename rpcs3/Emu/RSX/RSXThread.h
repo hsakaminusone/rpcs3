@@ -164,6 +164,15 @@ namespace rsx
 		static void fifo_wake_delay(u64 div = 1);
 		u32 get_fifo_cmd() const;
 
+		// EXCISE-BEGIN surface-format-probe
+		// TODO(excise): temporary; enabled by RSX_SURFACE_DIAG.  A surface-format
+		// register whose antialias field is not one of the four GCM patterns is
+		// reported with the FIFO words that carried it, because every
+		// surface_antialias() read dereferences the same expected and one such
+		// write takes the RSX thread down at the next reader.
+		void note_invalid_surface_format(u32 reg, u32 arg, u32 latch) const;
+		// EXCISE-END surface-format-probe
+
 		// EXCISE-BEGIN thread-label-accessors
 		// TODO(excise): whole-unit; level 1; the label write is recorded so that a desync
 		// capture can compare it with the address of the FIFO command stream.
@@ -292,7 +301,7 @@ namespace rsx
 		std::array<u32, 4> get_color_surface_addresses() const;
 		u32 get_zeta_surface_address() const;
 
-		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size);
+		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer = "?");
 		void on_framebuffer_options_changed(u32 opt);
 
 	public:

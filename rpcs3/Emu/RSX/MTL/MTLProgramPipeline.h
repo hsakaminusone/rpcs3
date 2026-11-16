@@ -112,6 +112,20 @@ namespace mtl
 	struct fragment_program : shader_program
 	{
 		u32 id = 0;
+
+		// EXCISE-BEGIN fp-ucode-image
+		// TODO(excise): level 5; the identity of the ucode image the program was
+		// compiled from, and the bytes the draw fills the constant ring from.  The
+		// draw hands `write_fragment_constants_to_buffer` the *live* RSX program,
+		// so the literals it reads are the guest's current bytes at the offsets the
+		// compile produced.  A differing hash is the guest rewriting the program
+		// after it was compiled and a differing word is where; an identical image
+		// means the offsets, not the data, are the question.
+		u64 diagnostic_ucode_hash = 0;
+		u32 diagnostic_ucode_offset = 0;
+		u32 diagnostic_ucode_length = 0;
+		u32 diagnostic_ucode_tail[16] = {};
+		// EXCISE-END fp-ucode-image
 	};
 
 	// The linked object: one MTL::RenderPipelineState.  The two shader_program

@@ -935,6 +935,11 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "texture/transfer");
+
+		// A scaled region runs as a render pass (MTLBlit.h), and a pass ends the
+		// compute encoder this function copies through, so the encoder is taken per
+		// region rather than held across the loop (open_compute reuses it until
+		// something closes it).
 		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
 		if (!encoder)
 		{
@@ -950,6 +955,10 @@ namespace mtl
 
 		const bool dst_3d = dst_image->value()->textureType() == MTL::TextureType3D;
 
+		// The destination format and texel width are the same for every region.
+		const MTL::PixelFormat dst_format = dst_image->pixel_format();
+		const u32 dst_texel = get_texel_size(dst_format);
+
 		for (const auto& slice : sources)
 		{
 			if (!slice.src)
@@ -957,38 +966,73 @@ namespace mtl
 				continue;
 			}
 
-			if (slice.src_w != slice.dst_w || slice.src_h != slice.dst_h)
+			const MTL::PixelFormat src_format = slice.src->pixel_format();
+			const u32 src_texel = get_texel_size(src_format);
+
+			auto src_x = slice.src_x;
+			auto src_y = slice.src_y;
+			auto src_w = slice.src_w;
+			auto src_h = slice.src_h;
+
+			// Some regions are described in the destination's texel grid, because the
+			// code that generated them worked off the destination (texture_cache.h,
+			// surface_transform::coordinate_transform).  Convert to the source's own
+			// grid, exactly as VK does (VKTextureCache.cpp:486-495).
+			rsx::flags32_t transform = slice.xform;
+			if (transform == rsx::surface_transform::coordinate_transform && src_texel && dst_texel)
 			{
-				rsx_log.error("Metal 4: scaled texture copy is not supported");
+				src_x = static_cast<u16>((src_x * dst_texel) / src_texel);
+				src_w = utils::aligned_div<u16>(static_cast<u16>(src_w * dst_texel), static_cast<u16>(src_texel));
+				transform &= ~(rsx::surface_transform::coordinate_transform);
+			}
+
+			if (transform != rsx::surface_transform::identity)
+			{
+				// A swizzled or sign-flipped region is not laid out the way a copy
+				// reads it; the caller has to materialize it first (as in VK).
+				rsx_log.error("Metal 4: texture copy with an unsupported surface transform");
 				continue;
 			}
 
 			const NS::UInteger dst_slice = dst_3d ? 0 : slice.dst_z;
 			const NS::UInteger dst_z = dst_3d ? slice.dst_z : 0;
 
-			const MTL::PixelFormat src_format = slice.src->pixel_format();
-			const MTL::PixelFormat dst_format = dst_image->pixel_format();
-
 			if (src_format != dst_format)
 			{
 				// Metal's texture copy needs one pixel format on both sides.  A
-				// typeless copy is a bit copy between two layouts of the same texel
-				// size, so stage it through a buffer: the two blits preserve the
-				// guest words, and the destination view names the new format.
-				const u32 src_texel = get_texel_size(src_format);
-				const u32 dst_texel = get_texel_size(dst_format);
-
-				if (src_texel == 0 || src_texel != dst_texel)
+				// typeless copy is a bit copy, so stage it through a buffer: the two
+				// blits preserve the guest words, and the destination view names the
+				// new format.  The texel counts differ when the two views of the same
+				// memory have different texel widths, which the buffer's byte extent
+				// absorbs (VKTextureCache.cpp:495-520).  A block-compressed format has
+				// no per-texel width, so it cannot take this route.
+				if (!src_texel || !dst_texel)
 				{
+					rsx_log.error("Metal 4: typeless texture copy between formats %u and %u has no texel size",
+						static_cast<u32>(src_format), static_cast<u32>(dst_format));
+					continue;
+				}
+
+				const u32 convert_w = (src_w * src_texel) / dst_texel;
+
+				if (convert_w != slice.dst_w || src_h != slice.dst_h)
+				{
+					// The two sides do not describe the same bytes, so no bit copy
+					// exists; a resample across layouts is not a copy.
 					rsx_log.error("Metal 4: typeless texture copy from format %u to %u has no bit-preserving route",
 						static_cast<u32>(src_format), static_cast<u32>(dst_format));
 					continue;
 				}
 
+				if (!encoder && !(encoder = cmd.open_compute()))
+				{
+					return;
+				}
+
 				// A 256-byte row keeps the blit inside Apple's alignment rule for
 				// every texel size this backend creates.
-				const u32 row_bytes = utils::align(slice.src_w * src_texel, 256u);
-				const u32 image_bytes = row_bytes * slice.src_h;
+				const u32 row_bytes = utils::align(static_cast<u32>(src_w) * src_texel, 256u);
+				const u32 image_bytes = row_bytes * src_h;
 
 				MTL::Buffer* staging = cmd.resources().new_buffer(utils::align<u64>(image_bytes, 0x1000), MTL::StorageModeShared);
 				if (!staging)
@@ -998,8 +1042,8 @@ namespace mtl
 				}
 
 				encoder->copyFromTexture(slice.src->value(), 0, 0,
-					MTL::Origin::Make(slice.src_x, slice.src_y, 0),
-					MTL::Size::Make(slice.src_w, slice.src_h, 1),
+					MTL::Origin::Make(src_x, src_y, 0),
+					MTL::Size::Make(src_w, src_h, 1),
 					staging, 0, row_bytes, image_bytes);
 
 				// The staging buffer is in an untracked heap, so the second blit
@@ -1012,7 +1056,7 @@ namespace mtl
 				}
 
 				encoder->copyFromBuffer(staging, 0, row_bytes, image_bytes,
-					MTL::Size::Make(slice.src_w, slice.src_h, 1),
+					MTL::Size::Make(convert_w, src_h, 1),
 					dst_image->value(), dst_slice, slice.level,
 					MTL::Origin::Make(slice.dst_x, slice.dst_y, dst_z));
 
@@ -1020,11 +1064,43 @@ namespace mtl
 				continue;
 			}
 
-			encoder->copyFromTexture(slice.src->value(), 0, 0,
-				MTL::Origin::Make(slice.src_x, slice.src_y, 0),
-				MTL::Size::Make(slice.src_w, slice.src_h, 1),
-				dst_image->value(), dst_slice, slice.level,
-				MTL::Origin::Make(slice.dst_x, slice.dst_y, dst_z));
+			if (src_w == slice.dst_w && src_h == slice.dst_h) [[likely]]
+			{
+				if (!encoder && !(encoder = cmd.open_compute()))
+				{
+					return;
+				}
+
+				encoder->copyFromTexture(slice.src->value(), 0, 0,
+					MTL::Origin::Make(src_x, src_y, 0),
+					MTL::Size::Make(src_w, src_h, 1),
+					dst_image->value(), dst_slice, slice.level,
+					MTL::Origin::Make(slice.dst_x, slice.dst_y, dst_z));
+				continue;
+			}
+
+			// A resample of the same format: the region is larger or smaller than
+			// its destination (resolution scaling upscales into the temporary).  VK
+			// runs vkCmdBlitImage with a nearest filter here (VKTextureCache.cpp:589),
+			// and the built-in blitter is its Metal form.  The pass closes the
+			// compute encoder, so the pointer is dropped and taken again above.
+			if (!src_texel || !dst_texel)
+			{
+				// A block-compressed format is neither sampled as float nor a colour
+				// attachment, so a resample of it has no route here.
+				rsx_log.error("Metal 4: scaled texture copy of format %u is not supported",
+					static_cast<u32>(src_format));
+				continue;
+			}
+
+			m_blitter.scale_image(cmd, slice.src->value(), dst_image->value(),
+				areai{ static_cast<s32>(src_x), static_cast<s32>(src_y),
+					static_cast<s32>(src_x + src_w), static_cast<s32>(src_y + src_h) },
+				areai{ static_cast<s32>(slice.dst_x), static_cast<s32>(slice.dst_y),
+					static_cast<s32>(slice.dst_x + slice.dst_w), static_cast<s32>(slice.dst_y + slice.dst_h) },
+				false, slice.level, static_cast<u32>(dst_slice), static_cast<u32>(dst_z));
+
+			encoder = nullptr;
 		}
 	}
 

@@ -40,6 +40,7 @@ namespace mtl
 			&& resolve == other.resolve
 			&& depth == other.depth
 			&& depth_resolve == other.depth_resolve
+			&& scratch_depth == other.scratch_depth
 			&& visibility == other.visibility
 			&& color_count == other.color_count
 			&& sample_count == other.sample_count
@@ -81,6 +82,8 @@ namespace mtl
 				key.depth_resolve = depth_resolve->value();
 			}
 		}
+
+		key.scratch_depth = m_scratch_depth;
 
 		return key;
 	}
@@ -157,6 +160,59 @@ namespace mtl
 		{
 			m_sample_count = m_depth->samples();
 		}
+		else
+		{
+			// No attachment at all.  The guest still rasterises here (framebufferless
+			// draws update ZPASS counters), so the set gets a depth-only scratch image
+			// and stays valid: the draw path otherwise opens no pass and NOPs.
+			ensure_scratch_depth(cmd, rsx::get_format_sample_count(layout.aa_mode));
+			m_sample_count = m_scratch_samples;
+		}
+	}
+
+	void framebuffer::ensure_scratch_depth(command_recorder& cmd, u8 samples)
+	{
+		samples = std::max<u8>(samples, 1);
+
+		if (m_scratch_depth && m_scratch_width == m_width && m_scratch_height == m_height &&
+			m_scratch_samples == samples)
+		{
+			return;
+		}
+
+		if (m_scratch_depth)
+		{
+			// A command buffer holds no strong reference (HLD-02 I7), so the old
+			// image leaves through the frame slot that may still reference it.
+			cmd.resources().defer_release(m_scratch_depth);
+			m_scratch_depth = nullptr;
+		}
+
+		MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+		descriptor->setTextureType(MTL::TextureType2D);
+		descriptor->setPixelFormat(MTL::PixelFormatDepth32Float);
+		descriptor->setWidth(std::max<u16>(m_width, 1));
+		descriptor->setHeight(std::max<u16>(m_height, 1));
+		descriptor->setSampleCount(samples);
+		descriptor->setMipmapLevelCount(1);
+		descriptor->setArrayLength(1);
+		descriptor->setUsage(MTL::TextureUsageRenderTarget);
+
+		m_scratch_depth = cmd.resources().new_texture(descriptor, MTL::StorageModePrivate);
+		descriptor->release();
+
+		if (!m_scratch_depth)
+		{
+			rsx_log.error("Metal 4: the %ux%u framebufferless pass image could not be created", m_width, m_height);
+			m_scratch_width = 0;
+			m_scratch_height = 0;
+			m_scratch_samples = 0;
+			return;
+		}
+
+		m_scratch_width = m_width;
+		m_scratch_height = m_height;
+		m_scratch_samples = samples;
 	}
 
 	MTL4::RenderCommandEncoder* framebuffer::open_pass(command_recorder& cmd, u32 clear_mask, const surface_state& state)
@@ -193,16 +249,12 @@ namespace mtl
 			MTL_PROBE_LATCH(2, "feature/no zcull query");
 		}
 
-		// TODO(excise): level 1; a pass with no attachment and no depth cannot render
-		// anything, so the probe reports it rather than encoding a silent empty pass.
-		if (!m_color_count && !m_depth)
-		{
-			MTL_ERROR(1, "Metal 4: render pass %ux%u opened with no color and no depth attachment", m_width, m_height);
-		}
-
 		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
-		descriptor->setRenderTargetWidth(m_width);
-		descriptor->setRenderTargetHeight(m_height);
+		// The render area may not exceed the smallest attachment, and a pass built
+		// from a layout that never set a clip size would otherwise name a zero
+		// extent the 1x1 scratch image cannot cover.
+		descriptor->setRenderTargetWidth(std::max<u16>(m_width, 1));
+		descriptor->setRenderTargetHeight(std::max<u16>(m_height, 1));
 
 		if (m_visibility)
 		{
@@ -299,6 +351,16 @@ namespace mtl
 					stencil->setClearStencil(state.clear_stencil);
 				}
 			}
+		}
+		else if (m_scratch_depth)
+		{
+			// A framebufferless pass.  The image is not guest data, and nothing reads
+			// it, so a depth-only pass with both actions DontCare is the whole pass:
+			// Metal still rasterises and still counts the occlusion query (probe D).
+			MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
+			depth->setTexture(m_scratch_depth);
+			depth->setLoadAction(MTL::LoadActionDontCare);
+			depth->setStoreAction(MTL::StoreActionDontCare);
 		}
 
 		MTL4::RenderCommandEncoder* encoder = cmd.open_pass(descriptor);

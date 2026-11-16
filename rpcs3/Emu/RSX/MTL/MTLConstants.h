@@ -97,6 +97,17 @@ namespace mtl
 	};
 	static_assert(sizeof(fill_values) == 32);
 
+	// The built-in blit's values (MTLBlit.h).  xy is the normalised origin of the
+	// source rectangle and zw its normalised extent.  The extent is signed: the
+	// shared code folds a flip into the source rectangle, so a reverse copy is a
+	// negative extent and needs no branch in the shader.  The struct is float4-sized
+	// so every block is 16-byte aligned inside the ring buffer.
+	struct blit_values
+	{
+		f32 src_uv[4];
+	};
+	static_assert(sizeof(blit_values) == 16);
+
 	// A vec4 element.  The transform-constant file, the fragment constants, the
 	// instancing constants and the stipple pattern are all addressed in vec4 units,
 	// so the ring's index is the shader's index.
@@ -443,6 +454,7 @@ namespace mtl
 		std::vector<u8> stipple;
 		std::vector<u8> blend_values;
 		std::vector<u8> fill_values;
+		std::vector<u8> blit_values;
 		std::vector<u8> vertex_draw_params;
 		std::vector<u8> fragment_constants;
 		std::vector<u8> transform_constants;
@@ -455,7 +467,7 @@ namespace mtl
 		// The generation of every ring at the flip.  A ring that grew mid-frame
 		// retired the buffer the earlier draws read, so the dump is incomplete
 		// unless the retired generation is written too.
-		static constexpr u32 ring_count = 18;
+		static constexpr u32 ring_count = 19;
 		u32 ring_generation[ring_count] = {};
 		u32 grew_mask = 0;
 
@@ -485,6 +497,7 @@ namespace mtl
 		static constexpr u32 constant_capacity = 65536;
 		static constexpr u32 transform_capacity = 512;
 		static constexpr u32 fill_capacity = 1024;
+		static constexpr u32 blit_capacity = 512;
 
 		// The vertex streams hold one frame's uploaded attribute data.  The
 		// capacities are the usual working set; a ring that overflows chains to a
@@ -560,6 +573,23 @@ namespace mtl
 			return m_sets[m_slot].fill_values.address_of(m_sets[m_slot].fill_values.index());
 		}
 
+		// Pack one blit's values and return the address of its block.  The blit
+		// shader reads the block at offset zero (MTLBlit.cpp).
+		MTL::GPUAddress alloc_blit_values(f32 origin_u, f32 origin_v, f32 extent_u, f32 extent_v)
+		{
+			blit_values* values = m_sets[m_slot].blit_values.alloc();
+			if (!values)
+			{
+				return 0;
+			}
+
+			values->src_uv[0] = origin_u;
+			values->src_uv[1] = origin_v;
+			values->src_uv[2] = extent_u;
+			values->src_uv[3] = extent_v;
+			return m_sets[m_slot].blit_values.address_of(m_sets[m_slot].blit_values.index());
+		}
+
 		// A substituted push constant is read at offset zero, so it is bound at its
 		// own block, not at the ring base.
 		MTL::GPUAddress blend_values_block_address() const { return m_sets[m_slot].blend_values.address_of(m_sets[m_slot].blend_values.index()); }
@@ -610,6 +640,7 @@ namespace mtl
 			block_ring<vec4_block> stipple;
 			block_ring<blend_values> blend_values;
 			block_ring<fill_values> fill_values;
+			block_ring<blit_values> blit_values;
 			block_ring<u32> vertex_draw_params;
 			block_ring<vec4_block> fragment_constants;
 			block_ring<vec4_block> transform_constants;

@@ -1020,6 +1020,71 @@ namespace rsx
 			// The texture parameters transfer routine is optimized and only writes data for textures consumed by the ucode.
 			m_ctx->graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
 		}
+
+		// EXCISE-BEGIN ucode-prefetch-image
+		// TODO(excise): level 5; the ucode image as the FIFO latches it, so it can
+		// be compared with the image the async compile reads and the image the
+		// draw fills the constant ring from.  The guest writes the program to a
+		// scratch buffer and reuses it; if this copy is the only sane one, the
+		// emulator must snapshot the ucode here instead of reading it live.
+		if (const char* path = std::getenv("MTL_PROBE_PREFETCH_LOG"))
+		{
+			static unsigned s_reports = 0;
+			static u32 s_seen_offsets[256] = {};
+			static unsigned s_seen_count = 0;
+
+			const auto& fp = m_ctx->program.fragment_program;
+
+			// The FIFO re-prefetches the same program repeatedly (once per clause),
+			// so a raw line cap is spent before the world programs are reached.
+			// One line per distinct image address keeps the capture representative.
+			bool seen = false;
+
+			for (unsigned i = 0; i < s_seen_count; ++i)
+			{
+				if (s_seen_offsets[i] == fp.offset)
+				{
+					seen = true;
+					break;
+				}
+			}
+
+			if (!seen && s_seen_count < std::size(s_seen_offsets))
+			{
+				s_seen_offsets[s_seen_count++] = fp.offset;
+			}
+
+			if (!seen && s_reports++ < 256)
+			{
+				const u8* image = static_cast<const u8*>(fp.get_data());
+				const u32 length = fp.ucode_length;
+				u64 hash = 0xcbf29ce484222325ull;
+
+				for (u32 i = 0; image && i < length; ++i)
+				{
+					hash = (hash ^ image[i]) * 0x100000001b3ull;
+				}
+
+				char tail[16 * 10 + 1] = {};
+				char* write = tail;
+
+				for (u32 i = 0; i < 16 && length >= 64 + (i + 1) * 4; ++i)
+				{
+					u32 word = 0;
+					std::memcpy(&word, image + length - 64 + i * 4, 4);
+					write += std::snprintf(write, 10, " %08x", word);
+				}
+
+				if (std::FILE* out = std::fopen(path, "a"))
+				{
+					std::fprintf(out, "prefetch fp reg %08x loc %u base off %u data off %u len %u hash %016llx tail%s\n",
+						REGS(m_ctx)->registers[NV4097_SET_SHADER_PROGRAM], program_location, program_offset,
+						fp.offset, length, static_cast<unsigned long long>(hash), tail);
+					std::fclose(out);
+				}
+			}
+		}
+		// EXCISE-END ucode-prefetch-image
 	}
 
 	void graph_engine::prefetch_vertex_program()
@@ -1447,7 +1512,7 @@ namespace rsx
 		}
 	}
 
-	bool graph_engine::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
+	bool graph_engine::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer)
 	{
 		if (!m_ctx->program.fragment_program.total_length)
 		{
@@ -1471,6 +1536,70 @@ namespace rsx
 
 		// Data overlaps. Force ucode reload.
 		m_ctx->graphics_state |= rsx::pipeline_state::fragment_program_ucode_dirty;
+
+		// EXCISE-BEGIN ucode-write-attribution
+		// TODO(excise): level 5; the write that touched the loaded program's range,
+		// so a literal that changes between draws can be attributed to the FIFO
+		// (this hook) or to an asynchronous guest store (no line here).  Only a
+		// write in the tail of the program (the literal block) is reported, deduped
+		// by writer and relative offset, because the loading-screen programs would
+		// otherwise spend the budget.  The bytes are the program image as it stands
+		// when the hook runs: after the copy for NV308A, before it for NV0039 and
+		// NV3089.
+		if (const char* path = std::getenv("MTL_PROBE_WRITE_LOG"))
+		{
+			struct write_key
+			{
+				const char* writer;
+				s64 relative;
+				u32 size;
+			};
+
+			static write_key s_keys[64] = {};
+			static unsigned s_key_count = 0;
+
+			const s64 relative = static_cast<s64>(dst_offset) - static_cast<s64>(shader_offset);
+			const s64 tail_start = static_cast<s64>(m_ctx->program.fragment_program.total_length) - 256;
+
+			if (relative >= tail_start)
+			{
+				bool seen = false;
+
+				for (unsigned i = 0; i < s_key_count; ++i)
+				{
+					if (s_keys[i].relative == relative && s_keys[i].size == size && std::strcmp(s_keys[i].writer, writer) == 0)
+					{
+						seen = true;
+						break;
+					}
+				}
+
+				if (!seen && s_key_count < 64)
+				{
+					s_keys[s_key_count++] = { writer, relative, size };
+
+					const u8* image = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
+					const u32 length = m_ctx->program.fragment_program.ucode_length;
+					u32 words[4] = {};
+
+					if (image && relative >= 0 && static_cast<u64>(relative) + 16 <= length)
+					{
+						std::memcpy(words, image + relative, 16);
+					}
+
+					if (std::FILE* out = std::fopen(path, "a"))
+					{
+						std::fprintf(out, "invalidate fp writer %s dst off %u size %u shader off %u len %u rel %lld tail %08x %08x %08x %08x\n",
+							writer, dst_offset, size, shader_offset, m_ctx->program.fragment_program.total_length,
+							static_cast<long long>(relative),
+							words[0], words[1], words[2], words[3]);
+						std::fclose(out);
+					}
+				}
+			}
+		}
+		// EXCISE-END ucode-write-attribution
+
 		return true;
 	}
 }

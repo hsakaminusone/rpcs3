@@ -301,6 +301,28 @@ namespace rsx
 			const auto current = REGS(ctx)->decode<NV4097_SET_SURFACE_FORMAT>(arg);
 			const auto previous = REGS(ctx)->decode<NV4097_SET_SURFACE_FORMAT>(REGS(ctx)->latch);
 
+			// EXCISE-BEGIN surface-format-probe-aa
+			// TODO(excise): temporary; enabled by RSX_SURFACE_DIAG.  An antialias
+			// field outside the four GCM patterns is not a value the RSX register
+			// can be read back through: surface_antialias() dereferences the same
+			// expected, so the first later reader aborts the RSX thread
+			// (expected.hpp:93; DS 2026-11-14, emu 0:00:35.46, the logos).  Report
+			// the FIFO words that carried it, keep the other format fields, and
+			// rewrite the AA field to 1x so the run continues.
+			if (!current.antialias() || !previous.antialias())
+			{
+				RSX(ctx)->note_invalid_surface_format(reg, arg, REGS(ctx)->latch);
+
+				if (!current.antialias())
+				{
+					REGS(ctx)->decode(reg, arg & ~0x0000f000u);
+				}
+
+				set_surface_dirty_bit(ctx, reg, arg);
+				return;
+			}
+			// EXCISE-END surface-format-probe-aa
+
 			// Check for different ROP emulation
 			if (current.is_integer_color_format() != previous.is_integer_color_format())
 			{

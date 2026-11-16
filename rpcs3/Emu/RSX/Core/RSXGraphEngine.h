@@ -40,7 +40,8 @@ namespace rsx
 		void get_current_fragment_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count>& sampler_descriptors);
 
 		// Forces a fragment ucode reload if a DMA write overlaps the bound program. Returns true if it did.
-		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size);
+		// `writer` names the FIFO method that performed the write; it is diagnostic only.
+		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer = "?");
 
 	private:
 		context* m_ctx = nullptr;

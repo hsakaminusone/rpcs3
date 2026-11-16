@@ -619,7 +619,18 @@ def apply_spans(text: str, spans: list[Span], path: str,
         last = end
         edits.append(Edit(path, start, end, rule, text[start:min(end, start + 120)].replace("\n", " "), line_of(text, start)))
     for start, end, _ in reversed(spans):
-        text = text[:start] + text[end:]
+        head, tail = text[:start], text[end:]
+        # A deletion can leave several blank lines at the splice; keep at most two
+        # (three newlines).  The collapse is local to the splice: a blank run
+        # elsewhere in the file is not part of the excision and is left alone, so
+        # an untouched file is never rewritten and an edited file keeps its
+        # pre-existing blank runs.
+        lead = len(head) - len(head.rstrip("\n"))
+        trail = len(tail) - len(tail.lstrip("\n"))
+        if lead + trail >= 4:
+            text = head[:len(head) - lead] + "\n" * 3 + tail[trail:]
+        else:
+            text = head + tail
     return text
 
 
@@ -949,10 +960,7 @@ def transform_source(path: str, text: str) -> Result:
     prose = collect_prose_marker_spans(text, path, so_far, reviews)
 
     spans = merge_spans(text, path, explicit + guards + markers + macros + includes + prose, reviews)
-    text = apply_spans(text, spans, path, result.edits)
-    # Cosmetic: a deletion can leave several blank lines; keep at most two.
-    text = re.sub(r"\n{4,}", "\n\n\n", text)
-    result.text = text
+    result.text = apply_spans(text, spans, path, result.edits)
     return result
 
 

@@ -92,7 +92,7 @@ namespace rsx
 				{
 					// Move last 32 bits
 					reinterpret_cast<u32*>(dst)[0] = reinterpret_cast<const u32*>(src)[count - 1];
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 4);
+					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 4, "nv308a");
 					return;
 				}
 
@@ -107,7 +107,7 @@ namespace rsx
 					std::memcpy(dst, src, data_length);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 4);
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 4, "nv308a");
 				break;
 			}
 			case blit_engine::transfer_destination_format::r5g6b5:
@@ -143,7 +143,7 @@ namespace rsx
 				{
 					// Move last 16 bits
 					dst[0] = convert(src[count - 1]);
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 2);
+					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 2, "nv308a-r5g6b5");
 					break;
 				}
 
@@ -152,7 +152,7 @@ namespace rsx
 					dst[i] = convert(src[i]);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 2);
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 2, "nv308a-r5g6b5");
 				break;
 			}
 			default:

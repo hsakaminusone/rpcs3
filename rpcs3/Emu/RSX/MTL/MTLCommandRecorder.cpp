@@ -13,6 +13,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <mach/mach_time.h>
 #include <thread>
 
@@ -85,12 +87,102 @@ namespace mtl
 		return m_completed[slot].load(std::memory_order_acquire);
 	}
 
+	// EXCISE-BEGIN encoder-provenance-impl
+	// TODO(excise): level 1; see encoder_stamp().
+	const char* command_recorder::encoder_event_name(encoder_event event)
+	{
+		switch (event)
+		{
+		case encoder_event::begin_frame: return "begin-frame";
+		case encoder_event::open_pass: return "open-pass";
+		case encoder_event::open_compute: return "open-compute";
+		case encoder_event::close_encoder: return "close-encoder";
+		case encoder_event::reenter_slot: return "reenter-slot";
+		case encoder_event::allocate_slot: return "allocate-slot";
+		case encoder_event::release_slot: return "release-slot";
+		case encoder_event::submit: return "submit";
+		case encoder_event::readback: return "readback";
+		}
+
+		return "?";
+	}
+
+	void command_recorder::note_encoder_event(encoder_event event, MTL4::CommandEncoder* encoder, void* caller)
+	{
+		++m_encoder_stamp;
+
+		if (!probe::at_least(1))
+		{
+			return;
+		}
+
+		encoder_event_record& record = m_encoder_events[m_encoder_event_count % encoder_event_capacity];
+		++m_encoder_event_count;
+		record.stamp = m_encoder_stamp;
+		record.event = event;
+		record.encoder = encoder;
+		record.caller = caller;
+		record.slot = m_slot;
+	}
+
+	void command_recorder::dump_encoder_events(const char* why) const
+	{
+		const u32 count = std::min<u32>(m_encoder_event_count, encoder_event_capacity);
+
+		rsx_log.error("Metal 4: encoder history (%s): stamp %u, slot %u, %u event(s) kept",
+			why, m_encoder_stamp, m_slot, count);
+
+		for (u32 index = 0; index < count; ++index)
+		{
+			const encoder_event_record& record =
+				m_encoder_events[(m_encoder_event_count - count + index) % encoder_event_capacity];
+
+			rsx_log.error("  stamp %u: %s encoder %p slot %u caller %p",
+				record.stamp, encoder_event_name(record.event),
+				static_cast<void*>(record.encoder), record.slot, record.caller);
+		}
+	}
+	// EXCISE-END encoder-provenance-impl
+
+	// EXCISE-BEGIN encoder-watch-impl
+	// TODO(excise): level 1; see watch_encoder().
+	void command_recorder::watch_encoder(MTL4::CommandEncoder* encoder, u64 draw)
+	{
+		if (!probe::at_least(1))
+		{
+			return;
+		}
+
+		m_watched_encoder = encoder;
+		m_watched_draw = draw;
+		m_watch_depth = 0;
+	}
+
+	void command_recorder::dump_stack(const char* why, void* const* frames, u32 count) const
+	{
+		rsx_log.error("Metal 4: %s: %u frame(s), innermost first", why, count);
+
+		for (u32 index = 0; index < count; ++index)
+		{
+			Dl_info info{};
+			dladdr(frames[index], &info);
+
+			rsx_log.error("  #%u pc %p base %p image %s", index, frames[index],
+				info.dli_fbase, info.dli_fname ? info.dli_fname : "?");
+		}
+	}
+	// EXCISE-END encoder-watch-impl
+
 	// Drop the Metal objects of one slot.  A committed command buffer and its
 	// allocator are retained by the queue until their work completes, so releasing
 	// this reference is safe even when the commit never reported back; resetting
 	// the allocator is not (DEVIATIONS-SYNC.md, SY3).
 	void command_recorder::release_slot(frame_slot& slot)
 	{
+		// EXCISE-BEGIN encoder-provenance-release-slot
+		note_encoder_event(encoder_event::release_slot, m_encoder, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-release-slot
+
 		// The slot is being abandoned or rebuilt, so its label addresses no longer
 		// describe anything the GPU can still write.
 		slot.labels.clear();
@@ -99,6 +191,12 @@ namespace mtl
 		{
 			slot.interpreter_fragment_table->release();
 			slot.interpreter_fragment_table = nullptr;
+		}
+
+		if (slot.blit_table)
+		{
+			slot.blit_table->release();
+			slot.blit_table = nullptr;
 		}
 
 		if (slot.interpreter_vertex_table)
@@ -138,6 +236,10 @@ namespace mtl
 	{
 		release_slot(slot);
 
+		// The slot now holds fresh table objects, so every writer that caches what
+		// it wrote must start over (see table_generation()).
+		++m_table_generation;
+
 		MTL4::ArgumentTableDescriptor* descriptor = MTL4::ArgumentTableDescriptor::alloc()->init();
 		descriptor->setMaxBufferBindCount(argument_buffer_count);
 		descriptor->setMaxTextureBindCount(argument_texture_count);
@@ -151,14 +253,19 @@ namespace mtl
 		slot.fragment_table = m_device->newArgumentTable(descriptor, nullptr);
 		slot.interpreter_vertex_table = m_device->newArgumentTable(descriptor, nullptr);
 		slot.interpreter_fragment_table = m_device->newArgumentTable(descriptor, nullptr);
+		slot.blit_table = m_device->newArgumentTable(descriptor, nullptr);
 
 		descriptor->release();
 
 		if (!slot.allocator || !slot.command_buffer || !slot.vertex_table || !slot.fragment_table ||
-			!slot.interpreter_vertex_table || !slot.interpreter_fragment_table)
+			!slot.interpreter_vertex_table || !slot.interpreter_fragment_table || !slot.blit_table)
 		{
 			die("command recorder allocation failed");
 		}
+
+		// EXCISE-BEGIN encoder-provenance-allocate-slot
+		note_encoder_event(encoder_event::allocate_slot, nullptr, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-allocate-slot
 	}
 
 	bool command_recorder::slot_idle(const frame_slot& slot) const
@@ -363,6 +470,9 @@ namespace mtl
 			m_reenter_pending = false;
 			m_encoder = nullptr;
 			m_compute_encoder = nullptr;
+			// EXCISE-BEGIN encoder-provenance-begin-frame
+			note_encoder_event(encoder_event::begin_frame, nullptr, __builtin_return_address(0));
+			// EXCISE-END encoder-provenance-begin-frame
 		}
 
 #if MTL_PERF_ENABLED
@@ -445,6 +555,10 @@ namespace mtl
 		}
 
 		m_slot = (m_slot + 1) % frame_slot_count;
+
+		// EXCISE-BEGIN encoder-provenance-submit
+		note_encoder_event(encoder_event::submit, nullptr, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-submit
 	}
 
 	void command_recorder::flush_for_readback()
@@ -479,6 +593,10 @@ namespace mtl
 		// Each commit takes a generation of its own, so a late feedback of the
 		// frame's earlier commit cannot clear this one.
 		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
+		// EXCISE-BEGIN encoder-provenance-readback
+		note_encoder_event(encoder_event::readback, nullptr, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-readback
+
 		commit_slot(slot, m_slot, generation);
 
 		// The slot came back, so its GPU work is complete and the same slot serves
@@ -551,6 +669,10 @@ namespace mtl
 		m_reenter_pending = false;
 		m_encoder = nullptr;
 		m_compute_encoder = nullptr;
+
+		// EXCISE-BEGIN encoder-provenance-reenter-slot
+		note_encoder_event(encoder_event::reenter_slot, nullptr, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-reenter-slot
 	}
 
 	void command_recorder::set_present_drawable(MTL::Drawable* drawable)
@@ -593,6 +715,9 @@ namespace mtl
 
 		MTL4::RenderCommandEncoder* encoder = m_slots[m_slot].command_buffer->renderCommandEncoder(descriptor, options);
 		m_encoder = encoder;
+		// EXCISE-BEGIN encoder-provenance-open-pass
+		note_encoder_event(encoder_event::open_pass, encoder, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-open-pass
 		return encoder;
 	}
 
@@ -634,6 +759,9 @@ namespace mtl
 		MTL4::ComputeCommandEncoder* encoder = m_slots[m_slot].command_buffer->computeCommandEncoder();
 		m_encoder = encoder;
 		m_compute_encoder = encoder;
+		// EXCISE-BEGIN encoder-provenance-open-compute
+		note_encoder_event(encoder_event::open_compute, encoder, __builtin_return_address(0));
+		// EXCISE-END encoder-provenance-open-compute
 		return encoder;
 	}
 
@@ -892,6 +1020,34 @@ namespace mtl
 		MTL_PERF_SCOPE(1, "recorder/close encoder");
 		if (m_encoder)
 		{
+			// EXCISE-BEGIN encoder-provenance-close-encoder
+			note_encoder_event(encoder_event::close_encoder, m_encoder, __builtin_return_address(0));
+			// TODO(excise): level 3; one line per close, so the log carries the same
+			// pointer the draw trace does and the two can be joined without the ring.
+			MTL_NOTE(3, "Metal 4: close encoder %p slot %u stamp %u in flight %u",
+				static_cast<void*>(m_encoder), m_slot, m_encoder_stamp,
+				m_slots[m_slot].buffer_open ? 1u : 0u);
+			// EXCISE-END encoder-provenance-close-encoder
+
+			// EXCISE-BEGIN encoder-watch-trap
+			// TODO(excise): level 1; the draw still holds this encoder, so ending it
+			// here is the fault the run reproduces.  The stack is taken now, while
+			// the culprit is on it.  Bounded to four reports.
+			if (m_watched_encoder && m_encoder == m_watched_encoder)
+			{
+				m_watch_depth = static_cast<u32>(backtrace(m_watch_stack, static_cast<int>(encoder_watch_depth)));
+				++m_watch_reports;
+
+				if (m_watch_reports <= 4)
+				{
+					rsx_log.error("Metal 4: the draw's encoder %p was closed while the draw was open (draw %llu, slot %u, stamp %u, reports %u)",
+						static_cast<void*>(m_encoder), m_watched_draw, m_slot, m_encoder_stamp, m_watch_reports);
+					dump_encoder_events("encoder closed inside the draw");
+					dump_stack("close inside the draw", m_watch_stack, m_watch_depth);
+				}
+			}
+			// EXCISE-END encoder-watch-trap
+
 			// The encoder boundary is the backstop the rest of the backend relies on:
 			// Metal 4 tracks no hazards, so once this encoder ends, nothing else in the
 			// backend is obliged to reconstruct what it wrote.  StageAll includes the

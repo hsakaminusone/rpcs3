@@ -32,8 +32,34 @@ namespace mtl
 		return state;
 	}
 
-	MTL::PrimitiveType get_primitive_type(rsx::primitive_type mode)
+	MTL::PrimitiveType get_primitive_type(rsx::primitive_type mode, bool flat)
 	{
+		if (flat)
+		{
+			// Flat shading rotates every primitive group and unrolls every strip
+			// into a list (Common/BufferUtils.cpp, expand_indexed_flat), so only
+			// a point keeps a non-list topology.
+			switch (mode)
+			{
+			case rsx::primitive_type::points:
+				return MTL::PrimitiveTypePoint;
+			case rsx::primitive_type::lines:
+			case rsx::primitive_type::line_strip:
+			case rsx::primitive_type::line_loop:
+				return MTL::PrimitiveTypeLine;
+			case rsx::primitive_type::triangles:
+			case rsx::primitive_type::triangle_strip:
+			case rsx::primitive_type::triangle_fan:
+			case rsx::primitive_type::quads:
+			case rsx::primitive_type::quad_strip:
+			case rsx::primitive_type::polygon:
+				return MTL::PrimitiveTypeTriangle;
+			default:
+				rsx_log.error("Metal 4: unknown flat primitive type 0x%x", static_cast<u8>(mode));
+				return MTL::PrimitiveTypeTriangle;
+			}
+		}
+
 		switch (mode)
 		{
 		case rsx::primitive_type::points:

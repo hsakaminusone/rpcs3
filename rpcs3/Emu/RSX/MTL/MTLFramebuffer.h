@@ -48,7 +48,12 @@ namespace mtl
 		// (MTLZCULL.h).  The zcull backend owns the buffer and sets it once.
 		void set_visibility_buffer(MTL::Buffer* buffer) { m_visibility = buffer; }
 
-		bool valid() const { return m_color_count != 0 || m_depth != nullptr; }
+		// A guest framebuffer with no attachments still rasterises, so it needs a
+		// pass: Metal refuses one without an attachment and counts no fragments in
+		// it, while a depth-only pass builds and counts normally (probe cases A and
+		// C).  The scratch image below is that attachment; it holds no guest data.
+		bool valid() const { return m_color_count != 0 || m_depth != nullptr || m_scratch_depth != nullptr; }
+		bool empty_pass() const { return m_color_count == 0 && m_depth == nullptr && m_scratch_depth != nullptr; }
 		u8 color_count() const { return m_color_count; }
 		u8 sample_count() const { return m_sample_count; }
 		bool has_depth() const { return m_depth != nullptr; }
@@ -67,6 +72,9 @@ namespace mtl
 			std::array<MTL::Texture*, 4> resolve{};
 			MTL::Texture* depth = nullptr;
 			MTL::Texture* depth_resolve = nullptr;
+			// The no-attachment pass has no surface depth image, so its pass identity
+			// carries the scratch one instead.
+			MTL::Texture* scratch_depth = nullptr;
 			MTL::Buffer* visibility = nullptr;
 			u8 color_count = 0;
 			u8 sample_count = 1;
@@ -78,8 +86,17 @@ namespace mtl
 
 		pass_key current_key() const;
 
+		// Allocate or resize the depth-only attachment of a pass with no guest
+		// attachment.  The image holds no data (both actions are DontCare), so only
+		// its extent and sample count matter.
+		void ensure_scratch_depth(command_recorder& cmd, u8 samples);
+
 		std::array<surface*, 4> m_color{};
 		surface* m_depth = nullptr;
+		MTL::Texture* m_scratch_depth = nullptr;
+		u16 m_scratch_width = 0;
+		u16 m_scratch_height = 0;
+		u8 m_scratch_samples = 0;
 		MTL::Buffer* m_visibility = nullptr;
 		rsx::framebuffer_layout m_layout{};
 		pass_key m_pass_key{};

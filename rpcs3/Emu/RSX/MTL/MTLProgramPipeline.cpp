@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +48,64 @@ namespace mtl
 
 		std::ofstream(base + ".glsl") << glsl;
 		std::ofstream(base + ".metal") << msl;
+	}
+
+	// TODO(excise): level 5; the ucode and the constant map of one fragment
+	// program.  The draw fills the constant ring from this file, so the pair is
+	// the other half of every "the shader read the wrong value" question: a slot
+	// that the map calls a constant and the ucode holds data at is a value the
+	// guest really supplied, and a slot that lands on an instruction word or past
+	// the program is an offset the decompiler named wrongly.
+	void diagnostic_dump_fragment_constants(const RSXFragmentProgram& program, u32 id, const std::vector<u32>& offsets)
+	{
+		// TODO(excise): level 5; the same budget as the GLSL/MSL dump.
+		if (id >= 512)
+		{
+			return;
+		}
+
+		const u8* data = static_cast<const u8*>(program.get_data());
+		const u32 length = program.ucode_length;
+
+		if (!data || !length)
+		{
+			return;
+		}
+
+		std::error_code error;
+		std::filesystem::create_directories(probe::dump_directory(), error);
+		const std::string base = std::string(probe::dump_directory()) + "/fp-" + std::to_string(id);
+
+		std::ofstream(base + ".ucode.bin", std::ios::binary).write(reinterpret_cast<const char*>(data), length);
+
+		std::ofstream map(base + ".const.txt");
+		map << "fp " << id << " ucode_length " << length << " total_length " << program.total_length
+			<< " program_offset " << program.offset << " constants " << offsets.size() << "\n";
+
+		for (usz index = 0; index < offsets.size() && index < 256; ++index)
+		{
+			const u32 at = offsets[index];
+			const bool in_bounds = (at + 16) <= length;
+
+			map << "[" << index << "] offset " << at << (in_bounds ? "" : " OUT-OF-BOUNDS");
+
+			for (u32 word = 0; word < 4; ++word)
+			{
+				u32 value = 0;
+				const u32 byte = at + word * 4;
+
+				if (byte + 4 <= length)
+				{
+					std::memcpy(&value, data + byte, 4);
+				}
+
+				char text[16];
+				std::snprintf(text, sizeof(text), " %08x", value);
+				map << text;
+			}
+
+			map << "\n";
+		}
 	}
 #endif // MTL_DEBUG_LOGS
 
@@ -996,6 +1055,29 @@ namespace mtl
 			return;
 		}
 
+#if MTL_DEBUG_LOGS
+		// EXCISE-BEGIN fp-ucode-image
+		// TODO(excise): level 5; freeze the identity of the image that produced the
+		// offset map, so the draw can say whether the literals it reads are the same
+		// bytes.  Bounded: the last 16 dwords, which is where a fragment program's
+		// trailing literals live, plus the hash of the whole program.
+		{
+			const u32 length = program.ucode_length;
+			const u8* base = static_cast<const u8*>(program.get_data());
+			const u32 words = std::min<u32>(length / 4, 16);
+
+			data.diagnostic_ucode_hash = base ? probe::fnv1a(base, length) : 0;
+			data.diagnostic_ucode_offset = program.offset;
+			data.diagnostic_ucode_length = length;
+
+			for (u32 i = 0; i < words; ++i)
+			{
+				std::memcpy(&data.diagnostic_ucode_tail[i], base + length - (words - i) * 4, 4);
+			}
+		}
+		// EXCISE-END fp-ucode-image
+#endif
+
 		if (!spirv::compile_glsl_to_spv(data.spv, glsl, ::glsl::glsl_fragment_program, ::glsl::glsl_rules_vulkan))
 		{
 			rsx_log.error("Metal: fragment SPIR-V compilation failed (fp id %u)", data.id);
@@ -1026,6 +1108,9 @@ namespace mtl
 		if (::mtl::probe::at_least(5))
 		{
 			diagnostic_dump_program("fp", data.id, glsl, data.msl);
+
+			// TODO(excise): level 5; the ucode the constant map indexes.
+			diagnostic_dump_fragment_constants(program, data.id, data.constant_offsets);
 		}
 #endif
 	}

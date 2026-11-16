@@ -15,9 +15,11 @@ bool is_primitive_native(rsx::primitive_type m_draw_mode);
 bool is_primitive_disjointed(rsx::primitive_type draw_mode);
 
 /**
- * Returns a fixed index count for emulated primitive, otherwise returns initial_index_count
+ * Returns a fixed index count for emulated primitive, otherwise returns initial_index_count.
+ * With provoking_vertex_last the emitted list is rotated and unrolled (expand_indexed_flat),
+ * so the host count is the size of that list, not the guest count.
  */
-u32 get_index_count(rsx::primitive_type m_draw_mode, u32 initial_index_count);
+u32 get_index_count(rsx::primitive_type m_draw_mode, u32 initial_index_count, bool provoking_vertex_last = false);
 
 /**
  * Returns index type size in byte
@@ -28,15 +30,21 @@ u32 get_index_type_size(rsx::index_array_type type);
  * Write count indexes using (first, first + count) ranges.
  * Returns min/max index found during the process and the number of valid indices written to the buffer.
  * The function expands index buffer for non native primitive type if expands(draw_mode) return true.
+ * provoking_vertex_last additionally unrolls and rotates every primitive group, which is what a
+ * backend whose flat interpolant comes from the first vertex needs (Metal).
  */
 std::tuple<u32, u32, u32> write_index_array_data_to_buffer(std::span<std::byte> dst, std::span<const std::byte> src,
 	rsx::index_array_type, rsx::primitive_type draw_mode, bool restart_index_enabled, u32 restart_index,
-	const std::function<bool(rsx::primitive_type)>& expands);
+	const std::function<bool(rsx::primitive_type)>& expands, bool provoking_vertex_last = false);
 
 /**
  * Write index data needed to emulate non indexed non native primitive mode.
+ * With provoking_vertex_last the groups are rotated and strips unrolled.  first_index is the
+ * value of the first emitted index, so a clause subrange keeps its position in the vertex stream.
+ * Returns the exact number of indices written.
  */
-void write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst, rsx::primitive_type draw_mode, unsigned count);
+u32 write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst, rsx::primitive_type draw_mode, unsigned count,
+	bool provoking_vertex_last = false, u32 first_index = 0);
 
 // Copy and swap data in 32-bit units
 extern void(*const copy_data_swap_u32)(u32* dst, const u32* src, u32 count);

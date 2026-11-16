@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MTLArgumentBinds.h"
+#include "MTLBlit.h"
 #include "MTLCommandRecorder.h"
 #include "MTLHandles.h"
 #include "MTLInstrumentation.h"
@@ -288,8 +289,14 @@ namespace mtl
 		// renderer sets this once, after the resource layer knows the capability.
 		bool m_supports_bc = true;
 
+		// The built-in scaled copy the guest's 2D engine transfers run on
+		// (MTLBlit.h).  The renderer binds it once; a cache with no blitter declines
+		// every transfer, which is the CPU path this backend used before.
+		mtl::blitter m_blitter;
+
 	public:
 		void set_bc_texture_support(bool supported) { m_supports_bc = supported; }
+		void set_blitter(blit_pass* pass, constants_heap* constants) { m_blitter.bind(pass, constants); }
 
 	private:
 		void clear()
@@ -386,7 +393,12 @@ namespace mtl
 			descriptor->setArrayLength(1);
 			descriptor->setMipmapLevelCount(extent.mipmaps);
 			descriptor->setSampleCount(1);
-			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView);
+			// Render-target usage is what lets the built-in blitter draw into a
+			// temporary (MTLBlit.h, the D5 resample and the mip/slice/cube
+			// generators).  It is a usage bit, not a format: Metal accepts it for
+			// every format the cache creates, compressed ones included, and a
+			// texture only becomes a pass's attachment when a transfer asks for it.
+			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView | MTL::TextureUsageRenderTarget);
 			return descriptor;
 		}
 
@@ -930,6 +942,29 @@ namespace mtl
 		// produced here, so the caller records the transfer write for the scheduler.
 		texture_bind resolve_texture_bind(command_recorder& cmd, rsx::sampled_image_descriptor_base* descriptor,
 			MTL::SamplerState* sampler, bool& deferred);
+
+		// Run one guest 2D-engine transfer on the GPU through the shared
+		// upload_scaled_image (VK/VKTextureCache.cpp:1683-1699).  False means the
+		// shared code declined before touching the cache, so the caller runs its CPU
+		// fallback with the cache in its original state.
+		template <typename surface_store_type>
+		bool blit(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate,
+			surface_store_type& rtts, command_recorder& cmd)
+		{
+			rsx::blit_op_result reply = upload_scaled_image(src, dst, interpolate, cmd, rtts, m_blitter);
+
+			if (!reply.succeeded)
+			{
+				return false;
+			}
+
+			if (reply.dst_range.valid())
+			{
+				flush_if_cache_miss_likely(cmd, reply.dst_range);
+			}
+
+			return true;
+		}
 	};
 }
 

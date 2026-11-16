@@ -235,7 +235,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length);
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length, "nv3089");
 
 				if (const auto result = RSX(ctx)->read_barrier(src_address, data_length, false);
 					result == rsx::result_zcull_intr)
@@ -259,7 +259,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length);
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length, "nv3089");
 				RSX(ctx)->read_barrier(src_address, data_length, true);
 			}
 

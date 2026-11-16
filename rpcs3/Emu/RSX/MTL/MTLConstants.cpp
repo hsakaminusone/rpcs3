@@ -234,6 +234,7 @@ namespace mtl
 			set.stipple.init(resources, draw_capacity);
 			set.blend_values.init(resources, draw_capacity);
 			set.fill_values.init(resources, fill_capacity);
+			set.blit_values.init(resources, blit_capacity);
 			set.vertex_draw_params.init(resources, draw_capacity);
 			set.fragment_constants.init(resources, constant_capacity);
 			// One change is one 468-vec4 file, so the ring holds the changes, not
@@ -265,6 +266,7 @@ namespace mtl
 			set.stipple.shutdown();
 			set.blend_values.shutdown();
 			set.fill_values.shutdown();
+			set.blit_values.shutdown();
 			set.vertex_draw_params.shutdown();
 			set.fragment_constants.shutdown();
 			set.transform_constants.shutdown();
@@ -300,7 +302,8 @@ namespace mtl
 			set.stipple.generation(), set.blend_values.generation(),
 			set.fill_values.generation(), set.vertex_draw_params.generation(),
 			set.fragment_constants.generation(), set.transform_constants.generation(),
-			set.instancing_constants.generation(), set.instancing_lookup.generation()
+			set.instancing_constants.generation(), set.instancing_lookup.generation(),
+			set.blit_values.generation()
 		};
 
 		for (u32 ring = 0; ring < frame_snapshot::ring_count; ++ring)
@@ -321,6 +324,7 @@ namespace mtl
 		set.stipple.begin_frame();
 		set.blend_values.begin_frame();
 		set.fill_values.begin_frame();
+		set.blit_values.begin_frame();
 		set.vertex_draw_params.begin_frame();
 		set.fragment_constants.begin_frame();
 		set.transform_constants.begin_frame();
@@ -624,6 +628,7 @@ namespace mtl
 		copy_ring(frame.stipple, set.stipple.data(), set.stipple.used() * sizeof(vec4_block));
 		copy_ring(frame.blend_values, set.blend_values.data(), set.blend_values.used() * sizeof(blend_values));
 		copy_ring(frame.fill_values, set.fill_values.data(), set.fill_values.used() * sizeof(fill_values));
+		copy_ring(frame.blit_values, set.blit_values.data(), set.blit_values.used() * sizeof(blit_values));
 		copy_ring(frame.vertex_draw_params, set.vertex_draw_params.data(), set.vertex_draw_params.used() * sizeof(u32));
 		copy_ring(frame.fragment_constants, set.fragment_constants.data(), set.fragment_constants.used() * sizeof(vec4_block));
 		copy_ring(frame.transform_constants, set.transform_constants.data(), set.transform_constants.used() * sizeof(vec4_block));
@@ -667,6 +672,7 @@ namespace mtl
 		collect_retired(frame.retired, 15, set.transform_constants);
 		collect_retired(frame.retired, 16, set.instancing_constants);
 		collect_retired(frame.retired, 17, set.instancing_lookup);
+		collect_retired(frame.retired, 18, set.blit_values);
 
 		frame.present = present;
 		frame.draw_count = static_cast<u32>(m_draws[m_slot].size());
