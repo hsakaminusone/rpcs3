@@ -3,8 +3,12 @@
 #include "ProgramStateCache512.h"
 #include "Emu/system_config.h"
 #include "Emu/RSX/Core/RSXDriverState.h"
+#include "Emu/RSX/RSXThread.h"
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
 #include "util/sysinfo.hpp"
 
+#include <bit>
+#include <cmath>
 #include <stack>
 
 #if defined(ARCH_X64)
@@ -698,6 +702,58 @@ namespace rsx
 		write_fragment_constants_to_buffer_fallback(buffer, rsx_prog, offsets_cache, sanitize);
 #endif
 
+		// EXCISE-BEGIN fp-literal-reverse-variant
+		// TODO(excise): level 5; the functional oracle for the trailing literal
+		// block.  A lane whose value as the fill produced it is not a plausible
+		// float, but whose 32-bit byte reversal is, is replaced by the reversal.
+		// The test is the diagnosis: the authored lanes of the same quad (2 and
+		// 1) are plausible and are never touched, so a correct image cannot come
+		// from damaging them.  No shipping path reads the environment variable.
+		unsigned s_reversed = 0;
+
+		if (const char* mode = std::getenv("RSX_FP_LITERAL_FIX"))
+		{
+			const bool reverse = std::strcmp(mode, "bswap32") == 0;
+			const bool halves = std::strcmp(mode, "halves") == 0;
+
+			if ((reverse || halves) && offsets_cache.size() >= 2 && rsx_prog.ucode_length >= 3000)
+			{
+				for (usz i = offsets_cache.size() - 2; i < offsets_cache.size(); ++i)
+				{
+					for (unsigned lane = 0; lane < 4; ++lane)
+					{
+						f32& slot = buffer[i * 4 + lane];
+						const u32 raw = std::bit_cast<u32>(slot);
+						const u32 alt = reverse ? std::byteswap(raw) : ((raw << 16) | (raw >> 16));
+						const f32 candidate = std::bit_cast<f32>(alt);
+
+						const bool broken = !std::isfinite(slot) || std::abs(slot) > 1.0e6f;
+						const bool sane = std::isfinite(candidate) && std::abs(candidate) <= 1.0e6f;
+
+						if (!broken || !sane || alt == raw)
+						{
+							continue;
+						}
+
+						if (const char* path = std::getenv("RSX_FP_LITERAL_FIX_LOG"))
+						{
+							if (std::FILE* out = std::fopen(path, "a"))
+							{
+								std::fprintf(out, "fix fp off %u quad %u lane %u %08x %08x %g -> %g\n",
+									rsx_prog.offset, static_cast<u32>(i), lane, raw, alt,
+									static_cast<f64>(slot), static_cast<f64>(candidate));
+								std::fclose(out);
+							}
+						}
+
+						slot = candidate;
+						++s_reversed;
+					}
+				}
+			}
+		}
+		// EXCISE-END fp-literal-reverse-variant
+
 		// EXCISE-BEGIN fp-literal-fill
 		// TODO(excise): level 5; the fill itself, backend-agnostic, so the same
 		// draw can be compared across Metal, Vulkan and OpenGL.  It reports where
@@ -731,10 +787,28 @@ namespace rsx
 			{
 				s_last_hash = hash;
 
+				// TODO(excise): level 5; dump the ring of writes that landed in this
+				// image's range, so the write that produced the reversed literal is
+				// attributed even if it predates the program's first prefetch.
+				rsx::program_write_watch::dump_range(image, length, "fill-world");
+
+				// EXCISE-BEGIN fp-literal-fill-fifo
+				// TODO(excise): level 5; the FIFO cursor at the fill, so the
+				// patch that wrote the image can be ordered against the bind and
+				// matched to the writer line without a FIFO dump.
+				u32 fifo_pos = 0;
+
+				if (auto* rsxthr = rsx::get_current_renderer(); rsxthr && rsxthr->fifo_ctrl)
+				{
+					fifo_pos = rsxthr->fifo_ctrl->get_pos();
+				}
+				// EXCISE-END fp-literal-fill-fifo
+
 				char line[1024];
-				usz used = std::snprintf(line, sizeof(line), "fill fp off %u len %u hash %016llx count %u sanitize %u",
+				usz used = std::snprintf(line, sizeof(line), "fill fp off %u len %u hash %016llx count %u sanitize %u fifo %u fix %u",
 					rsx_prog.offset, length, static_cast<unsigned long long>(hash),
-					static_cast<u32>(offsets_cache.size()), sanitize ? 1u : 0u);
+					static_cast<u32>(offsets_cache.size()), sanitize ? 1u : 0u,
+					fifo_pos, s_reversed);
 
 				const usz first = offsets_cache.size() > 4 ? offsets_cache.size() - 4 : 0;
 

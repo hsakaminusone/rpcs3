@@ -1899,10 +1899,11 @@ namespace rsx
 		// address restore_point was captured at may have been reused by the guest
 		// since (RR7: the word there became a data value and recovery re-entered
 		// it twenty times in two seconds).  Prefer the newest executed packet
-		// whose header is still in the ring; umax means every candidate is
-		// poisoned, so leave the cursor alone and let the watchdog below report
-		// it instead of re-executing the same word.  The check is on the word, so
-		// a producer write at that position re-arms the resume.
+		// whose header is still in the ring.  umax means every candidate is
+		// poisoned and this exact position/word was already resumed once, so leave
+		// GET where it is rather than jump back to the same faulting word.  The
+		// repeated fault is bounded by the 20-fault watchdog above; because the
+		// check is on the word, a producer write at that position re-arms recovery.
 		if (const u32 resume = fifo_ctrl->recovery_point(fifo_ctrl->get_pos(), restore_point); resume != umax)
 		{
 			fifo_ctrl->set_get(resume);

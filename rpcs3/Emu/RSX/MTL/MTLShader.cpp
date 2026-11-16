@@ -207,12 +207,46 @@ namespace mtl
 		}
 	}
 
+	namespace
+	{
+		// `newLibrary`'s NSError** out-param is autoreleased into the pool that
+		// compile_msl drains before returning, but every synchronous caller reads
+		// that error only *after* the call.  On failure we retain the error and hand
+		// it to this thread-local owner so it stays alive across the pool drain.
+		// It is released on the next compile on this thread (by which point the
+		// previous caller has consumed its diagnostic) or at thread exit.
+		struct retained_compile_error
+		{
+			NS::Error* error = nullptr;
+
+			~retained_compile_error()
+			{
+				release();
+			}
+
+			void release()
+			{
+				if (error)
+				{
+					error->release();
+					error = nullptr;
+				}
+			}
+		};
+
+		thread_local retained_compile_error t_retained_compile_error;
+	}
+
 	MTL::Library* compile_msl(MTL4::Compiler* compiler, const std::string& msl, NS::Error** error)
 	{
 		if (!compiler || msl.empty())
 		{
 			return nullptr;
 		}
+
+		// Drop any error kept alive for the previous caller on this thread; that
+		// caller has finished reading it by the time we reach the next compile.
+		t_retained_compile_error.release();
 
 		// The RSX thread has no autorelease pool.  The descriptor builder creates
 		// autoreleased NS::String objects, so every compile needs a local pool.
@@ -230,6 +264,17 @@ namespace mtl
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
 		options->release();
 		descriptor->release();
+
+		if (!library && error && *error)
+		{
+			// Ownership: newLibrary returns the error autoreleased into `pool`
+			// (+1 owned by the pool).  Retain it (+2) so draining the pool below
+			// leaves it alive (+1, owned by the thread-local holder) for the caller
+			// to read after we return.  The next compile (or thread exit) releases it.
+			(*error)->retain();
+			t_retained_compile_error.error = *error;
+		}
+
 		pool->release();
 		return library;
 	}

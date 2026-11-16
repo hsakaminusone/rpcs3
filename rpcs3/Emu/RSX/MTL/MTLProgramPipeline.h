@@ -404,6 +404,15 @@ namespace mtl
 
 		pipeline_jobs* m_preload_jobs = nullptr;
 
+		// Whether the last lookup found no usable pipeline, which is the compile the
+		// user is about to wait on.  The shared set owns the flag and the Metal draw
+		// path reads it here, as the Vulkan cache does
+		// (ProgramStateCache.h:227, VKProgramBuffer.h:106-109).
+		bool check_cache_missed() const
+		{
+			return m_cache_miss_flag;
+		}
+
 		void preload_programs(rsx::program_cache_hint_t* cache_hint, const RSXVertexProgram& vp, const RSXFragmentProgram& fp)
 		{
 			search_vertex_program(cache_hint, vp);

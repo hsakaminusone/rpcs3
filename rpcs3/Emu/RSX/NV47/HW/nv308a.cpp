@@ -3,6 +3,7 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
 
 #include "context_accessors.define.h"
 
@@ -74,8 +75,11 @@ namespace rsx
 				// Bit cast - optimize to mem copy
 
 				const u32 data_length = count * 4;
+				// The blit writes at an element offset inside the destination;
+				// invalidation must cover the bytes actually written.
+				const u32 write_offset = dst_offset + (x * 4) + (out_pitch * y);
 
-				const auto dst_address = get_address(ctx, dst_offset + (x * 4) + (out_pitch * y), dst_dma, data_length);
+				const auto dst_address = get_address(ctx, write_offset, dst_dma, data_length);
 
 				if (!dst_address)
 				{
@@ -92,7 +96,21 @@ namespace rsx
 				{
 					// Move last 32 bits
 					reinterpret_cast<u32*>(dst)[0] = reinterpret_cast<const u32*>(src)[count - 1];
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 4, "nv308a");
+
+					// EXCISE-BEGIN fp-literal-write-watch
+					// TODO(excise): level 5; the single-word form of the write
+					// above, reported with the pointer it wrote through and the
+					// FIFO word it consumed.
+					rsx::program_write_watch::note("nv308a-noninc", reinterpret_cast<u64>(dst), 4,
+						src + (count - 1) * 4, 4,
+						[&](char* b, usz n)
+						{
+							std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u", x, y, out_pitch,
+								static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count);
+						});
+					// EXCISE-END fp-literal-write-watch
+
+					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 4, "nv308a");
 					return;
 				}
 
@@ -107,14 +125,28 @@ namespace rsx
 					std::memcpy(dst, src, data_length);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 4, "nv308a");
+				// EXCISE-BEGIN fp-literal-write-watch
+				// TODO(excise): level 5; the bulk form, reported with the pointer
+				// the copy wrote through, the FIFO bytes it consumed, and the
+				// destination geometry, so a write that lands on a program's
+				// literal block through an element offset is attributed.
+				rsx::program_write_watch::note("nv308a", reinterpret_cast<u64>(dst), data_length, src, data_length,
+					[&](char* b, usz n)
+					{
+						std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u", x, y, out_pitch,
+							static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count);
+					});
+				// EXCISE-END fp-literal-write-watch
+
+				RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, count * 4, "nv308a");
 				break;
 			}
 			case blit_engine::transfer_destination_format::r5g6b5:
 			{
 				const auto data_length = count * 2;
+				const u32 write_offset = dst_offset + (x * 2) + (y * out_pitch);
 
-				const auto dst_address = get_address(ctx, dst_offset + (x * 2) + (y * out_pitch), dst_dma, data_length);
+				const auto dst_address = get_address(ctx, write_offset, dst_dma, data_length);
 				const auto dst = vm::_ptr<u16>(dst_address);
 				const auto src = utils::bless<const be_t<u32>>(fifo_span.data());
 
@@ -143,7 +175,7 @@ namespace rsx
 				{
 					// Move last 16 bits
 					dst[0] = convert(src[count - 1]);
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 2, "nv308a-r5g6b5");
+					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 2, "nv308a-r5g6b5");
 					break;
 				}
 
@@ -152,7 +184,19 @@ namespace rsx
 					dst[i] = convert(src[i]);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 2, "nv308a-r5g6b5");
+				// EXCISE-BEGIN fp-literal-write-watch
+				// TODO(excise): level 5; the 16-bit form, which converts rather
+				// than copies, so a destination block that reads back as the
+				// source word would convict the per-element conversion.
+				rsx::program_write_watch::note("nv308a-r5g6b5", reinterpret_cast<u64>(dst), data_length,
+					src, count * 4,
+					[&](char* b, usz n)
+					{
+						std::snprintf(b, n, "x=%u y=%u pitch=%u count=%u", x, y, out_pitch, count);
+					});
+				// EXCISE-END fp-literal-write-watch
+
+				RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, count * 2, "nv308a-r5g6b5");
 				break;
 			}
 			default:

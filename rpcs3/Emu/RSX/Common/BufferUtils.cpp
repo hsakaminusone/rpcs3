@@ -1349,10 +1349,9 @@ namespace
 		{
 		case rsx::primitive_type::line_loop:
 		{
-			const auto &returnvalue = upload_untouched<T>(src, dst, draw_mode, restart_index_enabled, restart_index);
-			const auto index_count = dst.size_bytes() / sizeof(T);
-			dst[index_count] = src[0];
-			return returnvalue;
+			const auto [mn, mx, written] = upload_untouched<T>(src, dst, draw_mode, restart_index_enabled, restart_index);
+			dst[written] = src[0];
+			return std::make_tuple(mn, mx, written + 1);
 		}
 		case rsx::primitive_type::polygon:
 		case rsx::primitive_type::triangle_fan:

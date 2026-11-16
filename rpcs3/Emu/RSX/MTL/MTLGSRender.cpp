@@ -41,6 +41,7 @@
 #include "Emu/RSX/NV47/HW/context_accessors.define.h"
 #include "Emu/RSX/GSFrameBase.h"
 #include "Emu/RSX/Overlays/Shaders/shader_loading_dialog_native.h"
+#include "Emu/RSX/Overlays/overlay_compile_notification.h"
 #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
 #include "Emu/RSX/Program/program_util.h"
 #include "Emu/RSX/Program/SPIRVCommon.h"
@@ -344,7 +345,7 @@ namespace mtl
 		// detectors can fire at a scene change, and the press is the stronger
 		// signal, so refusing it is the one ordering that loses the frame the user
 		// pointed at.
-		void diagnostic_try_arm_capture(const char* reason, bool manual = false, bool forced = false)
+		void diagnostic_try_arm_capture(const char* reason, bool manual = false)
 		{
 			if (!probe::at_least(5))
 			{
@@ -4441,6 +4442,14 @@ namespace mtl
 			compiled_vertex = std::get<1>(data);
 			compiled_fragment = std::get<2>(data);
 
+			// A miss is the compile the user is about to wait on, so the HUD hint is
+			// raised here, exactly as the Vulkan path does it (VKGSRender.cpp:2058-2069).
+			if (frame.programs.check_cache_missed() && g_cfg.misc.show_shader_compilation_hint &&
+				RSX(m_ctx)->overlay_manager())
+			{
+				rsx::overlays::show_shader_compile_notification();
+			}
+
 			if (program && program->state)
 			{
 				// The real pipeline won.
@@ -7419,6 +7428,14 @@ namespace mtl
 			diagnostic_try_arm_capture("screenshot", true);
 			diagnostic_tape_freeze();
 		}
+
+		// TODO(excise): level 5; MTL_PROBE_ARM_FRAME=<frame> is the headless form
+		// of the same press, so a run with no keyboard still dumps the frame that
+		// shows the defect and the tape that leads up to it.
+		if (probe::arm_frame_matches(diagnostic_frame_index))
+		{
+			diagnostic_try_arm_capture("arm-frame", true);
+		}
 #else
 		const bool user_asked_for_screenshot = g_user_asked_for_screenshot.exchange(false);
 #endif
@@ -7490,6 +7507,13 @@ namespace mtl
 				? display_area
 				: avconfig.aspect_convert_region({ source.width, source.height }, { present_width, present_height });
 
+			// FSR enlarges the guest image to the aspect rectangle before the output
+			// pass, exactly as VK and GL run it before calibration or the blit
+			// (VKPresent.cpp:855-873, GLPresent.cpp:450-457).  It encodes compute, so
+			// it has to run before the drawable's render pass opens.
+			const present_source output_source = resources.output.upscale_source(resources.recorder,
+				resources.constants, source, aspect);
+
 			MTL4::RenderPassDescriptor* pass = MTL4::RenderPassDescriptor::alloc()->init();
 			MTL::RenderPassColorAttachmentDescriptor* attachment = pass->colorAttachments()->object(0);
 			attachment->setTexture(drawable);
@@ -7534,7 +7558,7 @@ namespace mtl
 				// applies (HLD-03 §2.1 item 6).
 				emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
 
-				resources.output.compose(encoder, resources.constants, drawable, source, aspect, display_area,
+				resources.output.compose(encoder, resources.constants, drawable, output_source, aspect, display_area,
 					avconfig.gamma, !g_cfg.video.full_rgb_range_output.get(), avconfig.stereo_enabled, RSX(m_ctx)->overlay_manager());
 			}
 			else

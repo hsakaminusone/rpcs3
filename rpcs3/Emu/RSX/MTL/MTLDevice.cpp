@@ -148,6 +148,17 @@ namespace mtl
 		}
 #endif
 
+		// The debug-output setting is the validation switch on this backend, as it is
+		// for OpenGL's debug context (gl_gs_frame.cpp:22-25) and Vulkan's validation
+		// layers.  Metal reads its debug layer from the environment, and only at the
+		// first device, so it is set here and never later.  `overwrite` is 0, so a
+		// value the user set in their own environment wins.
+		if (g_cfg.video.debug_output)
+		{
+			setenv("MTL_DEBUG_LAYER", "1", 0);
+			setenv("MTL_DEBUG_LAYER_ERROR_MODE", "nslog", 0);
+		}
+
 		m_device = MTL::CreateSystemDefaultDevice();
 		if (!m_device)
 		{
@@ -356,8 +367,9 @@ namespace mtl
 
 	void device::fill_backend_config(rsx::backend_configuration& cfg) const
 	{
-		// Docs: no native multi-draw command (docs/research/metal4/09 §4); a
-		// host-built indirect batcher lands later, until then draw clauses loop.
+		// Metal 4 has no multi-draw command, and nothing in the tree reads this flag
+		// today (the VK and GL draw paths consult their own device query), so it
+		// records the hardware fact rather than selecting a path.
 		cfg.supports_multidraw = false;
 
 		// The host sample count follows the video MSAA setting (surface::create,
@@ -379,7 +391,10 @@ namespace mtl
 		// transform (LLD-raster §3.2, invariant 4; VKDraw.cpp:1305-1320).
 		cfg.supports_extended_depth_range = false;
 		cfg.supports_framebufferless_rendering = true;
-		cfg.supports_asynchronous_compute = true;  // independent command buffers (HLD-04 §3.2)
+		// Every encoder in this backend is encoded on the slot's one command buffer
+		// and its one queue, so there is no async path to advertise.  VK sets this
+		// only when it really owns a second queue (VKGSRender.cpp:788-793).
+		cfg.supports_asynchronous_compute = false;
 
 		// Metal has no logic-op state, so the ROP emulates it by reading the
 		// destination colour through the framebuffer fetch the programmable-blend

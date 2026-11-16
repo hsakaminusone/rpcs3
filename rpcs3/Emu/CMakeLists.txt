@@ -726,6 +726,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLBlit.cpp
         RSX/MTL/MTLPresenter.cpp
         RSX/MTL/MTLPresent.cpp
+        RSX/MTL/MTLUpscaler.cpp
         RSX/MTL/MTLOverlays.cpp
         RSX/MTL/MTLZCULL.cpp
         RSX/MTL/MTLMetalLayer.mm

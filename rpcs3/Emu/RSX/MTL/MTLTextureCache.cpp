@@ -452,6 +452,15 @@ namespace mtl
 				const u32 plane_pitch = layout.width_in_texel * 4;
 				const u32 plane_rows = layout.height_in_texel * layout.depth;
 				MTL::Buffer* plane = cmd.resources().new_buffer(plane_pitch * plane_rows, MTL::StorageModeShared);
+				if (!plane)
+				{
+					// A failed allocation skips the remaining uploads rather than faulting on
+					// plane->contents().  The shared staging still has to be returned.
+					rsx_log.error("Metal 4: the %llu byte depth upload plane buffer could not be created",
+						static_cast<unsigned long long>(plane_pitch) * plane_rows);
+					cmd.resources().defer_release(staging);
+					return;
+				}
 
 				decode_depth_plane(plane->contents(), staging_data,
 					layout.width_in_texel, plane_rows, span.row_pitch,
@@ -636,6 +645,14 @@ namespace mtl
 			m_staging.reset();
 			m_staging = std::make_unique<buffer>(&cmd.resources());
 			m_staging->assign(cmd.resources().new_buffer(staging_size, MTL::StorageModeShared));
+			if (!m_staging->value())
+			{
+				// assign() only stores the pointer; every later use dereferences it.
+				rsx_log.error("Metal 4: the %llu byte read-back staging buffer could not be created",
+					static_cast<unsigned long long>(staging_size));
+				m_staging.reset();
+				return;
+			}
 			// TODO(excise): level 1; running total.
 			MTL_PERF_COUNT(1, "texture/readback staging bytes", staging_size);
 		}

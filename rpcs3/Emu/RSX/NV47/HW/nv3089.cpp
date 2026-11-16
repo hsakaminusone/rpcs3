@@ -3,6 +3,7 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
 #include "Emu/RSX/Common/tiled_dma_copy.hpp"
 #include "Emu/RSX/Host/MM.h"
 #include "Emu/RSX/Utils/image_utils.hpp"
@@ -235,7 +236,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length, "nv3089");
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, data_length, "nv3089");
 
 				if (const auto result = RSX(ctx)->read_barrier(src_address, data_length, false);
 					result == rsx::result_zcull_intr)
@@ -259,7 +260,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, data_length, "nv3089");
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, data_length, "nv3089");
 				RSX(ctx)->read_barrier(src_address, data_length, true);
 			}
 
@@ -615,6 +616,22 @@ namespace rsx
 				(dst.dma == CELL_GCM_CONTEXT_DMA_MEMORY_FRAME_BUFFER || src.dma == CELL_GCM_CONTEXT_DMA_MEMORY_FRAME_BUFFER) &&
 				RSX(ctx)->renderer()->scaled_image_from_memory(src, dst, in_inter == blit_engine::transfer_interpolator::foh))
 			{
+				// EXCISE-BEGIN fp-literal-write-ring
+				// TODO(excise): level 5; the HW-accelerated blit returns above and
+				// never reaches the nv3089 note() at the bottom of image_in.  Record
+				// it here so a patch delivered this way is attributed too.  The GPU
+				// write is async, so only the source bytes are authoritative here.
+				rsx::program_write_watch::note("nv3089-gpu", reinterpret_cast<u64>(dst.pixels), write_length,
+					src.pixels, std::min<u32>(16, read_length),
+					[&](char* b, usz n)
+					{
+						std::snprintf(b, n, "gpu out_x=%u out_y=%u pitch=%u out_w=%u out_h=%u bpp=%u fmt=%u scale=%g/%g",
+							static_cast<u32>(dst.offset_x), static_cast<u32>(dst.offset_y), dst.pitch,
+							static_cast<u32>(out_w), static_cast<u32>(out_h), static_cast<u32>(dst.bpp),
+							static_cast<u32>(dst.format), static_cast<f64>(dst.scale_x), static_cast<f64>(dst.scale_y));
+					});
+				// EXCISE-END fp-literal-write-ring
+
 				// HW-accelerated blit
 				return;
 			}
@@ -703,6 +720,20 @@ namespace rsx
 					dst.clip_height
 				);
 			}
+
+			// EXCISE-BEGIN fp-literal-write-watch
+			// TODO(excise): level 5; the image transfer writes through a pitch and
+			// may be swizzled, so this reports the destination the renderer was
+			// handed and the span it was told to cover, after every copy below it.
+			rsx::program_write_watch::note("nv3089", reinterpret_cast<u64>(dst.pixels), write_length, src.pixels, 16,
+				[&](char* b, usz n)
+				{
+					std::snprintf(b, n, "out_x=%u out_y=%u out_pitch=%u out_w=%u out_h=%u bpp=%u scale=%g/%g swz=%u",
+						static_cast<u32>(dst.offset_x), static_cast<u32>(dst.offset_y), dst.pitch,
+						static_cast<u32>(out_w), static_cast<u32>(out_h), static_cast<u32>(dst.bpp),
+						static_cast<f64>(dst.scale_x), static_cast<f64>(dst.scale_y), dst.swizzled ? 1u : 0u);
+				});
+			// EXCISE-END fp-literal-write-watch
 		}
 	}
 }

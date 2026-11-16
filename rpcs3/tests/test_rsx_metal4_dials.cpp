@@ -439,7 +439,7 @@ TEST(MTLDialMapper, PrimitiveTypeCollapsesToNativeTopologies)
 {
 	// Metal has no line loop, no quad list and no polygon; the shared expander
 	// rewrites them (Common/BufferUtils.cpp:942-957; CONFLICTS.md C5).
-	EXPECT_EQ(image_size(primitive_domain, mtl::get_primitive_type), 5u);
+	EXPECT_EQ(image_size(primitive_domain, [](rsx::primitive_type mode) { return mtl::get_primitive_type(mode); }), 5u);
 	EXPECT_EQ(mtl::get_primitive_type(rsx::primitive_type::points), MTL::PrimitiveTypePoint);
 	EXPECT_EQ(mtl::get_primitive_type(rsx::primitive_type::lines), MTL::PrimitiveTypeLine);
 	EXPECT_EQ(mtl::get_primitive_type(rsx::primitive_type::line_loop), mtl::get_primitive_type(rsx::primitive_type::line_strip));
