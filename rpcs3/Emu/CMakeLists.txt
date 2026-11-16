@@ -723,6 +723,7 @@ if(TARGET 3rdparty_metal)
         RSX/MTL/MTLShaderInterpreter.cpp
         RSX/MTL/MTLFramebuffer.cpp
         RSX/MTL/MTLFill.cpp
+        RSX/MTL/MTLBlit.cpp
         RSX/MTL/MTLPresenter.cpp
         RSX/MTL/MTLPresent.cpp
         RSX/MTL/MTLOverlays.cpp

@@ -39,6 +39,11 @@ namespace mtl
 	// unknown format, so a bit-preserving copy can reject a layout it cannot name.
 	u32 get_texel_size(MTL::PixelFormat format);
 
+	// True for the depth formats this backend creates.  Metal has no colour view of
+	// a depth image (EXPERIMENT-blit-and-attachments.mm, probe G), so a render pass
+	// cannot use one as a colour attachment.
+	bool is_depth_format(MTL::PixelFormat format);
+
 	// True when the guest depth pack differs from the Metal depth plane, so the
 	// guest words cannot be copied as-is (REVIEW-FINDINGS.md, B8).
 	bool depth_format_needs_decode(rsx::surface_depth_format2 format);

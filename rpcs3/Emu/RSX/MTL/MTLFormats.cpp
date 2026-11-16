@@ -254,6 +254,13 @@ namespace mtl
 		}
 	}
 
+	bool is_depth_format(MTL::PixelFormat format)
+	{
+		return format == MTL::PixelFormat::PixelFormatDepth16Unorm ||
+			format == MTL::PixelFormat::PixelFormatDepth32Float ||
+			format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8;
+	}
+
 	bool depth_format_needs_decode(rsx::surface_depth_format2 format)
 	{
 		switch (format)

@@ -697,6 +697,70 @@ namespace rsx
 #else
 		write_fragment_constants_to_buffer_fallback(buffer, rsx_prog, offsets_cache, sanitize);
 #endif
+
+		// EXCISE-BEGIN fp-literal-fill
+		// TODO(excise): level 5; the fill itself, backend-agnostic, so the same
+		// draw can be compared across Metal, Vulkan and OpenGL.  It reports where
+		// the offsets came from, which image they were read from (hash), and the
+		// last four quads both as guest words and as the floats the shader gets.
+		// If another backend hands the shader a different number for the same
+		// draw, the difference is in that backend; if it hands it the same number,
+		// the number is the guest's and the question moves upstream.  Bounded.
+		if (const char* path = std::getenv("RSX_FP_LITERAL_LOG"))
+		{
+			static unsigned s_reports = 0;
+			static u64 s_last_hash = 0;
+
+			const u8* image = static_cast<const u8*>(rsx_prog.get_data());
+			const u32 length = rsx_prog.ucode_length;
+			u64 hash = 0xcbf29ce484222325ull;
+
+			for (u32 i = 0; image && i < length; ++i)
+			{
+				hash = (hash ^ image[i]) * 0x100000001b3ull;
+			}
+
+			// TODO(excise): level 5; only the fill of an image whose trailing quad
+			// pair is the epilogue's (x 2 x 1) shape, which is the family under
+			// investigation, and only while a capture window is open, so the
+			// loading screen cannot spend the budget.  Consecutive identical images
+			// are folded so the log is one line per patched frame.
+			const bool world_family = length >= 3000 && offsets_cache.size() >= 2;
+
+			if (world_family && rsx::diagnostic_capture_window() && hash != s_last_hash && s_reports++ < 4096)
+			{
+				s_last_hash = hash;
+
+				char line[1024];
+				usz used = std::snprintf(line, sizeof(line), "fill fp off %u len %u hash %016llx count %u sanitize %u",
+					rsx_prog.offset, length, static_cast<unsigned long long>(hash),
+					static_cast<u32>(offsets_cache.size()), sanitize ? 1u : 0u);
+
+				const usz first = offsets_cache.size() > 4 ? offsets_cache.size() - 4 : 0;
+
+				for (usz i = first; i < offsets_cache.size() && used < sizeof(line); ++i)
+				{
+					u32 words[4] = {};
+
+					if (image && offsets_cache[i] + 16 <= length)
+					{
+						std::memcpy(words, image + offsets_cache[i], 16);
+					}
+
+					used += std::snprintf(line + used, sizeof(line) - used, " | [%u] @%u %08x %08x %08x %08x -> %.6g %.6g %.6g %.6g",
+						static_cast<u32>(i), offsets_cache[i], words[0], words[1], words[2], words[3],
+						static_cast<f64>(buffer[i * 4 + 0]), static_cast<f64>(buffer[i * 4 + 1]),
+						static_cast<f64>(buffer[i * 4 + 2]), static_cast<f64>(buffer[i * 4 + 3]));
+				}
+
+				if (std::FILE* out = std::fopen(path, "a"))
+				{
+					std::fprintf(out, "%s\n", line);
+					std::fclose(out);
+				}
+			}
+		}
+		// EXCISE-END fp-literal-fill
 	}
 
 	void program_cache_hint_t::invalidate(u32 flags)

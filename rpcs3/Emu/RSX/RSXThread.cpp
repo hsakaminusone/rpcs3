@@ -1394,9 +1394,9 @@ namespace rsx
 		m_ctx->core.graph().on_framebuffer_options_changed(opt);
 	}
 
-	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
+	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer)
 	{
-		return m_ctx->core.graph().invalidate_fragment_program(dst_dma, dst_offset, size);
+		return m_ctx->core.graph().invalidate_fragment_program(dst_dma, dst_offset, size, writer);
 	}
 
 	void thread::reset()
@@ -2007,6 +2007,64 @@ namespace rsx
 		// Last fifo cmd for logging and utility
 		return fifo_ctrl->last_cmd();
 	}
+
+	// EXCISE-BEGIN surface-format-probe-impl
+	// TODO(excise): temporary; see note_invalid_surface_format().
+	void thread::note_invalid_surface_format(u32 reg, u32 arg, u32 latch) const
+	{
+		if (!surface_diag::enabled())
+		{
+			return;
+		}
+
+		// The stream is already wrong; eight reports are enough to show whether
+		// the value repeats and whether it travels with a plausible packet.
+		static u32 reports = 0;
+
+		if (reports >= 8)
+		{
+			return;
+		}
+
+		++reports;
+
+		const u32 pos = fifo_ctrl ? fifo_ctrl->get_pos() : 0;
+		const u32 put = ctrl ? +ctrl->put : 0;
+
+		rsx_log.error("RSX surface format: invalid antialias %u (report %u): reg=0x%x arg=0x%08x latch=0x%08x cmd=0x%08x pos=0x%x put=0x%x",
+			(arg >> 12) & 0xf, reports, reg, arg, latch, get_fifo_cmd(), pos, put);
+
+		if (!fifo_ctrl || pos < 60)
+		{
+			return;
+		}
+
+		// The packet that carried the value: the parser publishes the position
+		// after the last argument it consumed, so fifteen words back cover a
+		// header plus its argument block.
+		for (u32 row = 0; row < 2; ++row)
+		{
+			std::string line;
+
+			for (u32 column = 0; column < 8; ++column)
+			{
+				const u32 at = pos - 60 + (row * 8 + column) * 4;
+				const u32 address = fifo_ctrl->translate_address(at);
+
+				if (address + 1)
+				{
+					fmt::append(line, " %08x", vm::read32(address));
+				}
+				else
+				{
+					fmt::append(line, " ????????");
+				}
+			}
+
+			rsx_log.error("  fifo 0x%x:%s", pos - 60 + row * 32, line);
+		}
+	}
+	// EXCISE-END surface-format-probe-impl
 
 	void thread::dump_regs(std::string& result, std::any& /*custom_data*/) const
 	{

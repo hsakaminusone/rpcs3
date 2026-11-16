@@ -26,6 +26,11 @@ namespace mtl
 		// shared tables (LLD-shader-interpreter §4.2, §7.1).
 		MTL4::ArgumentTable* interpreter_vertex_table = nullptr;
 		MTL4::ArgumentTable* interpreter_fragment_table = nullptr;
+		// The blit pass binds a source texture, its sampler and its values through a
+		// table of its own.  argument_binder only tracks its own writes, so a table
+		// shared with a draw would let a stale bind of the blit's sampler survive
+		// into the next draw's slot (MTLArgumentBinds.h, argument_binder).
+		MTL4::ArgumentTable* blit_table = nullptr;
 		// The completion-event value this slot's last commit reaches when the GPU
 		// has finished it.  Zero means the slot is idle.  The queue signals in
 		// commit order, so one monotone value covers every slot (SY14).  Only the
@@ -129,10 +134,39 @@ namespace mtl
 		// upload, readback or re-entered slot closes the encoder behind its back.
 		MTL4::CommandEncoder* current_encoder() const { return m_encoder; }
 
+		// EXCISE-BEGIN encoder-provenance
+		// TODO(excise): level 1; the encoder state machine's transitions.  A fault
+		// inside the driver on setArgumentTable is an encoder that was already
+		// ended, so a caller compares the stamp it captured with this one and, on a
+		// difference, asks for the history: it names the transition that ended the
+		// encoder and the site that asked for it.
+		u32 encoder_stamp() const { return m_encoder_stamp; }
+		void dump_encoder_events(const char* why) const;
+		// EXCISE-END encoder-provenance
+
+		// EXCISE-BEGIN encoder-watch
+		// TODO(excise): level 1; the encoder the draw is encoding into.  If the
+		// recorder closes it while the draw still holds it, that close *is* the
+		// defect, so the trap takes the stack at the close rather than inferring it
+		// from a pointer that is already stale.  One scope per draw, four reports.
+		void watch_encoder(MTL4::CommandEncoder* encoder, u64 draw);
+		void dump_stack(const char* why, void* const* frames, u32 count) const;
+		bool buffer_open() const { return m_slots[m_slot].buffer_open; }
+		// EXCISE-END encoder-watch
+
+		// The lifetime of the argument table objects.  A re-entered slot that had to
+		// take fresh objects has new tables, and a writer that caches what it wrote
+		// into the old ones must start over: an unchanged slot would otherwise stay
+		// unbound and read null.  The generation changes only when a table is
+		// replaced, never on the ordinary slot rotation (which resets the writers
+		// at the frame boundary).
+		u32 table_generation() const { return m_table_generation; }
+
 		MTL4::ArgumentTable* vertex_table() const { return m_slots[m_slot].vertex_table; }
 		MTL4::ArgumentTable* fragment_table() const { return m_slots[m_slot].fragment_table; }
 		MTL4::ArgumentTable* interpreter_vertex_table() const { return m_slots[m_slot].interpreter_vertex_table; }
 		MTL4::ArgumentTable* interpreter_fragment_table() const { return m_slots[m_slot].interpreter_fragment_table; }
+		MTL4::ArgumentTable* blit_table() const { return m_slots[m_slot].blit_table; }
 
 		// The open slot, so the per-frame rings size and reset with it.
 		u32 slot() const { return m_slot; }
@@ -216,8 +250,55 @@ namespace mtl
 		u32 m_diag_label_value = 0;
 		// EXCISE-END label-verify
 		u32 m_slot = 0;
+		// Bumped by allocate_slot() when a slot has to take fresh argument tables.
+		// See table_generation().
+		u32 m_table_generation = 0;
 		MTL4::CommandEncoder* m_encoder = nullptr;
 		MTL4::ComputeCommandEncoder* m_compute_encoder = nullptr;
+
+		// EXCISE-BEGIN encoder-provenance-state
+		// TODO(excise): level 1; see encoder_stamp().  The stamp counts every
+		// transition; the ring keeps the recent ones, so the history is bounded
+		// whether or not it is ever printed.
+		enum class encoder_event : u32
+		{
+			begin_frame, open_pass, open_compute, close_encoder,
+			reenter_slot, allocate_slot, release_slot, submit, readback,
+		};
+
+		struct encoder_event_record
+		{
+			u32 stamp = 0;
+			encoder_event event = encoder_event::begin_frame;
+			MTL4::CommandEncoder* encoder = nullptr;
+			void* caller = nullptr;
+			u32 slot = 0;
+		};
+
+		static constexpr u32 encoder_event_capacity = 24;
+		encoder_event_record m_encoder_events[encoder_event_capacity] = {};
+		u32 m_encoder_event_count = 0;
+		u32 m_encoder_stamp = 0;
+
+		// The jump table in the class body needs both types.
+		static const char* encoder_event_name(encoder_event event);
+
+		// A transition.  The caller is the return address of the transition's site,
+		// which is what identifies the path that ended an encoder.  The ring is only
+		// written when the probe asked for it; the stamp always advances.
+		void note_encoder_event(encoder_event event, MTL4::CommandEncoder* encoder, void* caller);
+		// EXCISE-END encoder-provenance-state
+
+		// EXCISE-BEGIN encoder-watch-state
+		// TODO(excise): level 1; see watch_encoder().
+		static constexpr u32 encoder_watch_depth = 24;
+		MTL4::CommandEncoder* m_watched_encoder = nullptr;
+		u64 m_watched_draw = 0;
+		u32 m_watch_reports = 0;
+		u32 m_watch_depth = 0;
+		void* m_watch_stack[encoder_watch_depth] = {};
+		// EXCISE-END encoder-watch-state
+
 		// Set when a commit left the slot closed; the next command re-enters it.
 		bool m_reenter_pending = false;
 		MTL::Drawable* m_drawable = nullptr;

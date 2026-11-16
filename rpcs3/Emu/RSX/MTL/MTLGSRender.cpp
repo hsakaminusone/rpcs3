@@ -7,6 +7,8 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include "MTLArgumentBinds.h"
+#include "MTLBlit.h"
 #include "MTLCommandRecorder.h"
 #include "MTLConstants.h"
 #include "MTLDrawState.h"
@@ -368,6 +370,7 @@ namespace mtl
 			diagnostic_capture_armed = true;
 			diagnostic_capture_dump_pending = true;
 			++diagnostic_capture_windows;
+			rsx::diagnostic_capture_window() = true;
 			diagnostic_reset_window_state();
 			diagnostic_tape_freeze();
 
@@ -398,6 +401,7 @@ namespace mtl
 			if (diagnostic_capture_armed && diagnostic_frame_index > diagnostic_capture_last_frame)
 			{
 				diagnostic_capture_armed = false;
+				rsx::diagnostic_capture_window() = false;
 
 				// The RCA pack's report: the never-uploaded list, the BC zero-block
 				// accounting and the unit-as-target hazard flags, printed once per
@@ -826,6 +830,16 @@ namespace mtl
 			return !::is_primitive_native(primitive);
 		}
 
+		// RSX flat shading takes the diffuse/specular colour from the last vertex
+		// of each primitive, while Metal's [[flat]] interpolant comes from the
+		// first.  A point is its own provoking vertex, so only it needs no
+		// rotation; every other topology is unrolled into a list
+		// (Common/BufferUtils.cpp, expand_indexed_flat; METAL4-GAPS-1-4.md §4.2).
+		bool rotates_flat(rsx::primitive_type primitive)
+		{
+			return primitive != rsx::primitive_type::points;
+		}
+
 		// Metal restarts a strip at the largest index value and has no toggle, so a
 		// guest strip with restart disabled cannot keep 0xFFFF as a vertex index in
 		// a 16-bit array (MTLDrawState.cpp:25).  The strip array is widened instead.
@@ -862,6 +876,15 @@ namespace mtl
 			const rsx::context& ctx;
 			byte_ring& index_ring;
 			const rsx::vertex_input_layout& layout;
+			const bool flat;
+
+			// The expansion predicate of this draw.  A native primitive reads the
+			// guest array directly; the rest go through the shared writer, and
+			// flat shading adds every rotating topology to that set.
+			bool expands(rsx::primitive_type primitive) const
+			{
+				return expands_primitive(primitive) || (flat && rotates_flat(primitive));
+			}
 
 			vertex_input_state operator()(const rsx::draw_array_command&) const
 			{
@@ -874,9 +897,15 @@ namespace mtl
 				result.max_index = (min_index + vertex_count) - 1;
 				result.vertex_draw_count = vertex_count;
 
-				if (expands_primitive(clause.primitive))
+				if (expands(clause.primitive))
 				{
-					const u32 index_count = ::get_index_count(clause.primitive, vertex_count);
+					const u32 index_count = ::get_index_count(clause.primitive, vertex_count, flat);
+					if (!index_count)
+					{
+						// Fewer vertices than one primitive: nothing to draw.
+						return {};
+					}
+
 					u32 offset = 0;
 					void* dst = index_ring.alloc(index_count * sizeof(u32), offset);
 					if (!dst)
@@ -887,11 +916,30 @@ namespace mtl
 						return {};
 					}
 
-					::write_index_array_for_non_indexed_non_native_primitive_to_buffer(
-						static_cast<char*>(dst), clause.primitive, vertex_count);
+					u32 written = 0;
+
+					if (flat && !clause.is_single_draw())
+					{
+						// A guest draw barrier cuts a strip.  The flat output is a
+						// list, so each subrange's groups are expanded on their own
+						// and the lists are joined; the result is one draw because
+						// a list has no strip joins to preserve.
+						char* base = static_cast<char*>(dst);
+
+						for (const auto& range : clause.get_subranges())
+						{
+							written += ::write_index_array_for_non_indexed_non_native_primitive_to_buffer(
+								base + written * sizeof(u32), clause.primitive, range.count, true, range.first);
+						}
+					}
+					else
+					{
+						written = ::write_index_array_for_non_indexed_non_native_primitive_to_buffer(
+							static_cast<char*>(dst), clause.primitive, vertex_count, flat);
+					}
 
 #if MTL_DEBUG_LOGS
-					diagnostic_dump_indices("expansion", dst, index_count, true);
+					diagnostic_dump_indices("expansion", dst, written, true);
 #endif
 
 #if MTL_DEBUG_LOGS
@@ -902,10 +950,10 @@ namespace mtl
 						if (diagnostic_expansions < 12)
 						{
 							const u32* expanded = static_cast<const u32*>(dst);
-							const auto at = [&](u32 slot) -> u32 { return slot < index_count ? expanded[slot] : 0u; };
+							const auto at = [&](u32 slot) -> u32 { return slot < written ? expanded[slot] : 0u; };
 
 							MTL_NOTE(3, "Metal 4: expansion %u, primitive %u, vertices %u, indices %u, min %u, first %u %u %u %u %u %u",
-								diagnostic_expansions, static_cast<u32>(clause.primitive), vertex_count, index_count, min_index,
+								diagnostic_expansions, static_cast<u32>(clause.primitive), vertex_count, written, min_index,
 								at(0), at(1), at(2), at(3), at(4), at(5));
 						}
 
@@ -913,10 +961,13 @@ namespace mtl
 					}
 #endif // MTL_DEBUG_LOGS
 
-					result.vertex_draw_count = index_count;
+					result.vertex_draw_count = written;
 					result.has_index_buffer = true;
 					result.index_type = rsx::index_array_type::u32;
 					result.index_offset = offset;
+					// The declared length is the ring reservation, not the written
+					// prefix: the shared subrange draw advances by get_index_count,
+					// which can over-count when restart indices are dropped.
 					result.index_length = index_count * sizeof(u32);
 				}
 
@@ -931,13 +982,20 @@ namespace mtl
 					: ctx.register_state->index_type();
 
 				const u32 vertex_count = clause.get_elements_count();
-				const u32 index_count = expands_primitive(clause.primitive)
-					? ::get_index_count(clause.primitive, vertex_count)
+				const bool expand = expands(clause.primitive);
+				const u32 index_count = expand
+					? ::get_index_count(clause.primitive, vertex_count, flat)
 					: vertex_count;
+
+				if (!index_count)
+				{
+					// Fewer vertices than one primitive: nothing to draw.
+					return {};
+				}
 
 				const bool widen = type == rsx::index_array_type::u16 &&
 					!ctx.register_state->restart_index_enabled() &&
-					!expands_primitive(clause.primitive) &&
+					!expand &&
 					strip_topology(clause.primitive);
 
 				const u32 type_size = widen ? static_cast<u32>(sizeof(u32)) : ::get_index_type_size(type);
@@ -955,11 +1013,63 @@ namespace mtl
 				u32 max_index = 0;
 				u32 written = index_count;
 
+				const auto expands_lambda = [this](rsx::primitive_type primitive)
+				{
+					return expands(primitive);
+				};
+
 				if (widen)
 				{
 					std::tie(min_index, max_index, written) = widen_index_array(
 						{ static_cast<std::byte*>(dst), length },
 						command.raw_index_buffer);
+				}
+				else if (flat && expand && !clause.is_single_draw())
+				{
+					// See the non-indexed visitor: a draw barrier cuts a strip, so
+					// each subrange's groups are expanded on their own and the
+					// lists are joined into the one draw the flat list allows.
+					u32 cursor = 0;
+					bool have_bounds = false;
+
+					for (const auto& range : clause.get_subranges())
+					{
+						const u32 source_offset = range.first * type_size;
+
+						if (source_offset >= command.raw_index_buffer.size())
+						{
+							break;
+						}
+
+						const u32 source_bytes = std::min<u32>(
+							range.count * type_size,
+							static_cast<u32>(command.raw_index_buffer.size()) - source_offset);
+
+						u32 range_min = 0;
+						u32 range_max = 0;
+						u32 range_written = 0;
+
+						std::tie(range_min, range_max, range_written) = ::write_index_array_data_to_buffer(
+							{ static_cast<std::byte*>(dst) + cursor * type_size, length - cursor * type_size },
+							command.raw_index_buffer.subspan(source_offset, source_bytes),
+							type,
+							clause.primitive,
+							ctx.register_state->restart_index_enabled(),
+							ctx.register_state->restart_index(),
+							expands_lambda,
+							flat);
+
+						if (range_written)
+						{
+							min_index = have_bounds ? std::min(min_index, range_min) : range_min;
+							max_index = have_bounds ? std::max(max_index, range_max) : range_max;
+							have_bounds = true;
+						}
+
+						cursor += range_written;
+					}
+
+					written = cursor;
 				}
 				else
 				{
@@ -970,7 +1080,8 @@ namespace mtl
 						clause.primitive,
 						ctx.register_state->restart_index_enabled(),
 						ctx.register_state->restart_index(),
-						expands_primitive);
+						expands_lambda,
+						flat);
 				}
 
 #if MTL_DEBUG_LOGS
@@ -1034,9 +1145,15 @@ namespace mtl
 				result.max_index = vertex_count ? vertex_count - 1 : 0;
 				result.vertex_draw_count = vertex_count;
 
-				if (expands_primitive(clause.primitive))
+				if (expands(clause.primitive))
 				{
-					const u32 index_count = ::get_index_count(clause.primitive, vertex_count);
+					const u32 index_count = ::get_index_count(clause.primitive, vertex_count, flat);
+					if (!index_count)
+					{
+						// Fewer vertices than one primitive: nothing to draw.
+						return {};
+					}
+
 					u32 offset = 0;
 					void* dst = index_ring.alloc(index_count * sizeof(u32), offset);
 					if (!dst)
@@ -1046,17 +1163,20 @@ namespace mtl
 						return {};
 					}
 
-					::write_index_array_for_non_indexed_non_native_primitive_to_buffer(
-						static_cast<char*>(dst), clause.primitive, vertex_count);
+					const u32 written = ::write_index_array_for_non_indexed_non_native_primitive_to_buffer(
+						static_cast<char*>(dst), clause.primitive, vertex_count, flat);
 
 #if MTL_DEBUG_LOGS
-					diagnostic_dump_indices("inline", dst, index_count, true);
+					diagnostic_dump_indices("inline", dst, written, true);
 #endif
 
-					result.vertex_draw_count = index_count;
+					result.vertex_draw_count = written;
 					result.has_index_buffer = true;
 					result.index_type = rsx::index_array_type::u32;
 					result.index_offset = offset;
+					// The declared length is the ring reservation, not the written
+					// prefix: the shared subrange draw advances by get_index_count,
+					// which can over-count when restart indices are dropped.
 					result.index_length = index_count * sizeof(u32);
 				}
 
@@ -1386,6 +1506,7 @@ namespace mtl
 		surface_cache cache;
 		framebuffer attachments;
 		fill_pass fill;
+		blit_pass blit;
 		presenter present;
 		frame_output output;
 
@@ -1417,6 +1538,17 @@ namespace mtl
 		// index is remembered between draws.
 		u32 transform_constants_index = 0;
 		bool transform_constants_valid = false;
+		MTL::GPUAddress transform_constants_ring = 0;
+
+		// The fragment constants follow the same contract, for the same reason
+		// (Core/RSXDriverState.h:16).  A draw list revisits a program many times
+		// and the literal block is identical for each visit, so the upload is
+		// latched instead of repeated per draw.  The ring address is part of the
+		// latch because a block index only names the bound buffer while that
+		// buffer is still the current one (MTLConstants.h, block_ring::alloc).
+		u32 fragment_constants_index = 0;
+		bool fragment_constants_valid = false;
+		MTL::GPUAddress fragment_constants_ring = 0;
 
 		// The indexed-constant tables of the current instanced draw, by address.
 		MTL::GPUAddress instancing_lookup = 0;
@@ -1474,6 +1606,35 @@ namespace mtl
 
 		// The open pass.  The header is metal-cpp-free, so the encoder lives here.
 		MTL4::RenderCommandEncoder* encoder = nullptr;
+		// EXCISE-BEGIN encoder-provenance-frame-stamp
+		// TODO(excise): level 1; the recorder transition this encoder was opened
+		// at, so a later bind can tell an open encoder from one that was closed.
+		u32 encoder_stamp = 0;
+		// EXCISE-END encoder-provenance-frame-stamp
+
+		// The pass this draw opened and what the open encoder carries, so a guest
+		// read inside the draw can be repaired.  Such a read (the vertex/index
+		// copy, the constant fill, a pipeline-dependency decode) can fault on a
+		// page the texture cache protects; the fault flushes a cached surface
+		// (texture_cache.h:795 -> cached_texture_section::copy_texture ->
+		// command_recorder::open_compute), which ends this render encoder and may
+		// re-enter the slot.  The draw then owns an encoder the recorder already
+		// ended, and the driver faults inside setArgumentTable:atStages: on it
+		// (EXPERIMENT-argtable-lifetime.mm: ended-encoder-vertex faults at 0x28a0
+		// in AGXMetalG17P).  emit_geometry reopens the pass from this record and
+		// replays the state before it encodes.  The clear is consumed by the first
+		// open only; a restart loads, or it would wipe the draws already encoded.
+		surface_state pass_surface{};
+		MTL::RenderPipelineState* pass_pipeline = nullptr;
+		encoder_state pass_encoder_state{};
+		MTL::ScissorRect pass_scissor{};
+		bool pass_restartable = false;
+
+		// The recorder's argument-table generation the binders below have seen.
+		// A re-entered slot that had to take fresh objects has new tables, and a
+		// binder that still believes the old ones are written would leave the new
+		// tables null for the rest of the frame (command_recorder.h:158).
+		u32 binder_generation = 0;
 
 		// EXCISE-BEGIN draw-record-state
 		// The state the draw path needs for the per-draw record but that only
@@ -1568,9 +1729,14 @@ namespace mtl
 		m_frame_resources->textures.set_bc_texture_support(m_frame_resources->resources.supports_bc_texture_compression());
 		m_frame_resources->recorder.init(*m_device, m_frame_resources->resources);
 		m_frame_resources->fill.init(*m_device, m_frame_resources->resources);
+		m_frame_resources->blit.init(*m_device, m_frame_resources->resources);
 		m_frame_resources->constants.init(m_frame_resources->resources, frame_slot_count);
 		m_frame_resources->depth_cache.init(m_device->dev());
 		m_frame_resources->samplers.init(m_device->dev());
+
+		// Every transfer route (the 2D engine here, and the cache's own subresource
+		// copies) uses this one blitter and its pipeline cache.
+		m_frame_resources->textures.set_blitter(&m_frame_resources->blit, &m_frame_resources->constants);
 
 		// The occlusion counters, and every pass carries their buffer
 		// (MTLFramebuffer.cpp).  occlusion_queries() hands them to the thread.
@@ -1702,6 +1868,7 @@ namespace mtl
 			m_frame_resources->samplers.shutdown();
 			m_frame_resources->depth_cache.shutdown();
 			m_frame_resources->constants.shutdown();
+			m_frame_resources->blit.shutdown();
 			m_frame_resources->fill.shutdown();
 			m_frame_resources->resources.shutdown();
 			m_frame_resources.reset();
@@ -1741,6 +1908,7 @@ namespace mtl
 		m_frame_resources->scheduler.begin_frame();
 		m_frame_resources->binder.reset();
 		m_frame_resources->interpreter_binder.reset();
+		m_frame_resources->binder_generation = m_frame_resources->recorder.table_generation();
 		m_frame_resources->interpreter.begin_frame();
 		m_frame_resources->interpreter_active = false;
 		m_frame_resources->interpreter_vertex_key = 0;
@@ -1750,6 +1918,7 @@ namespace mtl
 		m_frame_resources->interpreter_vertex_blocks.clear();
 		m_frame_resources->interpreter_fragment_blocks.clear();
 		m_frame_resources->transform_constants_valid = false;
+		m_frame_resources->fragment_constants_valid = false;
 		m_frame_open = true;
 
 #if MTL_DEBUG_LOGS
@@ -3412,23 +3581,6 @@ namespace mtl
 			}
 
 #if MTL_DEBUG_LOGS
-			// TODO(excise): level 5; a cubemap unit exists only once the scene has a
-			// car (or a reflection probe), so the bind itself is the capture
-			// trigger.  A car-paint shader samples such a unit on every frame.
-			if (tex.get_extended_texture_dimension() == rsx::texture_dimension_extended::texture_dimension_cubemap)
-			{
-				diagnostic_try_arm_capture("cubemap bind");
-			}
-
-			// TODO(excise): level 5; the video path binds its luma plane as a large
-			// B8 texture (the two chroma planes follow at half extent), so this bind
-			// is the one cue that reaches an intro video that has no cubemap.
-			if ((static_cast<u32>(tex.format()) & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN)) == CELL_GCM_TEXTURE_B8 &&
-				tex.width() >= 512 && tex.height() >= 256)
-			{
-				diagnostic_try_arm_capture("video plane bind");
-			}
-
 			// TODO(excise): level 5; a deferred gather is materialised inside the
 			// bind and released after the pass, so the host dump reads it here, in
 			// the draw loop that owns the recorder.  One dump per address, like the
@@ -4336,6 +4488,14 @@ namespace mtl
 			frame.transform_constants_valid = false;
 		}
 
+		// The fragment constants are relocated against the compiled fragment
+		// program for the same reason (ProgramStateCache.h:141).
+		if (frame.interpreter_active != use_interpreter ||
+			(!use_interpreter && frame.compiled_fragment != compiled_fragment))
+		{
+			frame.fragment_constants_valid = false;
+		}
+
 		frame.interpreter_active = use_interpreter;
 
 		// TODO(excise): level 2; which cover this draw used.  One latch per branch,
@@ -4593,6 +4753,10 @@ namespace mtl
 			MTL_PROBE_LATCH(1, "recorder/pass opened");
 			frame.encoder = encoder;
 
+			// EXCISE-BEGIN encoder-provenance-frame-capture
+			frame.encoder_stamp = frame.recorder.encoder_stamp();
+			// EXCISE-END encoder-provenance-frame-capture
+
 			// The hazard notes describe a pass, not a draw.  Within one encoder the
 			// only writes are attachment writes, ordered by the hardware's defined
 			// raster order, and a sampled attachment is copied before the pass opens.
@@ -4601,6 +4765,22 @@ namespace mtl
 			record_pass_hazards(true);
 		}
 
+		// EXCISE-BEGIN encoder-provenance-draw-trace
+		// TODO(excise): level 2; one line per draw, the encoder this draw will name.
+		// The bind trap only fires when the recorder and the draw disagree; a fault
+		// that happens while they agree still leaves the draw's encoder, its stamp
+		// and the policy branch in the last line before the signal.
+		{
+			static u32 diagnostic_draw_serial = 0;
+			++diagnostic_draw_serial;
+
+			MTL_NOTE(2, "Metal 4: draw %u encoder %p stamp %u slot %u frame.encoder %p opened %u absorbed %u",
+				diagnostic_draw_serial, static_cast<void*>(encoder), frame.encoder_stamp,
+				frame.recorder.slot(), static_cast<void*>(frame.encoder),
+				policy.absorbs() ? 0u : 1u, policy.absorbs() ? 1u : 0u);
+		}
+		// EXCISE-END encoder-provenance-draw-trace
+
 		// The mirror copy ran in the encoder that open_pass closed, so the pass reads
 		// the mirror across a queue-scope edge.
 		if (frame.depth_input.texture._impl)
@@ -4608,11 +4788,36 @@ namespace mtl
 			emit_queue_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageFragment, MTL4::VisibilityOptionDevice, true });
 		}
 
-		encoder->setRenderPipelineState(use_interpreter ? interpreted->state : program->state);
+		MTL::RenderPipelineState* const pipeline = use_interpreter ? interpreted->state : program->state;
+		encoder->setRenderPipelineState(pipeline);
 
-		const auto encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
+		auto encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
+
+		// A framebufferless draw has no depth buffer, so there is nothing to test:
+		// the fragment passes, which is what a backend whose pass has no depth
+		// attachment does implicitly.  The scratch attachment holds undefined
+		// content, so leaving the guest's compare (and bounds) in place would reject
+		// fragments at random and the occlusion count — the only effect of such a
+		// draw — would be wrong.
+		if (frame.attachments.empty_pass())
+		{
+			encoder_state.depth_stencil = {};
+			encoder_state.depth_bounds_min = 0.0f;
+			encoder_state.depth_bounds_max = 1.0f;
+		}
+
 		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.clip_height);
 		apply_encoder_state(encoder, encoder_state, scissor, frame.depth_cache);
+
+		// Capture what a restart of this pass needs.  The subdraw loop reads guest
+		// memory (the vertex and index copies, the constants, a pipeline-dependency
+		// decode), and a fault on a protected page ends this encoder; see the
+		// repair in emit_geometry.
+		frame.pass_surface = surface;
+		frame.pass_pipeline = pipeline;
+		frame.pass_encoder_state = encoder_state;
+		frame.pass_scissor = scissor;
+		frame.pass_restartable = true;
 
 #if MTL_DEBUG_LOGS
 		// TODO(excise): level 5; the clause-level state the per-draw record needs.
@@ -4808,6 +5013,10 @@ namespace mtl
 			}
 		}
 		while (draw_call.next());
+
+		// The pass record describes the clause that just ended.  Nothing outside
+		// the subdraw loop may reopen it.
+		frame.pass_restartable = false;
 
 		// The post-draw instruments (tape, pixel probes, the first-draw dumps) read
 		// the attachment after the draw, so they need the pass closed.  They are the
@@ -5024,6 +5233,44 @@ namespace mtl
 		MTL4::RenderCommandEncoder* encoder = frame.encoder;
 		auto& draw_call = m_ctx->register_state->current_draw_clause;
 
+		// EXCISE-BEGIN encoder-provenance-entry
+		// TODO(excise): level 1; the encoder this subdraw starts with.  The bind
+		// check below reports a stale encoder too, so this one separates "the draw
+		// was handed a stale encoder" from "something in the draw ended it".  One
+		// report per run.
+		if (probe::at_least(1) && encoder)
+		{
+			static bool diagnostic_entry_reported = false;
+
+			if (!diagnostic_entry_reported &&
+				(encoder != static_cast<MTL4::RenderCommandEncoder*>(frame.recorder.current_encoder()) ||
+					frame.encoder_stamp != frame.recorder.encoder_stamp()))
+			{
+				diagnostic_entry_reported = true;
+				rsx_log.error("Metal 4: the draw entered with a stale encoder %p: recorder %p, frame.encoder %p, stamp %u, recorder stamp %u, slot %u, draw %u",
+					static_cast<void*>(encoder),
+					static_cast<void*>(frame.recorder.current_encoder()),
+					static_cast<void*>(frame.encoder),
+					frame.encoder_stamp, frame.recorder.encoder_stamp(), frame.recorder.slot(),
+					diagnostic_global_draw_id);
+				frame.recorder.dump_encoder_events("draw entered with a stale encoder");
+			}
+		}
+		// EXCISE-END encoder-provenance-entry
+
+		// EXCISE-BEGIN encoder-watch-scope
+		// TODO(excise): level 1; see command_recorder::watch_encoder().  The scope
+		// covers the whole subdraw, so a close anywhere between here and the draw's
+		// encode is caught while the draw still holds the pointer.
+		struct encoder_watch_scope
+		{
+			command_recorder& recorder;
+			~encoder_watch_scope() { recorder.watch_encoder(nullptr, 0); }
+		} diagnostic_encoder_watch{ frame.recorder };
+
+		frame.recorder.watch_encoder(encoder, diagnostic_global_draw_id);
+		// EXCISE-END encoder-watch-scope
+
 		// The vertex state of this subdraw (GLDraw.cpp:730-760).
 		const rsx::flags32_t vertex_state_mask = rsx::vertex_base_changed | rsx::vertex_arrays_changed;
 		const rsx::flags32_t vertex_state = (sub_index == 0)
@@ -5083,10 +5330,16 @@ namespace mtl
 			return;
 		}
 
+		// RSX flat shading takes the last vertex of a primitive.  Metal's [[flat]]
+		// interpolant takes the first, so the writer rotates every group to match
+		// (METAL4-GAPS-1-4.md §4.2).  Read once so the index writer and the draw's
+		// topology cannot disagree.
+		const bool flat = (m_ctx->program.vertex_program.ctrl & RSX_SHADER_CONTROL_FLAT_SHADING) != 0;
+
 		// The index array and the vertex range of this subdraw
 		// (GLVertexBuffers.cpp:66-150).
 		const vertex_input_state input = std::visit(
-			draw_command_visitor{ *m_ctx, frame.constants.index_ring(), frame.vertex_layout },
+			draw_command_visitor{ *m_ctx, frame.constants.index_ring(), frame.vertex_layout, flat },
 			RSX(m_ctx)->GRAPH_frontend().get_draw_command(*m_ctx->register_state));
 
 		// TODO(excise): level 1; running total.
@@ -5288,7 +5541,9 @@ namespace mtl
 		// the shared state flag says the file changed
 		// (Core/RSXDriverState.h:15).  The shader reads the compacted file, so the
 		// upload applies the program's relocation table (GLGSRender.cpp:1159-1171).
-		if (!frame.transform_constants_valid || m_ctx->draw_state.dirty.test(rsx::draw_state_t::group::transform_constants))
+		if (!frame.transform_constants_valid ||
+			frame.transform_constants_ring != frame.constants.vertex_constants_address() ||
+			m_ctx->draw_state.dirty.test(rsx::draw_state_t::group::transform_constants))
 		{
 			vec4_block* block = frame.constants.alloc_transform_constants();
 			if (!block)
@@ -5302,6 +5557,7 @@ namespace mtl
 
 			RSX(m_ctx)->GRAPH_frontend().fill_vertex_program_constants_data(block, reloc_table);
 			frame.transform_constants_index = frame.constants.transform_constants_index();
+			frame.transform_constants_ring = frame.constants.vertex_constants_address();
 			frame.transform_constants_valid = true;
 			m_ctx->draw_state.dirty.clear(rsx::draw_state_t::group::transform_constants);
 
@@ -5332,9 +5588,19 @@ namespace mtl
 		// The fragment literals, when the program has any
 		// (ProgramStateCache.h:141).  The relocation table is the compiled
 		// program's, not the RSX program's.
+		//
+		// The fill reads the live ucode image, so it follows the same latch as
+		// Vulkan and OpenGL (VKGSRender.cpp:2137, GLGSRender.cpp:937): once per
+		// fragment-constants change, not once per draw.  A draw clause revisits a
+		// program many times and the block is identical for each visit.
 		params->fs_constants_offset = 0;
 		const usz fragment_constant_count = frame.compiled_fragment ? frame.compiled_fragment->constant_offsets.size() : 0;
-		if (fragment_constant_count)
+		const bool update_fragment_constants = fragment_constant_count &&
+			(!frame.fragment_constants_valid ||
+				frame.fragment_constants_ring != frame.constants.fragment_constants_address() ||
+				m_ctx->draw_state.dirty.test(rsx::draw_state_t::group::fragment_constants));
+
+		if (update_fragment_constants)
 		{
 			vec4_block* constants = frame.constants.alloc_fragment_constants(static_cast<u32>(fragment_constant_count));
 			if (!constants)
@@ -5348,7 +5614,302 @@ namespace mtl
 				frame.compiled_fragment->constant_offsets,
 				true);
 
+			frame.fragment_constants_index = frame.constants.fragment_constants_index();
+			frame.fragment_constants_ring = frame.constants.fragment_constants_address();
+			frame.fragment_constants_valid = true;
+			m_ctx->draw_state.dirty.clear(rsx::draw_state_t::group::fragment_constants);
+
+#if MTL_DEBUG_LOGS
+			// EXCISE-BEGIN fp-literal-watch
+			// TODO(excise): level 5; the two trailing quads the shader will read, at
+			// every draw, for the programs whose literal is not uniform (the family
+			// that renders the world).  One line per change, plus the first sample,
+			// so the run answers three questions at once: does the value change
+			// inside a frame (writer granularity), what is the ring's value next to
+			// the guest's bytes (fill vs source), and was the word ever the uniform
+			// value the sibling programs carry.  Bounded by line count and ids.
+			if (fragment_constant_count >= 2 && fragment_constant_count <= 256 && diagnostic_capture_active())
+			{
+				struct literal_watcher
+				{
+					u32 id;
+					u32 words[8];
+					u32 samples;
+				};
+
+				static literal_watcher s_watchers[64] = {};
+				static u32 s_watcher_count = 0;
+				static u64 s_watch_lines = 0;
+				static u64 s_watch_draws = 0;
+				++s_watch_draws;
+
+				const u32 id = frame.compiled_fragment->id;
+				const u8* image = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
+				const u32 length = m_ctx->program.fragment_program.ucode_length;
+				u32 words[8] = {};
+
+				for (u32 q = 0; q < 2; ++q)
+				{
+					const u32 index = static_cast<u32>(fragment_constant_count) - 2 + q;
+					const u32 offset = frame.compiled_fragment->constant_offsets[index];
+
+					if (image && offset + 16 <= length)
+					{
+						std::memcpy(&words[q * 4], image + offset, 16);
+					}
+				}
+
+				// A uniform quad is the healthy shape ("2 2 2 1"); the family under
+				// investigation carries the same stray word in .x and .z.
+				if (words[0] != words[1] || words[2] != words[3])
+				{
+					literal_watcher* watcher = nullptr;
+
+					for (u32 i = 0; i < s_watcher_count; ++i)
+					{
+						if (s_watchers[i].id == id)
+						{
+							watcher = &s_watchers[i];
+							break;
+						}
+					}
+
+					if (!watcher && s_watcher_count < 64)
+					{
+						watcher = &s_watchers[s_watcher_count++];
+						watcher->id = id;
+					}
+
+					if (watcher)
+					{
+						bool changed = (watcher->samples == 0);
+
+						for (u32 i = 0; i < 8; ++i)
+						{
+							changed |= (watcher->words[i] != words[i]);
+						}
+
+						if (changed && s_watch_lines++ < 4096)
+						{
+							std::memcpy(watcher->words, words, sizeof(words));
+							++watcher->samples;
+
+							MTL_NOTE(5, "Metal 4: literal watch fp %u draw %llu base %u count %u guest %08x %08x %08x %08x / %08x %08x %08x %08x ring %.6g %.6g %.6g %.6g / %.6g %.6g %.6g %.6g sample %u ptr %p off %u",
+								id, static_cast<unsigned long long>(s_watch_draws),
+								frame.constants.fragment_constants_index(),
+								static_cast<u32>(fragment_constant_count),
+								words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7],
+								static_cast<f64>(constants[fragment_constant_count - 2].v[0]),
+								static_cast<f64>(constants[fragment_constant_count - 2].v[1]),
+								static_cast<f64>(constants[fragment_constant_count - 2].v[2]),
+								static_cast<f64>(constants[fragment_constant_count - 2].v[3]),
+								static_cast<f64>(constants[fragment_constant_count - 1].v[0]),
+								static_cast<f64>(constants[fragment_constant_count - 1].v[1]),
+								static_cast<f64>(constants[fragment_constant_count - 1].v[2]),
+								static_cast<f64>(constants[fragment_constant_count - 1].v[3]),
+								watcher->samples, static_cast<const void*>(image),
+								m_ctx->program.fragment_program.offset);
+						}
+					}
+				}
+			}
+			// EXCISE-END fp-literal-watch
+#endif
+
+#if MTL_DEBUG_LOGS
+			// EXCISE-BEGIN fp-ucode-image
+			// TODO(excise): level 5; the image the offset map came from against the
+			// image this draw reads.  The fill above hands the *live* RSX program to
+			// the shared writer, so a literal the guest has rewritten since the
+			// compile is read from guest memory at the compiled offset.  Inside a
+			// capture window every distinct live image is reported once, so the
+			// image a black frame was filled from is on disk; outside it one line
+			// per program stands.  A differing hash is the guest rewriting the
+			// program and the tail words are where; an identical hash means the
+			// literals are the guest's own bytes and the question moves to the
+			// offsets or the decode.  Bounded.
+			if (frame.compiled_fragment && frame.compiled_fragment->diagnostic_ucode_length && ::mtl::probe::at_least(5) &&
+				(diagnostic_capture_active() || frame.compiled_fragment->diagnostic_ucode_length >= 3000))
+			{
+				struct image_key
+				{
+					u32 id;
+					u64 hash;
+					u32 count;
+				};
+
+				static image_key s_keys[64] = {};
+				static unsigned s_key_count = 0;
+				static unsigned s_window_reports = 0;
+
+				const auto& compiled_image = *frame.compiled_fragment;
+				const u32 id = compiled_image.id;
+				const u8* live = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
+				const u32 live_length = m_ctx->program.fragment_program.ucode_length;
+				const u32 words = std::min<u32>(compiled_image.diagnostic_ucode_length / 4, 16);
+				const u64 live_hash = live ? probe::fnv1a(live, live_length) : 0ull;
+
+				image_key* key = nullptr;
+
+				for (unsigned i = 0; i < s_key_count; ++i)
+				{
+					if (s_keys[i].id == id)
+					{
+						key = &s_keys[i];
+						break;
+					}
+				}
+
+				if (!key && s_key_count < std::size(s_keys))
+				{
+					key = &s_keys[s_key_count++];
+					*key = { id, 0, 0 };
+				}
+
+				const bool fresh = key && key->hash != live_hash && key->count < (diagnostic_capture_active() ? 8u : 1u) &&
+					(!diagnostic_capture_active() || s_window_reports < 64);
+
+				if (fresh)
+				{
+					key->hash = live_hash;
+					++key->count;
+
+					if (diagnostic_capture_active())
+					{
+						++s_window_reports;
+					}
+
+					char tail[640];
+
+					// TODO(excise): level 5; the live image, so a diff against the
+					// compile-time fp-<id>.ucode.bin is the answer and not a further
+					// question.  Bounded per program.
+					if (live && live_length)
+					{
+						char path[512];
+
+						std::snprintf(path, sizeof(path), "%s/fp-%u-live-%u.ucode.bin", probe::dump_directory(), id, key->count);
+
+						if (std::FILE* out = std::fopen(path, "wb"))
+						{
+							std::fwrite(live, 1, live_length, out);
+							std::fclose(out);
+						}
+					}
+
+					usz tail_length = std::snprintf(tail, sizeof(tail),
+						"Metal 4: ucode image fp %u, compile offset %u length %u hash %016llx, live offset %u length %u hash %016llx, same %u, tail compile",
+						id, compiled_image.diagnostic_ucode_offset, compiled_image.diagnostic_ucode_length,
+						static_cast<unsigned long long>(compiled_image.diagnostic_ucode_hash),
+						m_ctx->program.fragment_program.offset, live_length,
+						static_cast<unsigned long long>(live_hash),
+						(live && compiled_image.diagnostic_ucode_hash == live_hash) ? 1u : 0u);
+
+					for (u32 i = 0; i < words; ++i)
+					{
+						tail_length += std::snprintf(tail + tail_length, sizeof(tail) - tail_length,
+							" %08x", compiled_image.diagnostic_ucode_tail[i]);
+					}
+
+					tail_length += std::snprintf(tail + tail_length, sizeof(tail) - tail_length, ", live");
+
+					for (u32 i = 0; i < words; ++i)
+					{
+						u32 value = 0;
+						const u32 byte = live_length - (words - i) * 4;
+
+						if (live && (byte + 4) <= live_length)
+						{
+							std::memcpy(&value, live + byte, 4);
+						}
+
+						tail_length += std::snprintf(tail + tail_length, sizeof(tail) - tail_length, " %08x", value);
+					}
+
+					MTL_NOTE(5, "%s", tail);
+				}
+			}
+			// EXCISE-END fp-ucode-image
+#endif
+
 			params->fs_constants_offset = frame.constants.fragment_constants_index();
+
+			// EXCISE-BEGIN epilogue-scale-variant
+			// TODO(excise): level 5; MTL_PROBE_VARIANT=epilogue-scale|epilogue-halves.
+			// Every program that renders the world ends on the same two instructions
+			// (fp-62: `r0 = h0 * fc[67].xxxx`, `r0 / fc[68].yyyy`, then clamp to
+			// [0, 1]).  The .y of both slots is the baked literal 0x00400000, i.e.
+			// exactly 2.0, so the divide is a fixed /2, and the multiply is the
+			// identity whenever .x is 2 as well.  The .x of the first slot is a
+			// *runtime patch*: only the .x and .z lanes of the two tail quads change
+			// from frame to frame, and the baked .y/.w survive untouched.
+			//
+			// Two arms, both unconditional (the earlier one only fired on a denormal,
+			// which the black window happens to show but the bright half of the
+			// flicker does not):
+			//   epilogue-scale  - set .x to the .y the literal already carries, so the
+			//                     pair is the identity.  If the world renders correctly
+			//                     and *stably*, the collapse point is this multiply and
+			//                     nothing before it is wrong.
+			//   epilogue-halves - decode the raw word with its 16-bit halves swapped
+			//                     instead of byte-swapped within the halves.  The
+			//                     patched words read 0xXXXX400d (steady low half, ramping
+			//                     high half) and that pairing lands in a narrow, plausible
+			//                     1.5..2.8 band where the fill's own decode lands on
+			//                     denormals and 1e38.  If the world renders correctly with
+			//                     this arm, the defect is the byte order of the patch,
+			//                     not a missing or mis-sized value.
+			// Off by default.  The witness line prints the raw guest word with both
+			// decodes, so the run answers the question from the log as well as on
+			// screen.  Bounded.
+			if (fragment_constant_count >= 2 && frame.compiled_fragment)
+			{
+				vec4_block& scale = constants[fragment_constant_count - 2];
+				const bool scale_arm = probe::variant("epilogue-scale");
+				const bool halves_arm = probe::variant("epilogue-halves");
+
+				if (scale_arm || halves_arm)
+				{
+					const u32 offset = frame.compiled_fragment->constant_offsets[fragment_constant_count - 2];
+					const u8* image = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
+					const u32 length = m_ctx->program.fragment_program.ucode_length;
+
+					u32 words[4] = {};
+
+					if (image && offset + 16 <= length)
+					{
+						std::memcpy(words, image + offset, 16);
+					}
+
+					static u32 s_last_words[4] = {};
+					static unsigned s_lines = 0;
+
+					if (s_lines < 512 && std::memcmp(s_last_words, words, sizeof(words)))
+					{
+						std::memcpy(s_last_words, words, sizeof(words));
+						++s_lines;
+
+						MTL_NOTE_WITNESS(5, "Metal 4: epilogue scale fp %u offset %u word %08x, fill %.9g, halves %.9g, y %.9g (arm %s)",
+							frame.compiled_fragment->id, offset, words[0],
+							static_cast<f64>(scale.v[0]),
+							static_cast<f64>(std::bit_cast<f32>((words[0] << 16) | (words[0] >> 16))),
+							static_cast<f64>(scale.v[1]),
+							scale_arm ? "scale" : "halves");
+					}
+
+					if (scale_arm)
+					{
+						scale.v[0] = scale.v[1];
+						scale.v[2] = scale.v[1];
+					}
+					else
+					{
+						scale.v[0] = std::bit_cast<f32>((words[0] << 16) | (words[0] >> 16));
+						scale.v[2] = std::bit_cast<f32>((words[2] << 16) | (words[2] >> 16));
+					}
+				}
+			}
+			// EXCISE-END epilogue-scale-variant
 
 #if MTL_DEBUG_LOGS
 			// TODO(excise): level 5; the fragment constants of a bounded prefix.
@@ -5397,6 +5958,92 @@ namespace mtl
 					{
 						block_hashes[block_count++] = block_hash;
 
+						// TODO(excise): level 5; the ucode the ring was filled from,
+						// beside the ring the shader reads.  One line per program in a
+						// window covers the offset map, the bounds, and the first, second
+						// and last two slots from both sides: a word that differs between
+						// the two sides is the fill, and a word that matches the ring and
+						// is still garbage is the guest data or the offset that named it.
+						static constexpr u32 source_capacity = 64;
+						static u64 source_ids[source_capacity] = {};
+						static u32 source_count = 0;
+
+						const u32 source_id = frame.compiled_fragment ? frame.compiled_fragment->id : 0u;
+						bool source_seen = false;
+
+						for (u32 i = 0; i < source_count; ++i)
+						{
+							if (source_ids[i] == source_id)
+							{
+								source_seen = true;
+								break;
+							}
+						}
+
+						if (!source_seen && source_count < source_capacity)
+						{
+							source_ids[source_count++] = source_id;
+
+							const u8* guest = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
+							const u32 guest_length = m_ctx->program.fragment_program.ucode_length;
+							u32 out_of_bounds = 0;
+
+							for (const u32 offset : offsets)
+							{
+								if ((offset + 16) > guest_length)
+								{
+									++out_of_bounds;
+								}
+							}
+
+							const auto slot_at = [&](usz index) {
+								return index < fragment_constant_count ? static_cast<u32>(index) : static_cast<u32>(fragment_constant_count - 1);
+							};
+							const auto guest_at = [&](const u8* data, u32 size, u32 offset, u32 word) -> u32 {
+								const u32 byte = offset + word * 4;
+								u32 value = 0;
+
+								if (data && (byte + 4) <= size)
+								{
+									std::memcpy(&value, data + byte, 4);
+								}
+
+								return value;
+							};
+							const auto ring_at = [&](u32 index, u32 word) -> u32 {
+								u32 value = 0;
+								std::memcpy(&value, &constants[index].v[word], 4);
+								return value;
+							};
+							const u32 slots[4] = { slot_at(0), slot_at(fragment_constant_count > 1 ? 1 : 0),
+								slot_at(fragment_constant_count > 1 ? fragment_constant_count - 2 : 0), slot_at(fragment_constant_count - 1) };
+							char text[768];
+							usz length = std::snprintf(text, sizeof(text),
+								"Metal 4: fragment constants source fp %u, count %u, guest length %u total length %u program offset %u, map [0] %u [1] %u [last] %u, out of bounds %u",
+								source_id, static_cast<u32>(fragment_constant_count), guest_length,
+								m_ctx->program.fragment_program.total_length, m_ctx->program.fragment_program.offset,
+								offset_at(0), offset_at(1), offset_at(offsets.empty() ? 0 : offsets.size() - 1), out_of_bounds);
+
+							for (u32 slot = 0; slot < 4; ++slot)
+							{
+								const u32 index = slots[slot];
+								length += std::snprintf(text + length, sizeof(text) - length, ", ring[%u] %08x %08x %08x %08x",
+									index, ring_at(index, 0), ring_at(index, 1), ring_at(index, 2), ring_at(index, 3));
+							}
+
+							for (u32 slot = 0; slot < 4; ++slot)
+							{
+								const u32 index = slots[slot];
+								const u32 at = (index < offsets.size()) ? offsets[index] : 0u;
+								length += std::snprintf(text + length, sizeof(text) - length, ", guest[%u] %08x %08x %08x %08x",
+									index,
+									guest_at(guest, guest_length, at, 0), guest_at(guest, guest_length, at, 1),
+									guest_at(guest, guest_length, at, 2), guest_at(guest, guest_length, at, 3));
+							}
+
+							MTL_NOTE(5, "%s", text);
+						}
+
 						for (usz row = 0; row < fragment_constant_count; row += 4)
 						{
 							char text[512];
@@ -5416,6 +6063,8 @@ namespace mtl
 			}
 #endif // MTL_DEBUG_LOGS
 		}
+
+		params->fs_constants_offset = frame.fragment_constants_index;
 
 		RSX(m_ctx)->GRAPH_frontend().fill_vertex_layout_state(
 			frame.vertex_layout,
@@ -5899,6 +6548,75 @@ namespace mtl
 			binds.fragment_blend = frame.constants.blend_values_block_address();
 		}
 
+		// A guest read inside this subdraw can end this draw's encoder.  The index
+		// copy, the vertex copy, the constant fill and a pipeline-dependency decode
+		// all read guest memory, and a read that hits a page the texture cache
+		// protects flushes the surface behind it
+		// (texture_cache.h:795 -> cached_texture_section::copy_texture ->
+		// command_recorder::open_compute).  The flush ends the render encoder and
+		// may re-enter the slot, so the pointer captured at the top of the draw is
+		// already ended; the driver then faults inside setArgumentTable:atStages:
+		// on it (EXPERIMENT-argtable-lifetime.mm: ended-encoder-vertex faults at
+		// 0x28a0 in AGXMetalG17P, the Demon's Souls run's signature).
+		//
+		// The recorder is the authority.  If it no longer owns this draw's encoder,
+		// reopen the pass and replay what the draw put on it before encoding the
+		// argument tables and the draws.  A restart loads: the first pass already
+		// consumed the clear.
+		if (static_cast<MTL4::CommandEncoder*>(encoder) != frame.recorder.current_encoder())
+		{
+			static bool restart_unavailable_reported = false;
+
+			if (!frame.pass_restartable)
+			{
+				// Without a pass record there is nothing to reopen, and encoding
+				// into an ended encoder faults.  Dropping the subdraw is the only
+				// safe option; it is a backend fault, not a guest condition.  One
+				// report per run: this cannot be a guest-caused condition.
+				if (!restart_unavailable_reported)
+				{
+					restart_unavailable_reported = true;
+					rsx_log.error("Metal 4: the draw's pass cannot be restarted after the encoder ended");
+				}
+
+				return;
+			}
+
+			MTL_PROBE_LATCH(1, "recorder/pass restarted");
+
+			encoder = frame.attachments.open_pass(frame.recorder, 0, frame.pass_surface);
+			if (!encoder)
+			{
+				return;
+			}
+
+			frame.encoder = encoder;
+			// EXCISE-BEGIN encoder-provenance-restart-stamp
+			// TODO(excise): level 1; the restarted encoder is current, so the bind
+			// check below must not report it as a transition the recorder made.
+			frame.encoder_stamp = frame.recorder.encoder_stamp();
+			// EXCISE-END encoder-provenance-restart-stamp
+
+			// The restarted pass is a new pass: the scheduler starts a new one and
+			// re-emits the edges it still owes on this encoder.  The recorder's
+			// boundary already ordered the old pass, so a repeated barrier costs
+			// nothing but a queue barrier.
+			record_pass_hazards(true);
+
+			encoder->setRenderPipelineState(frame.pass_pipeline);
+			apply_encoder_state(encoder, frame.pass_encoder_state, frame.pass_scissor, frame.depth_cache);
+		}
+
+		// A re-entered slot that had to take fresh objects has new argument tables,
+		// and the binder's record of what it wrote no longer describes them.  A
+		// skipped slot would then read null for the rest of the frame.
+		if (frame.binder_generation != frame.recorder.table_generation())
+		{
+			frame.binder.reset();
+			frame.interpreter_binder.reset();
+			frame.binder_generation = frame.recorder.table_generation();
+		}
+
 		// Metal 4 captures the argument table once per draw, when the draw is
 		// encoded, so the table is safe to mutate between draws but nothing is
 		// captured at setArgumentTable (measured, 2026-10-22).  The binder writes
@@ -5977,6 +6695,34 @@ namespace mtl
 				vertex_written = frame.binder.bind(vertex_argument_table, true, binds);
 				fragment_written = frame.binder.bind(fragment_argument_table, false, binds);
 			}
+
+			// EXCISE-BEGIN encoder-provenance-check
+			// TODO(excise): level 1; the encoder this bind is about to name.  The
+			// driver faults inside setArgumentTable:atStages: on an encoder that was
+			// already ended (EXPERIMENT-argtable-lifetime.mm: ended-encoder-vertex
+			// faults at 0x28a0 in AGXMetalG17P, exactly the DS run's signature), so
+			// the recorder is the authority: a stamp that moved since the pass
+			// opened, or a pointer that is not the recorder's, names the transition
+			// that ended this encoder.  One report per run.
+			if (probe::at_least(1) && encoder &&
+				(encoder != static_cast<MTL4::RenderCommandEncoder*>(frame.recorder.current_encoder()) ||
+					frame.encoder_stamp != frame.recorder.encoder_stamp()))
+			{
+				static bool diagnostic_encoder_reported = false;
+
+				if (!diagnostic_encoder_reported)
+				{
+					diagnostic_encoder_reported = true;
+					rsx_log.error("Metal 4: the draw's encoder %p is stale: recorder %p, frame.encoder %p, stamp %u, recorder stamp %u, slot %u, buffer open %u, draw %u",
+						static_cast<void*>(encoder),
+						static_cast<void*>(frame.recorder.current_encoder()),
+						static_cast<void*>(frame.encoder),
+						frame.encoder_stamp, frame.recorder.encoder_stamp(), frame.recorder.slot(),
+						frame.recorder.buffer_open() ? 1u : 0u, diagnostic_global_draw_id);
+					frame.recorder.dump_encoder_events("bind on a stale encoder");
+				}
+			}
+			// EXCISE-END encoder-provenance-check
 
 			encoder->setArgumentTable(vertex_argument_table, MTL::RenderStageVertex);
 			encoder->setArgumentTable(fragment_argument_table, MTL::RenderStageFragment);
@@ -6058,7 +6804,13 @@ namespace mtl
 
 		m_ctx->stats.setup_time += m_profiler.duration();
 
-		const MTL::PrimitiveType primitive = get_primitive_type(draw_call.primitive);
+		const MTL::PrimitiveType primitive = get_primitive_type(draw_call.primitive, flat);
+
+		// A flat draw is always unrolled to a list, so a guest draw barrier no
+		// longer needs to split it: the visitor expanded each subrange's groups
+		// and joined them into one contiguous list (draw_command_visitor).
+		const bool single_draw = draw_call.is_single_draw() ||
+			(flat && rotates_flat(draw_call.primitive));
 
 		// A ZCULL query that started or ended between draws takes effect on the
 		// encoder that carries the following draws (MTLZCULL.h).
@@ -6100,7 +6852,7 @@ namespace mtl
 				encoder->drawIndexedPrimitives(primitive, input.vertex_draw_count, index_type,
 					index_address, input.index_length, draw_call.pass_count(), 0, 0);
 			}
-			else if (draw_call.is_single_draw())
+			else if (single_draw)
 			{
 				encoder->drawIndexedPrimitives(primitive, input.vertex_draw_count, index_type,
 					index_address, input.index_length, 1, 0, 0);
@@ -6135,7 +6887,7 @@ namespace mtl
 		{
 			encoder->drawPrimitives(primitive, 0, input.vertex_draw_count, draw_call.pass_count(), 0);
 		}
-		else if (draw_call.is_single_draw())
+		else if (single_draw)
 		{
 			encoder->drawPrimitives(primitive, 0, input.vertex_draw_count, 1, 0);
 		}
@@ -6395,7 +7147,6 @@ namespace mtl
 		if (diagnostic_watchdog_gap.exchange(false))
 		{
 			rsx_log.notice("Metal 4: watchdog recovery, present %u, frame %u", diagnostic_present_index, diagnostic_watchdog_frame.load());
-			diagnostic_try_arm_capture("watchdog", true);
 		}
 #endif
 
@@ -6655,10 +7406,8 @@ namespace mtl
 #if MTL_DEBUG_LOGS
 		// A bounded periodic capture runs beside the user's request, so a session
 		// with no key press still yields frames to compare (anti-flood rule).
-		static u32 diagnostic_captures = 0;
 		const bool screenshot_requested = g_user_asked_for_screenshot.exchange(false);
-		const bool user_asked_for_screenshot = screenshot_requested ||
-			(++diagnostic_captures % 6000 == 0 && diagnostic_captures < 30000);
+		const bool user_asked_for_screenshot = screenshot_requested;
 
 		// TODO(excise): level 5; the user's key press is the detector for a
 		// transient defect.  The frame they photographed is already encoded, so
@@ -7289,12 +8038,30 @@ namespace mtl
 		diagnostic_transfers++;
 #endif // MTL_DEBUG_LOGS
 
-		// Metal has no 2D-engine path for this transfer, so the shared code falls
-		// back to a CPU copy (nv3089.cpp:599-603).  That copy reads and writes guest
-		// memory directly, bypassing the cache's protection.  Materialize the source
-		// sections first, then drop the destination sections: otherwise the next
-		// sampler reads the stale host copy of the destination (the black Xevious
-		// panel was this path).  A GPU blit is still the cheaper route (SF8/SF11).
+		// The shared code runs the whole transfer on the GPU when Metal can express
+		// it exactly: it resolves both endpoints against the surface store, protects
+		// the destination, orders the copy after the draws that wrote the source and
+		// reports the written range (Common/texture_cache.h, upload_scaled_image).
+		// When it cannot, it declines before touching the cache, and the tags below
+		// keep the CPU fallback coherent.
+		if (m_frame_resources &&
+			m_frame_resources->textures.blit(src, dst, interpolate, m_frame_resources->cache, m_frame_resources->recorder))
+		{
+			// A render target write is not a texture-cache invalidation, so every
+			// unit re-resolves and picks up the surface the transfer just wrote
+			// (VKGSRender.cpp:2852-2869).
+			invalidate_samplers();
+			MTL_PROBE_LATCH(2, "transfer/gpu blit");
+			return true;
+		}
+
+		MTL_PROBE_LATCH(2, "transfer/cpu fallback");
+
+		// The CPU copy (nv3089.cpp:614-660) reads and writes guest memory directly,
+		// bypassing the cache's protection.  Materialize the source sections first,
+		// then drop the destination sections: otherwise the next sampler reads the
+		// stale host copy of the destination (the black Xevious panel was this
+		// path).
 		if (m_frame_resources && src.rsx_address && src.pitch && src.height)
 		{
 			const u32 src_length = src.pitch * static_cast<u32>(src.height);

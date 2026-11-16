@@ -97,6 +97,17 @@ namespace program_hash_util
 
 namespace rsx
 {
+	// EXCISE-BEGIN diagnostic-capture-window
+	// TODO(excise): level 5; whether a backend has a capture window open, so a
+	// backend-neutral probe (the fragment-constant fill) reports the frames the
+	// user captured and nothing else.  No shipping path reads it.
+	inline atomic_t<bool>& diagnostic_capture_window()
+	{
+		static atomic_t<bool> s_window{false};
+		return s_window;
+	}
+	// EXCISE-END diagnostic-capture-window
+
 	struct program_cache_hint_t
 	{
 		template <typename T>

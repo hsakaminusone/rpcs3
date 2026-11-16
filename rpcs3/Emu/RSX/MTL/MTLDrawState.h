@@ -35,7 +35,7 @@ namespace mtl
 	// SET_BEGIN_END -> MTL::PrimitiveType (LLD-draw §3.5).  A non-native type expands
 	// into a native topology in the shared write_index_array_data_to_buffer
 	// (Common/BufferUtils.cpp:942-957), so the result is the expansion target.
-	MTL::PrimitiveType get_primitive_type(rsx::primitive_type mode);
+	MTL::PrimitiveType get_primitive_type(rsx::primitive_type mode, bool flat = false);
 
 	// SET_INDEX_ARRAY_DMA -> MTL::IndexType (LLD-draw §3.3).
 	MTL::IndexType get_index_type(rsx::index_array_type type);

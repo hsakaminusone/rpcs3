@@ -655,6 +655,283 @@ namespace
 
 		return std::make_tuple(min_index, max_index, dst_idx);
 	}
+
+	// RSX flat shading takes the colour of the last vertex of each primitive, while the
+	// host backend may take it from the first (Metal's [[flat]]).  Rotating every
+	// primitive group right by one makes the two agree.  A strip cannot be rotated in
+	// place, so every topology is unrolled to a list, as KosmicKrisp does for the same
+	// reason (METAL4-GAPS-1-4.md §4.2).
+	template<typename T>
+	std::tuple<T, T, u32> expand_indexed_flat(std::span<to_be_t<const T>> src, std::span<T> dst,
+		rsx::primitive_type draw_mode, bool restart_index_enabled, u32 restart_index)
+	{
+		if constexpr (std::is_same_v<T, u16>)
+		{
+			if (restart_index > 0xffff)
+			{
+				// Will never trip index restart, as in upload_untouched.
+				restart_index_enabled = false;
+			}
+		}
+
+		// The caller reserves get_index_count(..., provoking_vertex_last=true) entries,
+		// which is exactly the worst case of every topology below: a group is emitted
+		// once per complete primitive and a restart only ever removes one.
+		ensure(dst.size() >= get_index_count(draw_mode, ::size32(src), true));
+
+		T min_index = index_limit<T>();
+		T max_index = 0;
+		u32 dst_idx = 0;
+
+		const auto restart = [&](T index)
+		{
+			return restart_index_enabled && index == static_cast<T>(restart_index);
+		};
+
+		switch (draw_mode)
+		{
+		case rsx::primitive_type::points:
+		{
+			for (const T index : src)
+			{
+				if (restart(index))
+					continue;
+
+				dst[dst_idx++] = min_max(min_index, max_index, index);
+			}
+
+			break;
+		}
+		case rsx::primitive_type::lines:
+		{
+			// Each line (a, b) takes its colour from b.
+			T first{};
+			bool have_first = false;
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					have_first = false;
+					continue;
+				}
+
+				const T value = min_max(min_index, max_index, index);
+
+				if (!have_first)
+				{
+					first = value;
+					have_first = true;
+					continue;
+				}
+
+				dst[dst_idx++] = value;
+				dst[dst_idx++] = first;
+				have_first = false;
+			}
+
+			break;
+		}
+		case rsx::primitive_type::line_strip:
+		case rsx::primitive_type::line_loop:
+		{
+			T first{};
+			T previous{};
+			bool have_first = false;
+			bool have_previous = false;
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					have_first = false;
+					have_previous = false;
+					continue;
+				}
+
+				const T value = min_max(min_index, max_index, index);
+
+				if (have_previous)
+				{
+					dst[dst_idx++] = value;
+					dst[dst_idx++] = previous;
+				}
+				else
+				{
+					first = value;
+					have_first = true;
+				}
+
+				previous = value;
+				have_previous = true;
+			}
+
+			if (draw_mode == rsx::primitive_type::line_loop && have_first && have_previous)
+			{
+				// The closing segment (last, first) takes its colour from first.
+				dst[dst_idx++] = first;
+				dst[dst_idx++] = previous;
+			}
+
+			break;
+		}
+		case rsx::primitive_type::triangles:
+		{
+			T group[3];
+			u32 count = 0;
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					count = 0;
+					continue;
+				}
+
+				group[count++] = min_max(min_index, max_index, index);
+
+				if (count == 3)
+				{
+					dst[dst_idx++] = group[2];
+					dst[dst_idx++] = group[0];
+					dst[dst_idx++] = group[1];
+					count = 0;
+				}
+			}
+
+			break;
+		}
+		case rsx::primitive_type::triangle_strip:
+		case rsx::primitive_type::quad_strip:
+		{
+			T window[3];
+			u32 count = 0;
+			u32 triangle = 0;
+
+			// A strip triangle t is (t, t+1, t+2) for even t and (t+1, t, t+2)
+			// for odd t; the RSX provoking vertex is its last one either way.
+			const auto emit = [&](T third)
+			{
+				if ((triangle & 1) == 0)
+				{
+					dst[dst_idx++] = third;
+					dst[dst_idx++] = window[0];
+					dst[dst_idx++] = window[1];
+				}
+				else
+				{
+					dst[dst_idx++] = third;
+					dst[dst_idx++] = window[1];
+					dst[dst_idx++] = window[0];
+				}
+
+				++triangle;
+			};
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					count = 0;
+					triangle = 0;
+					continue;
+				}
+
+				const T value = min_max(min_index, max_index, index);
+
+				if (count < 3)
+				{
+					window[count++] = value;
+
+					if (count == 3)
+					{
+						emit(window[2]);
+					}
+
+					continue;
+				}
+
+				window[0] = window[1];
+				window[1] = window[2];
+				emit(value);
+				window[2] = value;
+			}
+
+			break;
+		}
+		case rsx::primitive_type::triangle_fan:
+		case rsx::primitive_type::polygon:
+		{
+			T anchor{};
+			T previous{};
+			u32 count = 0;
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					count = 0;
+					continue;
+				}
+
+				const T value = min_max(min_index, max_index, index);
+
+				if (count == 0)
+				{
+					anchor = value;
+					++count;
+					continue;
+				}
+
+				if (count == 1)
+				{
+					previous = value;
+					++count;
+					continue;
+				}
+
+				dst[dst_idx++] = value;
+				dst[dst_idx++] = anchor;
+				dst[dst_idx++] = previous;
+				previous = value;
+			}
+
+			break;
+		}
+		case rsx::primitive_type::quads:
+		{
+			T group[4];
+			u32 count = 0;
+
+			for (const T index : src)
+			{
+				if (restart(index))
+				{
+					count = 0;
+					continue;
+				}
+
+				group[count++] = min_max(min_index, max_index, index);
+
+				if (count == 4)
+				{
+					// The two triangles are (a,b,c) and (c,d,a).
+					dst[dst_idx++] = group[2];
+					dst[dst_idx++] = group[0];
+					dst[dst_idx++] = group[1];
+					dst[dst_idx++] = group[0];
+					dst[dst_idx++] = group[2];
+					dst[dst_idx++] = group[3];
+					count = 0;
+				}
+			}
+
+			break;
+		}
+		}
+
+		return std::make_tuple(min_index, max_index, dst_idx);
+	}
 }
 
 #if defined(ARCH_X64)
@@ -850,8 +1127,32 @@ bool is_primitive_disjointed(rsx::primitive_type draw_mode)
 	}
 }
 
-u32 get_index_count(rsx::primitive_type draw_mode, u32 initial_index_count)
+u32 get_index_count(rsx::primitive_type draw_mode, u32 initial_index_count, bool provoking_vertex_last)
 {
+	if (provoking_vertex_last)
+	{
+		// The flat expansion rotates every group and unrolls strips to lists
+		// (expand_indexed_flat), so the host count is the size of that list.
+		switch (draw_mode)
+		{
+		case rsx::primitive_type::points:
+		case rsx::primitive_type::lines:
+		case rsx::primitive_type::triangles:
+			return initial_index_count;
+		case rsx::primitive_type::line_strip:
+			return initial_index_count >= 2 ? 2 * (initial_index_count - 1) : 0;
+		case rsx::primitive_type::line_loop:
+			return 2 * initial_index_count;
+		case rsx::primitive_type::triangle_strip:
+		case rsx::primitive_type::quad_strip:
+		case rsx::primitive_type::triangle_fan:
+		case rsx::primitive_type::polygon:
+			return initial_index_count >= 3 ? 3 * (initial_index_count - 2) : 0;
+		case rsx::primitive_type::quads:
+			return (6 * initial_index_count) / 4;
+		}
+	}
+
 	// Index count
 	if (is_primitive_native(draw_mode))
 		return initial_index_count;
@@ -880,15 +1181,117 @@ u32 get_index_type_size(rsx::index_array_type type)
 	fmt::throw_exception("Wrong index type");
 }
 
-void write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst, rsx::primitive_type draw_mode, unsigned count)
+u32 write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst, rsx::primitive_type draw_mode, unsigned count, bool provoking_vertex_last, u32 first_index)
 {
 	auto typedDst = reinterpret_cast<u32*>(dst);
+	u32 written = 0;
+
+	// The value a sequential vertex takes in the host list.  A clause subrange
+	// starts part-way through the vertex stream, so the first value is its offset.
+	const auto at = [first_index](u32 offset)
+	{
+		return first_index + offset;
+	};
+
+	if (provoking_vertex_last)
+	{
+		// Every group is emitted rotated right, so its last RSX vertex is first
+		// and a host flat interpolant samples it (expand_indexed_flat above).
+		switch (draw_mode)
+		{
+		case rsx::primitive_type::points:
+			for (unsigned i = 0; i < count; i++)
+			{
+				typedDst[written++] = at(i);
+			}
+			return written;
+		case rsx::primitive_type::lines:
+			for (unsigned i = 0; i + 1 < count; i += 2)
+			{
+				typedDst[written++] = at(i + 1);
+				typedDst[written++] = at(i);
+			}
+			return written;
+		case rsx::primitive_type::line_strip:
+			for (unsigned i = 1; i < count; i++)
+			{
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(i - 1);
+			}
+			return written;
+		case rsx::primitive_type::line_loop:
+			for (unsigned i = 1; i < count; i++)
+			{
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(i - 1);
+			}
+			if (count >= 2)
+			{
+				// The closing segment (last, first) takes its colour from first.
+				typedDst[written++] = at(0);
+				typedDst[written++] = at(count - 1);
+			}
+			return written;
+		case rsx::primitive_type::triangles:
+			for (unsigned i = 0; i + 2 < count; i += 3)
+			{
+				typedDst[written++] = at(i + 2);
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(i + 1);
+			}
+			return written;
+		case rsx::primitive_type::triangle_strip:
+		case rsx::primitive_type::quad_strip:
+			for (unsigned i = 2; i < count; i++)
+			{
+				// A strip triangle t is (t, t+1, t+2) for even t and
+				// (t+1, t, t+2) for odd t.
+				typedDst[written++] = at(i);
+
+				if (((i - 2) & 1) == 0)
+				{
+					typedDst[written++] = at(i - 2);
+					typedDst[written++] = at(i - 1);
+				}
+				else
+				{
+					typedDst[written++] = at(i - 1);
+					typedDst[written++] = at(i - 2);
+				}
+			}
+			return written;
+		case rsx::primitive_type::triangle_fan:
+		case rsx::primitive_type::polygon:
+			for (unsigned i = 2; i < count; i++)
+			{
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(0);
+				typedDst[written++] = at(i - 1);
+			}
+			return written;
+		case rsx::primitive_type::quads:
+			for (unsigned i = 0; i + 3 < count; i += 4)
+			{
+				// The two triangles are (a,b,c) and (c,d,a).
+				typedDst[written++] = at(i + 2);
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(i + 1);
+				typedDst[written++] = at(i);
+				typedDst[written++] = at(i + 2);
+				typedDst[written++] = at(i + 3);
+			}
+			return written;
+		}
+
+		fmt::throw_exception("Tried to load invalid primitive type");
+	}
+
 	switch (draw_mode)
 	{
 	case rsx::primitive_type::line_loop:
 		iota32(typedDst, count);
 		typedDst[count] = 0;
-		return;
+		return count + 1;
 	case rsx::primitive_type::triangle_fan:
 	case rsx::primitive_type::polygon:
 		for (unsigned i = 0; i < (count - 2); i++)
@@ -897,7 +1300,7 @@ void write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst,
 			typedDst[3 * i + 1] = i + 2 - 1;
 			typedDst[3 * i + 2] = i + 2;
 		}
-		return;
+		return 3 * (count - 2);
 	case rsx::primitive_type::quads:
 		for (unsigned i = 0; i < count / 4; i++)
 		{
@@ -910,7 +1313,7 @@ void write_index_array_for_non_indexed_non_native_primitive_to_buffer(char* dst,
 			typedDst[6 * i + 4] = 4 * i + 3;
 			typedDst[6 * i + 5] = 4 * i;
 		}
-		return;
+		return (6 * count) / 4;
 	case rsx::primitive_type::quad_strip:
 	case rsx::primitive_type::points:
 	case rsx::primitive_type::lines:
@@ -930,11 +1333,16 @@ namespace
 	std::tuple<T, T, u32> write_index_array_data_to_buffer_impl(std::span<T> dst,
 		std::span<const be_t<T>> src,
 		rsx::primitive_type draw_mode, bool restart_index_enabled, u32 restart_index,
-		const std::function<bool(rsx::primitive_type)>& expands)
+		const std::function<bool(rsx::primitive_type)>& expands, bool provoking_vertex_last)
 	{
 		if (!expands(draw_mode)) [[likely]]
 		{
 			return upload_untouched<T>(src, dst, draw_mode, restart_index_enabled, restart_index);
+		}
+
+		if (provoking_vertex_last)
+		{
+			return expand_indexed_flat<T>(src, dst, draw_mode, restart_index_enabled, restart_index);
 		}
 
 		switch (draw_mode)
@@ -964,19 +1372,19 @@ namespace
 std::tuple<u32, u32, u32> write_index_array_data_to_buffer(std::span<std::byte> dst_ptr,
 	std::span<const std::byte> src_ptr,
 	rsx::index_array_type type, rsx::primitive_type draw_mode, bool restart_index_enabled, u32 restart_index,
-	const std::function<bool(rsx::primitive_type)>& expands)
+	const std::function<bool(rsx::primitive_type)>& expands, bool provoking_vertex_last)
 {
 	switch (type)
 	{
 	case rsx::index_array_type::u16:
 	{
 		return write_index_array_data_to_buffer_impl<u16>(utils::bless<u16>(dst_ptr), utils::bless<const be_t<u16>>(src_ptr),
-			draw_mode, restart_index_enabled, restart_index, expands);
+			draw_mode, restart_index_enabled, restart_index, expands, provoking_vertex_last);
 	}
 	case rsx::index_array_type::u32:
 	{
 		return write_index_array_data_to_buffer_impl<u32>(utils::bless<u32>(dst_ptr), utils::bless<const be_t<u32>>(src_ptr),
-			draw_mode, restart_index_enabled, restart_index, expands);
+			draw_mode, restart_index_enabled, restart_index, expands, provoking_vertex_last);
 	}
 	default:
 		fmt::throw_exception("Unreachable");
