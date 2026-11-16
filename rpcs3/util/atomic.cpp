@@ -927,6 +927,14 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 	{
 		for (auto e = ext; e->data; e++)
 		{
+			// The bound is enforced by atomic_wait::list, but this loop is the only
+			// thing standing between a bad `ext` and a stack smash, so it is checked
+			// here too.
+			if (ext_size + 1 >= std::size(vec))
+			{
+				fmt::throw_exception("Too many elements in atomic_wait::list (max %u)", std::size(vec) - 1);
+			}
+
 			ext_size++;
 			vec[ext_size].flags = FUTEX_32 | FUTEX_PRIVATE_FLAG;
 			vec[ext_size].uaddr = reinterpret_cast<__u64>(e->data);
@@ -979,6 +987,13 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 	{
 		for (auto e = ext; e->data; e++)
 		{
+			if (ext_size >= std::size(iptr_ext))
+			{
+				// Same bound as above: atomic_wait::list asserts it at compile time,
+				// but the array write must not be the thing that fails first.
+				fmt::throw_exception("Too many elements in atomic_wait::list (max %u)", std::size(iptr_ext) + 1);
+			}
+
 			if (data == e->data)
 			{
 				fmt::throw_exception("Address duplication in atomic_wait::list");

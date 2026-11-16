@@ -1057,24 +1057,28 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 
 	static inline T load(const T& dest)
 	{
-		atomic_fence_acquire();
-
 		if (utils::g_atomic_lse2) [[likely]]
 		{
+			// This is exactly what clang emits for a 16-byte __atomic_load with
+			// __ATOMIC_SEQ_CST on AArch64: the full barrier after the load gives
+			// acquire ordering and places the load in the total order, which made
+			// the dmb ishld on either side of it redundant.
 			u64 data[2];
-			__asm__ volatile("1:\n"
-				"ldp %x[data0], %x[data1], %[dest]\n"
+			__asm__ volatile("ldp %x[data0], %x[data1], %[dest]\n"
 				"dmb ish\n"
 				: [data0] "=r"(data[0]), [data1] "=r"(data[1])
 				: [dest] "Q"(dest)
 				: "memory");
 			T result;
 			std::memcpy(&result, data, 16);
-			atomic_fence_acquire();
 			return result;
 		}
 		else
 		{
+			// Without LSE2 an atomic 16-byte read needs the exclusive-pair retry;
+			// the acquire fence belongs to that sequence.
+			atomic_fence_acquire();
+
 			u32 tmp;
 			u64 data[2];
 			__asm__ volatile("1:\n"
@@ -1094,7 +1098,22 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 
 	static inline T observe(const T& dest)
 	{
-		// TODO
+		if (utils::g_atomic_lse2) [[likely]]
+		{
+			// Relaxed load, which is the documented contract of atomic_t::observe.
+			// LSE2 already makes the aligned 16-byte ldp single-copy atomic, so no
+			// barrier is required; this matches clang's __ATOMIC_RELAXED lowering.
+			u64 data[2];
+			__asm__ volatile("ldp %x[data0], %x[data1], %[dest]\n"
+				: [data0] "=r"(data[0]), [data1] "=r"(data[1])
+				: [dest] "Q"(dest)
+				: "memory");
+			T result;
+			std::memcpy(&result, data, 16);
+			return result;
+		}
+
+		// Without LSE2 there is no barrier-free atomic 16-byte read.
 		return load(dest);
 	}
 
