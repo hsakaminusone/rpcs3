@@ -6,6 +6,7 @@
 
 #include "../Common/simple_array.hpp"
 #include "MTLOverlays.h"
+#include "MTLUpscaler.h"
 
 #include <array>
 
@@ -49,6 +50,14 @@ namespace mtl
 			const present_source& source, const areau& aspect, const areau& display_area,
 			f32 gamma, bool limited_range, bool stereo, rsx::overlays::display_manager* overlays);
 
+		// Run the FSR 1 upscale when the user asked for it and return the source the
+		// compose should draw, or `source` unchanged.  The result is the aspect
+		// rectangle's own size, so the compose samples it one-to-one.  It encodes a
+		// compute pass, so it runs before the drawable's render pass opens
+		// (VKPresent.cpp:855-873, GLPresent.cpp:450-457).
+		present_source upscale_source(command_recorder& recorder, constants_heap& constants,
+			const present_source& source, const areau& aspect);
+
 		// Encode the readback of `source` into the current frame.  Metal 4 does not
 		// stop the CPU at the encode, so the bytes are delivered once the slot that
 		// wrote them has completed (HLD-06 §2.7).
@@ -85,6 +94,7 @@ namespace mtl
 		MTL::Texture* m_capture_target = nullptr;
 
 		resource_manager* m_resources = nullptr;
+		const device* m_device = nullptr;
 
 		std::array<capture, frame_slot_count> m_captures{};
 
@@ -92,6 +102,11 @@ namespace mtl
 		present_scale_pass m_nearest;
 		video_out_calibration_pass m_calibration;
 		ui_overlay_renderer m_ui;
+
+		// FSR is initialized on first use, like the VK/GL upscalers, so a failure
+		// in this optional pass cannot fail presentation.
+		bool m_fsr_init_attempted = false;
+		fsr_upscale_pass m_fsr;
 	};
 }
 

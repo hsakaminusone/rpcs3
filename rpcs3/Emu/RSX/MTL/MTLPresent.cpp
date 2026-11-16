@@ -15,6 +15,7 @@
 #include "MTLConstants.h"
 #include "MTLFormats.h"
 #include "MTLResourceManager.h"
+#include "MTLUpscaleFSR.h"
 
 #include "util/asm.hpp"
 #include "util/logs.hpp"
@@ -29,19 +30,46 @@ namespace mtl
 	bool frame_output::init(const device& dev, resource_manager& resources)
 	{
 		m_resources = &resources;
+		m_device = &dev;
+		m_fsr_init_attempted = false;
 
-		if (!m_scale.init(dev, resources, true) || !m_nearest.init(dev, resources, false) ||
-			!m_calibration.init(dev, resources) || !m_ui.init(dev, resources))
+		// Named, not folded: a silent `false` out of a four-way chain cannot be
+		// attributed from a crash dump, and the pass that failed is the whole
+		// content of the report.
+		if (!m_scale.init(dev, resources, true))
 		{
-			rsx_log.error("Metal: output pass initialization failed");
+			rsx_log.error("Metal: output scale pass initialization failed");
 			return false;
 		}
+
+		if (!m_nearest.init(dev, resources, false))
+		{
+			rsx_log.error("Metal: output nearest pass initialization failed");
+			return false;
+		}
+
+		if (!m_calibration.init(dev, resources))
+		{
+			rsx_log.error("Metal: output calibration pass initialization failed");
+			return false;
+		}
+
+		if (!m_ui.init(dev, resources))
+		{
+			rsx_log.error("Metal: output UI pass initialization failed");
+			return false;
+		}
+
+		// FSR is optional and mode-gated: VK/GL create their upscaler on first use,
+		// only when output_scaling selects it.  Initializing it here made a failure
+		// in that optional pass fatal to all presentation.
 
 		return true;
 	}
 
 	void frame_output::shutdown()
 	{
+		m_fsr.shutdown();
 		m_ui.destroy();
 
 		if (m_capture_target)
@@ -59,6 +87,65 @@ namespace mtl
 		}
 
 		m_captures = {};
+	}
+
+	present_source frame_output::upscale_source(command_recorder& recorder, constants_heap& constants,
+		const present_source& source, const areau& aspect)
+	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "present/upscale");
+
+		// FSR is a pass of its own only in this mode, and it needs a first eye, a
+		// source rectangle and a destination to enlarge into.  A stereo frame keeps
+		// the plain filter: the two eyes share one pass in the other backends too
+		// (VKPresent.cpp:855).
+		if (g_cfg.video.output_scaling != output_scaling_mode::fsr ||
+			!source.image || source.image2 || !source.width || !source.height ||
+			!aspect.width() || !aspect.height())
+		{
+			// TODO(excise): level 2; the upscale that could not run (area B).
+			MTL_PROBE_LATCH(2, "present/upscale refused");
+			return source;
+		}
+
+		// FSR 1 is an enlargement filter.  When the frame is already at or above the
+		// output size the pass declines and the compose's own filter runs, which is
+		// the fallback the Vulkan pass takes for the same input (fsr_pass.cpp:304).
+		if (!fsr::is_enlargement(source.width, source.height, static_cast<u32>(aspect.width()), static_cast<u32>(aspect.height())))
+		{
+			// TODO(excise): level 2; the upscale that could not run (area B).
+			MTL_PROBE_LATCH(2, "present/upscale refused");
+			return source;
+		}
+
+		// Create on first use, as VK/GL do.  If compilation fails, run() returns
+		// null and the compose keeps its own filter; presentation is unaffected.
+		if (!m_fsr_init_attempted)
+		{
+			m_fsr_init_attempted = true;
+
+			if (m_device && m_resources && !m_fsr.init(*m_device, *m_resources))
+			{
+				rsx_log.error("Metal: output FSR pass initialization failed; using the compose filter");
+			}
+		}
+
+		MTL::Texture* image = m_fsr.run(recorder, constants, source.image, source.width, source.height,
+			static_cast<u32>(aspect.width()), static_cast<u32>(aspect.height()));
+
+		if (!image)
+		{
+			return source;
+		}
+
+		// TODO(excise): level 2; the upscale ran (area A).
+		MTL_PROBE_LATCH(2, "present/upscale ran");
+
+		present_source upscaled = source;
+		upscaled.image = image;
+		upscaled.width = static_cast<u32>(aspect.width());
+		upscaled.height = static_cast<u32>(aspect.height());
+		return upscaled;
 	}
 
 	void frame_output::compose(MTL4::RenderCommandEncoder* encoder, constants_heap& constants, MTL::Texture* target,

@@ -657,7 +657,6 @@ namespace mtl
 			return;
 		}
 
-		rows = std::min<u32>(rows, host_last - host_first);
 		const u64 span = static_cast<u64>(rows) * rsx_pitch;
 		const u32 bytes = static_cast<u32>(std::min<u64>(range.bytes, span - row_offset));
 

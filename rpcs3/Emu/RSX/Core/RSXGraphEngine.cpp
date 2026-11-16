@@ -3,6 +3,7 @@
 
 #include "Emu/RSX/Common/surface_store.h"
 #include "Emu/RSX/Common/TextureUtils.h"
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
 #include "Emu/RSX/Program/ProgramStateCache.h"
 #include "Emu/RSX/Program/RSXFragmentProgram.h"
 #include "Emu/RSX/Program/RSXVertexProgram.h"
@@ -1006,6 +1007,18 @@ namespace rsx
 		m_ctx->program.fragment_program.total_length = m_ctx->program.fp_metadata.program_ucode_length + m_ctx->program.fp_metadata.program_start_offset;
 		m_ctx->program.fragment_program.texture_state.import(m_ctx->program.fp_texture_state, m_ctx->program.fp_metadata.referenced_textures_mask);
 		m_ctx->program.fragment_program.valid = true;
+
+		// EXCISE-BEGIN fp-literal-write-watch
+		// TODO(excise): level 5; registers the image with the write watch, so a
+		// later copy into any prefetched program is matched even when that
+		// program is not the one bound at the time of the write.  A change found
+		// here rather than at a writer proves the mutation came from outside the
+		// instrumented copies.
+		program_write_watch::claim(reinterpret_cast<u64>(m_ctx->program.fragment_program.get_data()),
+			m_ctx->program.fragment_program.offset,
+			m_ctx->program.fragment_program.ucode_length,
+			static_cast<const u8*>(m_ctx->program.fragment_program.get_data()));
+		// EXCISE-END fp-literal-write-watch
 
 		// Verify current texture state is valid
 		if (m_ctx->textures.fragment_textures_dirty & m_ctx->program.fp_metadata.referenced_textures_mask)

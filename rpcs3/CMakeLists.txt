@@ -202,6 +202,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_rsx_fp_asm.cpp
             tests/test_rsx_fifo_streams.cpp
             tests/test_rsx_metal4_dials.cpp
+            tests/test_rsx_metal4_fsr.cpp
             tests/test_rsx_metal4_interpreter.cpp
             tests/test_rsx_metal4_mapping.cpp
             tests/test_rsx_metal4_pass_policy.cpp

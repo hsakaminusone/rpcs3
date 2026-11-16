@@ -3,6 +3,7 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
 #include "Emu/RSX/Host/MM.h"
 
 #include "Utilities/deferred_op.hpp"
@@ -125,6 +126,23 @@ namespace rsx
 
 			u8* dst = vm::_ptr<u8>(write_address);
 			const u8* src = vm::_ptr<u8>(read_address);
+
+			// EXCISE-BEGIN fp-literal-write-watch
+			// TODO(excise): level 5; the 2D copy, whose destination span is not
+			// the bytes it writes when the pitch carries gaps.  Deferred so it
+			// runs after every exit from the copy below, and keyed on the host
+			// pointer so the span is the one the copy used.
+			utils::deferred_op watch([&]()
+			{
+				rsx::program_write_watch::note("nv0039", reinterpret_cast<u64>(dst), write_length, src, read_length,
+					[&](char* b, usz n)
+					{
+						std::snprintf(b, n, "in_pitch=%d out_pitch=%d in_fmt=%u out_fmt=%u cols=%u rows=%u block=%u",
+							in_pitch, out_pitch, static_cast<u32>(in_format), static_cast<u32>(out_format),
+							line_length, line_count, is_block_transfer ? 1u : 0u);
+					});
+			});
+			// EXCISE-END fp-literal-write-watch
 
 			const rsx::simple_array<utils::address_range64> flush_mm_ranges =
 			{

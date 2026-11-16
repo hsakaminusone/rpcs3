@@ -283,8 +283,13 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 			return;
 		}
 
-		const u32 width = static_cast<u32>(dst_x1);
-		const u32 height = static_cast<u32>(dst_y1);
+		const s32 x0 = std::min(dst_area.x1, dst_area.x2);
+		const s32 y0 = std::min(dst_area.y1, dst_area.y2);
+		const s32 w = dst_x1 - x0;
+		const s32 h = dst_y1 - y0;
+
+		const u32 width = static_cast<u32>(w);
+		const u32 height = static_cast<u32>(h);
 
 		MTL::RenderPipelineState* state = pipeline(dst->pixelFormat());
 		MTL::SamplerState* filter = sampler(interpolate);
@@ -316,11 +321,6 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 		{
 			return;
 		}
-
-		const s32 x0 = std::min(dst_area.x1, dst_area.x2);
-		const s32 y0 = std::min(dst_area.y1, dst_area.y2);
-		const s32 w = dst_x1 - x0;
-		const s32 h = dst_y1 - y0;
 
 		MTL::Viewport viewport{};
 		viewport.originX = static_cast<double>(x0);
