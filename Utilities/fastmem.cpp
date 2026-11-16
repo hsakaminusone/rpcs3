@@ -19,7 +19,7 @@ namespace fastmem
 		struct entry
 		{
 			atomic_t<uptr> host_pc{};
-			atomic_t<u32> guest_page{};
+			atomic_t<u32> guest_addr{};  // full guest address of the last fault
 			atomic_t<u32> faults{};
 			atomic_t<u8> flags{};
 		};
@@ -120,7 +120,7 @@ namespace fastmem
 			// The key is already visible, so these fields are the only thing a
 			// concurrent reader can beat. They are advisory history, not state the
 			// handler acts on, so a reader seeing the old values is harmless.
-			e->guest_page = guest_addr >> 12;
+			e->guest_addr = guest_addr;
 			e->flags = write ? is_write : 0;
 			e->faults = 1;
 
@@ -129,7 +129,7 @@ namespace fastmem
 		}
 
 		e->faults += 1;
-		e->guest_page = guest_addr >> 12;
+		e->guest_addr = guest_addr;
 		e->flags = write ? is_write : 0;
 		cpu_stats::g_counters.fastmem_recurring++;
 		return site_state::recurring;
@@ -160,7 +160,7 @@ namespace fastmem
 				// first so it stops matching, then drop the payload.
 				if (e.host_pc.compare_and_swap_test(key, 0))
 				{
-					e.guest_page = 0;
+					e.guest_addr = 0;
 					e.flags = 0;
 					e.faults = 0;
 					removed++;
@@ -176,7 +176,7 @@ namespace fastmem
 		for (entry& e : g_table)
 		{
 			e.host_pc = 0;
-			e.guest_page = 0;
+			e.guest_addr = 0;
 			e.faults = 0;
 			e.flags = 0;
 		}

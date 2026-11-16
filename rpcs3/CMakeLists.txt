@@ -194,9 +194,11 @@ if(BUILD_RPCS3_TESTS)
             tests/test_blob_detector.cpp
             tests/test_cctype.cpp
             tests/test_cpu_native_atomics.cpp
+            tests/test_cpu_native_decode.cpp
             tests/test_cpu_native_fastmem.cpp
             tests/test_cpu_native_jit.cpp
             tests/test_cpu_native_patch.cpp
+            tests/test_cpu_native_stub.cpp
             tests/test_cpu_native_vm.cpp
             tests/test_dmux_pamf.cpp
             tests/test_fmt.cpp
