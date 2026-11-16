@@ -3,7 +3,9 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+// EXCISE-BEGIN fp-literal-write-watch-include
 #include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-literal-write-watch-include
 
 #include "context_accessors.define.h"
 
