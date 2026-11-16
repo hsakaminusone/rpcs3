@@ -2,7 +2,9 @@
 
 #include "Utilities/jit_patch.h"
 
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 #if defined(__APPLE__)
 #include <sys/mman.h>
@@ -91,3 +93,72 @@ TEST(CpuNativePatch, PatchFormIsUnavailableOnThisHost)
 	EXPECT_FALSE(jit_patch::branch_matches(site, site + 8));
 }
 #endif
+
+// CPU-FASTMEM-012: the 4-byte store is the whole safety argument for patching
+// live code (§8.1.2). A thread that is not inside the instruction must see
+// either the old instruction or the branch, and both are valid. This repatches
+// one site between two targets while another thread executes it, so a torn or
+// half-written instruction shows up as a crash or an impossible return value.
+TEST(CpuNativePatch, RepatchingWhileExecutingNeverTears)
+{
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+	const long page_size = ::sysconf(_SC_PAGESIZE);
+	ASSERT_GT(page_size, 0);
+
+	u8* const code = static_cast<u8*>(::mmap(nullptr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0));
+	ASSERT_NE(code, MAP_FAILED);
+
+	// The site starts as a branch to `two`; it is then repatched to `three`.
+	constexpr u8 return_two[]{0x40, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};
+	constexpr u8 return_three[]{0x60, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};
+
+	u8* const two = code + 16;
+	u8* const three = code + 32;
+
+	{
+		jit_write_guard write_guard;
+		std::memcpy(two, return_two, sizeof(return_two));
+		std::memcpy(three, return_three, sizeof(return_three));
+		jit_flush_icache(code, 40);
+	}
+
+	ASSERT_TRUE(jit_patch::patch_branch(code, two));
+
+	const auto entry = reinterpret_cast<u32 (*)()>(code);
+
+	std::atomic<bool> stop{false};
+	std::atomic<u32> bad{0};
+	std::atomic<u32> calls{0};
+
+	std::thread caller([&]
+	{
+		while (!stop)
+		{
+			const u32 value = entry();
+
+			if (value != 2 && value != 3)
+			{
+				bad++;
+			}
+
+			calls++;
+		}
+	});
+
+	for (int i = 0; i < 20000; ++i)
+	{
+		jit_patch::patch_branch(code, (i & 1) ? two : three);
+	}
+
+	stop = true;
+	caller.join();
+
+	EXPECT_EQ(bad.load(), 0u);
+	EXPECT_GT(calls.load(), 0u);
+
+	::munmap(code, page_size);
+#else
+	SUCCEED() << "MAP_JIT execution test is Apple-only";
+#endif
+}

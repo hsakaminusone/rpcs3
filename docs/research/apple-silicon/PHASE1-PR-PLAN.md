@@ -41,6 +41,25 @@ smallest correct slice if 9d is pulled forward.
 A `stub_provider` interface with no implementation was drafted and discarded: it
 would have compiled, been tested nowhere, and looked like a working tier.
 
+### A finding that reorders W2
+
+Under the current VM, **a site that faults is by definition not a plain RAM
+page.** Guest RAM is committed on first touch and stays committed; what keeps
+faulting is an unmapped or device-backed page. So "patch the recurring site and
+re-execute it" is never correct here: the recurring fault means the address must
+not be accessed directly.
+
+The only correct patch is therefore a call into the slow helper, and that needs
+the full operand set of the instruction, not just its width and direction: a load
+must write its destination guest register, a store must read its value register.
+Those are host registers the stub would have to name, so they have to come from
+metadata the translator recorded when it knew them (PR 8), or from decoding every
+addressing and register field and emitting the register moves.
+
+That makes 9d/9e an L-sized change, not M, and it moves the useful work back to
+W3: the sub-page map fixes #19881 without patching anything, and the T1 guard it
+adds is the thing that keeps a fault from being generated in the first place.
+
 ## W3 — sub-page notification map (PR 10)
 
 | PR | Title | Files | Size | Gate |
