@@ -39,8 +39,12 @@ namespace fastmem
 			return ((host_pc >> 2) * 0x9E37'79B1u) & (c_table_size - 1);
 		}
 
-		entry* find_site(uptr host_pc, bool insert) noexcept
+		// `inserted` distinguishes a slot this call claimed from an entry that was
+		// already there, including one found by backing out of a duplicate.
+		entry* find_site(uptr host_pc, bool insert, bool& inserted) noexcept
 		{
+			inserted = false;
+
 			const usz start = hash_slot(host_pc);
 
 			for (usz i = 0; i < c_probe_limit; ++i)
@@ -78,6 +82,7 @@ namespace fastmem
 						}
 
 						g_sites++;
+						inserted = true;
 						return &e;
 					}
 
@@ -103,17 +108,30 @@ namespace fastmem
 			return site_state::first;
 		}
 
-		entry* e = find_site(host_pc, false);
+		bool inserted = false;
+		entry* e = find_site(host_pc, false, inserted);
 
 		if (!e)
 		{
-			e = find_site(host_pc, true);
+			e = find_site(host_pc, true, inserted);
 
 			if (!e)
 			{
 				// Table full: report as recurring so the caller does not treat
 				// the site as stable, but do not record anything.
 				cpu_stats::g_counters.fastmem_overflow++;
+				return site_state::recurring;
+			}
+
+			// A duplicate found while backing out belongs to another thread: this
+			// fault is a repeat at that site, not its first, and resetting the
+			// history here would both miscount it and lose the evidence.
+			if (!inserted)
+			{
+				e->faults += 1;
+				e->guest_addr = guest_addr;
+				e->flags = write ? is_write : 0;
+				cpu_stats::g_counters.fastmem_recurring++;
 				return site_state::recurring;
 			}
 
