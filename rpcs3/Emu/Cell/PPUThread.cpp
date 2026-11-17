@@ -21,6 +21,12 @@
 #include "Utilities/subpage_map.h"
 #include "Utilities/jit_page_index.h"
 #include "Utilities/ppu_cache_meta.h"
+
+// The epoch the indirect-branch cache validates against (§8.2.3).
+static u64 get_ibtc_epoch()
+{
+	return jit_page::epoch();
+}
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
@@ -5178,6 +5184,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{ "__read_maybe_mmio32", reinterpret_cast<u64>(+ppu_read_mmio_aware_u32) },
 			{ "__write_maybe_mmio32", reinterpret_cast<u64>(+ppu_write_mmio_aware_u32) },
 			{ "__subpage_fault", reinterpret_cast<u64>(+vm::handle_guest_subpage_fault) },
+			{ "__ibtc_epoch", reinterpret_cast<u64>(+get_ibtc_epoch) },
 			{ "__vrefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vrefp>) },
 			{ "__vrsqrtefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vrsqrtefp>) },
 			{ "__vexptefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vexptefp>) },

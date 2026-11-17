@@ -74,7 +74,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 | 11a | `cpu: loop-first region formation` | `PPUTranslator.cpp` | XL | **scan landed** (`Utilities/ppu_region_scan.*`, 7 tests): loop headers by descending span, absorption only of single-predecessor blocks, budget and threshold; the translator does not consume regions yet, so the golden-IR gate is still open |
 | 11b | `cpu: real CFG edges between blocks` | `PPUTranslator.cpp`, `CPUTranslator.h` | L | differential on a block corpus |
 | 12 | `cpu: link area for direct exits` | `PPUTranslator.cpp` | M | block-link tests |
-| 13 | `cpu: monomorphic IBTC for indirect branches` | `PPUTranslator.cpp` | M | hit rate + correctness |
+| 13 | `cpu: monomorphic IBTC for indirect branches` | `PPUTranslator.cpp` | M | **landed**: one cell per indirect site in the module's data, filled on the miss path and trusted only while the invalidation epoch matches; hit rate and the corpus A/B have not been measured |
 | 14 | `cpu: return stack buffer for bl/blr` | `PPUTranslator.cpp` | M | call/return stress |
 
 ## W5 — IR state (PR 15–16)

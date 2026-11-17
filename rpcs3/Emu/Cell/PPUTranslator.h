@@ -92,6 +92,13 @@ class PPUTranslator final : public cpu_translator
 	// Emit the check that catches a guest page unmapped inside a mapped host page.
 	void EmitSubpageGuard(llvm::Value* addr, u32 size, bool is_write);
 
+	// Monomorphic indirect-branch cache (§8.2.3). One cell per indirect site, in
+	// the module's own data, trusted only while the invalidation epoch it was
+	// filled at still matches.
+	llvm::GlobalVariable* m_ibtc{};
+	u32 m_ibtc_site = 0;
+	static constexpr u32 ibtc_sites = 64;
+
 	// Classify the current access. Only the 32-bit heuristic below can prove T2
 	// at translation time; everything else starts as T1 and is promoted to T0
 	// by the fault path.

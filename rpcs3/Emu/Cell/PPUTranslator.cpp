@@ -653,6 +653,49 @@ void PPUTranslator::CallFunction(u64 target, Value* indirect)
 			}
 		}
 
+		const auto emit_call = [&](FunctionCallee target_callee, Value* target_seg0)
+		{
+			const auto c = m_ir->CreateCall(target_callee, {m_exec, m_thread, target_seg0, m_base, GetGpr(0), GetGpr(1), GetGpr(2)});
+			c->setTailCallKind(llvm::CallInst::TCK_Tail);
+			c->setCallingConv(CallingConv::GHC);
+			m_ir->CreateRetVoid();
+		};
+
+		// §8.2.3. A monomorphic cell in front of the dependent table load: the hit
+		// path is one register compare plus one epoch compare, and it needs no
+		// pointer chase, so the branch has a stable predictor input.
+		if (!m_ibtc)
+		{
+			const auto cell_type = ArrayType::get(GetType<u64>(), 4);
+			const auto array_type = ArrayType::get(cell_type, ibtc_sites);
+			m_ibtc = new GlobalVariable(*m_module, array_type, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(array_type), "__ibtc");
+		}
+
+		const u32 site = m_ibtc_site++ % ibtc_sites;
+		const auto cell = m_ir->CreateConstGEP2_64(m_ibtc->getValueType(), m_ibtc, 0, site);
+		const auto cell_field = [&](u32 index) { return m_ir->CreateConstGEP2_64(ArrayType::get(GetType<u64>(), 4), cell, 0, index); };
+		const auto load_cell = [&](u32 index)
+		{
+			const auto inst = m_ir->CreateAlignedLoad(GetType<u64>(), cell_field(index), llvm::MaybeAlign{8});
+			inst->setAtomic(AtomicOrdering::Acquire);
+			return inst;
+		};
+		const auto store_cell = [&](u32 index, Value* value)
+		{
+			const auto inst = m_ir->CreateAlignedStore(value, cell_field(index), llvm::MaybeAlign{8});
+			inst->setAtomic(AtomicOrdering::Release);
+		};
+
+		const auto hit = BasicBlock::Create(m_context, "__ibtc_hit", m_function);
+		const auto miss = BasicBlock::Create(m_context, "__ibtc_miss", m_function);
+
+		const auto same_target = m_ir->CreateICmpEQ(load_cell(0), indirect);
+		const auto epoch_now = Call(GetType<u64>(), "__ibtc_epoch");
+		const auto same_epoch = m_ir->CreateICmpEQ(load_cell(3), epoch_now);
+		m_ir->CreateCondBr(m_ir->CreateAnd(same_target, same_epoch), hit, miss, m_md_likely);
+
+		// Miss: resolve through the execution table, then fill the cell for next time.
+		m_ir->SetInsertPoint(miss);
 		const auto pos = m_ir->CreateShl(indirect, 1);
 		const auto ptr = m_ir->CreatePtrAdd(m_exec, pos);
 		const auto val = m_ir->CreateLoad(get_type<u64>(), ptr);
@@ -664,6 +707,20 @@ void PPUTranslator::CallFunction(u64 target, Value* indirect)
 		const auto seg_ptr = m_ir->CreatePtrAdd(seg_base_ptr, seg_pos);
 		const auto seg_val = m_ir->CreateZExt(m_ir->CreateLoad(get_type<u16>(), seg_ptr), get_type<u64>());
 		seg0 = m_ir->CreateShl(seg_val, 13);
+
+		store_cell(1, val);
+		store_cell(2, seg0);
+		store_cell(3, epoch_now);
+		store_cell(0, indirect); // last: the cell only becomes visible with every field in place
+
+		emit_call(callee, seg0);
+
+		// Hit: tail-call the cached entry with the cached segment base.
+		m_ir->SetInsertPoint(hit);
+		const auto host = load_cell(1);
+		emit_call(FunctionCallee(type, m_ir->CreateIntToPtr(host, get_type<u8*>())), load_cell(2));
+
+		return;
 	}
 
 	m_ir->SetInsertPoint(block);
