@@ -110,7 +110,7 @@ namespace mtl
 
 	std::string MTLFragmentDecompilerThread::compareFunction(COMPARE f, std::string_view Op0, std::string_view Op1)
 	{
-		return glsl::compareFunctionImpl(f, Op0, Op1);
+		return glsl::compareFunctionAlias(f, Op0, Op1);
 	}
 
 	void MTLFragmentDecompilerThread::insertHeader(std::stringstream& OS)
@@ -360,13 +360,14 @@ namespace mtl
 		m_shader_props.require_fog_read = properties.in_register_mask & in_fogc;
 		m_shader_props.emulate_shadow_compare = device_props.emulate_depth_compare || device_props.emulated_depth_storage;
 
-		m_shader_props.low_precision_tests = false;
 		// Apple silicon executes a discarded fragment's stores, so the discard is
 		// deferred to the end of main (HLD-05 F1).
 		m_shader_props.disable_early_discard = true;
 		m_shader_props.supports_native_fp16 = device_props.has_native_half_support;
 
-		m_shader_props.ROP_output_rounding = (g_cfg.video.shader_precision != gpu_preset_level::low) && !!(m_prog.ctrl & RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER);
+		m_shader_props.ROP_output_8bit = !!(m_prog.ctrl & RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER);
+		m_shader_props.ROP_output_rounding = (g_cfg.video.shader_precision != gpu_preset_level::low) && m_shader_props.ROP_output_8bit;
+		m_shader_props.ROP_output_fp16_quantize = !!(m_prog.ctrl & RSX_SHADER_CONTROL_F16_FRAMEBUFFER);
 		m_shader_props.ROP_sRGB_packing = !!(m_prog.ctrl & RSX_SHADER_CONTROL_SRGB_FRAMEBUFFER);
 		m_shader_props.ROP_alpha_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ALPHA_TEST);
 		m_shader_props.ROP_alpha_to_coverage_test = !!(m_prog.ctrl & RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE);
@@ -704,6 +705,7 @@ namespace mtl
 		// setting can use f16 registers instead of widening every intermediate
 		// (VKFragmentProgram.cpp:76; HLD-05 F6).  Depth compare and depth storage
 		// are native, so the two depth emulation paths stay off.
+		device_props.shader_precision = g_cfg.video.shader_precision.get();
 		device_props.has_native_half_support = (g_cfg.video.shader_precision == gpu_preset_level::low);
 		device_props.emulate_depth_compare = false;
 		device_props.has_low_precision_rounding = false;

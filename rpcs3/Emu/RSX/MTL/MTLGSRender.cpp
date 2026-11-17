@@ -5711,7 +5711,7 @@ namespace mtl
 				{ reinterpret_cast<f32*>(constants), fragment_constant_count * 4 },
 				m_ctx->program.fragment_program,
 				frame.compiled_fragment->constant_offsets,
-				true);
+				false);
 
 			frame.fragment_constants_index = frame.constants.fragment_constants_index();
 			frame.fragment_constants_ring = frame.constants.fragment_constants_address();
