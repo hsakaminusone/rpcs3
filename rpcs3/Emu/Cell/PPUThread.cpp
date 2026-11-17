@@ -20,6 +20,7 @@
 #include "PPUThread.h"
 #include "Utilities/subpage_map.h"
 #include "Utilities/jit_page_index.h"
+#include "Utilities/ppu_cache_meta.h"
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
@@ -5871,6 +5872,29 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 					}
 				}
 
+				// Seed the page index for this cached module (§8.1.4) from its
+				// sidecar, falling back to the fragment's own range when the
+				// sidecar is absent or was written by another codegen version.
+				if (const auto& seg = ::at32(entry.part.segs, 0); true)
+				{
+					u32 covered_addr = seg.addr;
+					u32 covered_size = seg.size;
+
+					if (fs::file meta{cache_path + entry.obj_name + ".meta", fs::read}; meta)
+					{
+						std::vector<u8> bytes(meta.size());
+						meta.read(bytes.data(), bytes.size());
+
+						if (const auto rec = ppu_cache_meta::parse(bytes))
+						{
+							covered_addr = rec->guest_addr;
+							covered_size = rec->guest_size;
+						}
+					}
+
+					jit_page::note_compiled(covered_addr, covered_size, module_key(cache_path + entry.obj_name));
+				}
+
 				return;
 			}
 
@@ -6009,6 +6033,21 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 					}
 
 					ppu_log.success("LLVM: Compiled module %s", obj_name);
+
+					// Sidecar (§8.5.1): the guest range travels next to the object so the
+					// next process can seed its page index without decoding it.
+					if (const auto& seg = ::at32(part.segs, 0); true)
+					{
+						ppu_cache_meta::record rec;
+						rec.guest_addr = seg.addr;
+						rec.guest_size = seg.size;
+
+						if (fs::file meta{cache_path + obj_name + ".meta", fs::write + fs::create}; meta)
+						{
+							const auto bytes = ppu_cache_meta::serialize(rec);
+							meta.write(bytes.data(), bytes.size());
+						}
+					}
 				}
 
 				core_lock.unlock();

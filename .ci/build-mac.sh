@@ -66,6 +66,8 @@ git submodule -q update --init --depth=1 --jobs=8 $(awk '/path/ && !/llvm/ && !/
 
 mkdir build && cd build || exit 1
 cmake .. \
+    ${USE_PGO:+-DUSE_PGO="${USE_PGO}"} \
+    ${PGO_PROFILE:+-DPGO_PROFILE="${PGO_PROFILE}"} \
     -DBUILD_RPCS3_TESTS="${RUN_UNIT_TESTS}" \
     -DRUN_RPCS3_TESTS="${RUN_UNIT_TESTS}" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
