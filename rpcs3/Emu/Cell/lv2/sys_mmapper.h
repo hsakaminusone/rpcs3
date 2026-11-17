@@ -108,7 +108,24 @@ struct mmapper_unk_entry_struct0
 class ppu_thread;
 
 void init_system_shared_memory();
+
+// Result of handing a faulted access to the page-fault notification port.
+enum class mmapper_fault_result : u8
+{
+	not_notifiable, // No notification port covers this address: the caller handles the fault
+	retry,          // The guest was notified and has re-armed or mapped the page
+	failed          // The guest was notified but the thread could not be recovered
+};
+
+// The slow path of an access that faulted inside a region with page-fault
+// notification enabled (design §8.1.3 step 3). Sends the fault to the region's
+// notification port and blocks the faulting thread until the guest maps the page
+// or re-arms the notification.
+//
+// `recover_alloc` is tried when the thread is stopped while waiting, so the
+// hardware access-violation handler can rescue it the way it already does.
 error_code mmapper_thread_recover_page_fault(cpu_thread* cpu);
+mmapper_fault_result mmapper_deliver_page_fault(cpu_thread* cpu, u32 addr, bool is_writing, const std::function<bool()>& recover_alloc = {});
 
 // SysCalls
 error_code sys_mmapper_allocate_address(ppu_thread&, u64 size, u64 flags, u64 alignment, vm::ptr<u32> alloc_addr);

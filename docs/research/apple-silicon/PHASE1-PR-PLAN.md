@@ -65,7 +65,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 | PR | Title | Files | Size | Gate |
 |---|---|---|---|---|
 | 10a | `vm: track sub-page state per host page` | `vm.cpp`, `vm.h` | M | **landed**: 7 tests, state derived from the mapped bits |
-| 10b | `cpu: emit the T1 sub-page guard for notification pages` | `PPUTranslator.cpp`, `CPUTranslator.*` | L | **guard landed**, behind `core.ppu_subpage_guard`; the mmapper event queue in the slow path is still open |
+| 10b | `cpu: emit the T1 sub-page guard for notification pages` | `PPUTranslator.cpp`, `CPUTranslator.*` | L | **landed**, behind `core.ppu_subpage_guard`: the slow path now shares `mmapper_deliver_page_fault` with the hardware fault handler |
 
 ## W4 — dispatch (PR 11–14)
 

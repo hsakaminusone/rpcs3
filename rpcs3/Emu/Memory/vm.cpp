@@ -9,6 +9,7 @@
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/Cell/SPURecompiler.h"
+#include "Emu/Cell/lv2/sys_mmapper.h"
 #include "Emu/perf_meter.hpp"
 #include <deque>
 #include <span>
@@ -2617,18 +2618,27 @@ void vm::handle_guest_subpage_fault(u32 addr, u32 size, bool is_write)
 {
 	// Generated code only calls this once per touch: the access it guards is
 	// retried immediately afterwards.
-	const u32 page = addr >> 12;
+	const u32 guest_page = addr & -4096;
 
-	if (addr < 0x1'0000'0000u && g_pages[page / 4096])
+	if (check_addr(addr, is_write ? page_writable : page_readable))
 	{
 		// Mapped after all, so the state the guard read was stale. Repair it and
 		// let the retry take the ordinary path.
-		subpage::note_mapped(page * 4096, 4096);
+		subpage::note_mapped(guest_page, 4096);
 		return;
 	}
 
-	// The guest page is really unmapped. Report it with the fault the guest would
-	// have taken, and leave the state alone so the next access asks again.
-	vm_log.error("Sub-page fault: guest page 0x%x is unmapped inside a mapped host page (pc=0x%x, size=%u, %s)",
-		page * 4096, addr, size, is_write ? "write" : "read");
+	// The guest page is really unmapped: hand the fault to the game exactly as a
+	// hardware fault would, and wait for it to map or re-arm the page (§8.1.3
+	// step 3). Either way the mapped bits change, so the state the retry reads is
+	// already up to date.
+	if (mmapper_deliver_page_fault(cpu_thread::get_current(), addr, is_write) == mmapper_fault_result::retry)
+	{
+		return;
+	}
+
+	// No notification port covers this address, so this is a plain bad access.
+	// Leave the state alone so the next touch asks again.
+	vm_log.error("Sub-page fault: guest page 0x%x is unmapped and not notified (pc=0x%x, size=%u, %s)",
+		guest_page, addr, size, is_write ? "write" : "read");
 }

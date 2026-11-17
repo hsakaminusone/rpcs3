@@ -2,8 +2,11 @@
 #include "sys_mmapper.h"
 
 #include "Emu/Cell/PPUThread.h"
+#include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/lv2/sys_event.h"
+#include "Emu/Cell/timers.hpp"
 #include "Emu/savestate_utils.hpp"
+#include "Emu/Memory/vm_locking.h"
 #include "Emu/Memory/vm_var.h"
 #include "sys_memory.h"
 #include "sys_sync.h"
@@ -1043,4 +1046,140 @@ error_code mmapper_thread_recover_page_fault(cpu_thread* cpu)
 	}
 
 	return CELL_OK;
+}
+
+mmapper_fault_result mmapper_deliver_page_fault(cpu_thread* cpu, u32 addr, bool is_writing, const std::function<bool()>& recover_alloc)
+{
+	if (!cpu || (cpu->get_class() != thread_class::ppu && cpu->get_class() != thread_class::spu))
+	{
+		return mmapper_fault_result::not_notifiable;
+	}
+
+	u32 pf_port_id = 0;
+
+	if (const auto mem = vm::get(vm::any, addr))
+	{
+		auto& pf_entries = g_fxo->get<page_fault_notification_entries>();
+		reader_lock lock(pf_entries.mutex);
+
+		for (const auto& entry : pf_entries.entries)
+		{
+			if (entry.start_addr == mem->addr)
+			{
+				pf_port_id = entry.port_id;
+				break;
+			}
+		}
+	}
+
+	auto pf_port = idm::get_unlocked<lv2_obj, lv2_event_port>(pf_port_id);
+
+	if (!pf_port || !pf_port->queue)
+	{
+		return mmapper_fault_result::not_notifiable;
+	}
+
+	// We notify the game that a page fault occurred so it can rectify it.
+	// Note, for data3, were the memory readable AND we got a page fault, it must be due to a write violation since reads are allowed.
+	const u64 data1 = addr;
+	u64 data2 = 0;
+
+	if (cpu->try_get<ppu_thread>())
+	{
+		data2 = (SYS_MEMORY_PAGE_FAULT_TYPE_PPU_THREAD << 32) | cpu->id;
+	}
+	else if (const auto spu = cpu->try_get<spu_thread>())
+	{
+		const u64 type = spu->get_type() == spu_type::threaded ?
+			SYS_MEMORY_PAGE_FAULT_TYPE_SPU_THREAD :
+			SYS_MEMORY_PAGE_FAULT_TYPE_RAW_SPU;
+
+		data2 = (type << 32) | spu->lv2_id;
+	}
+
+	u64 data3;
+	{
+		vm::writer_lock rlock;
+
+		if (vm::check_addr(addr, is_writing ? vm::page_writable : vm::page_readable))
+		{
+			// Memory was allocated inbetween, retry
+			return mmapper_fault_result::retry;
+		}
+
+		data3 = vm::check_addr(addr) ? SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY /* TODO */ : SYS_MEMORY_PAGE_FAULT_CAUSE_NON_MAPPED;
+	}
+
+	// Now, place the page fault event onto table so that other functions [sys_mmapper_free_address and pagefault recovery funcs etc]
+	// know that this thread is page faulted and where.
+	auto& pf_events = g_fxo->get<page_fault_event_entries>();
+
+	// De-schedule
+	if (cpu->get_class() == thread_class::ppu)
+	{
+		cpu->state -= cpu_flag::signal; // Cannot use check_state here and signal must be removed if exists
+		lv2_obj::sleep(*cpu);
+	}
+
+	auto send_event = [&]() -> error_code
+	{
+		lv2_obj::notify_all_t notify_later{};
+
+		std::lock_guard pf_lock(pf_events.pf_mutex);
+
+		if (auto error = pf_port->queue->send(pf_port->name ? pf_port->name : ((u64{process_getpid() + 0u} << 32) | u64{pf_port_id}), data1, data2, data3))
+		{
+			return error;
+		}
+
+		pf_events.events.emplace(cpu, addr);
+		return {};
+	};
+
+	sys_mmapper.warning("Page_fault %s location 0x%x because of %s memory", is_writing ? "writing" : "reading",
+		addr, data3 == SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY ? "writing read-only" : "using unmapped");
+
+	if (const auto func = cpu->get_class() == thread_class::ppu ? static_cast<ppu_thread*>(cpu)->current_function : nullptr)
+	{
+		sys_mmapper.warning("Page_fault while in function %s", func);
+	}
+
+	error_code sending_error = not_an_error(CELL_EBUSY);
+
+	// If we fail due to being busy, wait a bit and try again.
+	for (u64 sleep_until = get_system_time(); static_cast<u32>(sending_error) == CELL_EBUSY; thread_ctrl::wait_until(&sleep_until, 1000))
+	{
+		sending_error = send_event();
+
+		if (cpu->is_stopped())
+		{
+			sending_error = {};
+			break;
+		}
+	}
+
+	if (sending_error)
+	{
+		sys_mmapper.error("Unknown error 0x%x while trying to pass page fault.", +sending_error);
+		return mmapper_fault_result::failed;
+	}
+
+	// Wait until the thread is recovered
+	while (auto state = cpu->state.fetch_sub(cpu_flag::signal))
+	{
+		if (is_stopped(state) || state & cpu_flag::signal)
+		{
+			break;
+		}
+
+		thread_ctrl::wait_on(cpu->state, state);
+	}
+
+	// Reschedule, test cpu state and try recovery if stopped
+	if (cpu->test_stopped() && (!recover_alloc || !recover_alloc()))
+	{
+		return mmapper_fault_result::failed;
+	}
+
+	return mmapper_fault_result::retry;
 }

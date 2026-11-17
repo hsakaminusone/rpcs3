@@ -2065,144 +2065,17 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 	if (cpu && (cpu->get_class() == thread_class::ppu || cpu->get_class() == thread_class::spu) && !is_exec)
 	{
 		vm::temporary_unlock(*cpu);
-		u32 pf_port_id = 0;
+		const auto pf_result = mmapper_deliver_page_fault(cpu, addr, is_writing, [&] { return hack_alloc(); });
 
-		if (auto& pf_entries = g_fxo->get<page_fault_notification_entries>(); true)
+		if (pf_result == mmapper_fault_result::retry)
 		{
-			if (auto mem = vm::get(vm::any, addr))
-			{
-				reader_lock lock(pf_entries.mutex);
-
-				for (const auto& entry : pf_entries.entries)
-				{
-					if (entry.start_addr == mem->addr)
-					{
-						pf_port_id = entry.port_id;
-						break;
-					}
-				}
-			}
-		}
-
-		if (auto pf_port = idm::get_unlocked<lv2_obj, lv2_event_port>(pf_port_id); pf_port && pf_port->queue)
-		{
-			// We notify the game that a page fault occurred so it can rectify it.
-			// Note, for data3, were the memory readable AND we got a page fault, it must be due to a write violation since reads are allowed.
-			u64 data1 = addr;
-			u64 data2 = 0;
-
-			if (cpu->try_get<ppu_thread>())
-			{
-				data2 = (SYS_MEMORY_PAGE_FAULT_TYPE_PPU_THREAD << 32) | cpu->id;
-			}
-			else if (auto spu = cpu->try_get<spu_thread>())
-			{
-				const u64 type = spu->get_type() == spu_type::threaded ?
-					SYS_MEMORY_PAGE_FAULT_TYPE_SPU_THREAD :
-					SYS_MEMORY_PAGE_FAULT_TYPE_RAW_SPU;
-
-				data2 = (type << 32) | spu->lv2_id;
-			}
-
-			u64 data3;
-			{
-				vm::writer_lock rlock;
-				if (vm::check_addr(addr, is_writing ? vm::page_writable : vm::page_readable))
-				{
-					// Memory was allocated inbetween, retry
-					return true;
-				}
-				else if (vm::check_addr(addr))
-				{
-					data3 = SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY; // TODO
-				}
-				else
-				{
-					data3 = SYS_MEMORY_PAGE_FAULT_CAUSE_NON_MAPPED;
-				}
-			}
-
-
-			// Now, place the page fault event onto table so that other functions [sys_mmapper_free_address and pagefault recovery funcs etc]
-			// know that this thread is page faulted and where.
-
-			auto& pf_events = g_fxo->get<page_fault_event_entries>();
-
-			// De-schedule
-			if (cpu->get_class() == thread_class::ppu)
-			{
-				cpu->state -= cpu_flag::signal; // Cannot use check_state here and signal must be removed if exists
-				lv2_obj::sleep(*cpu);
-			}
-
-			auto send_event = [&]() -> error_code
-			{
-				lv2_obj::notify_all_t notify_later{};
-
-				std::lock_guard pf_lock(pf_events.pf_mutex);
-
-				if (auto error = pf_port->queue->send(pf_port->name ? pf_port->name : ((u64{process_getpid() + 0u} << 32) | u64{pf_port_id}), data1, data2, data3))
-				{
-					return error;
-				}
-
-				pf_events.events.emplace(cpu, addr);
-				return {};
-			};
-
-			sig_log.warning("Page_fault %s location 0x%x because of %s memory", is_writing ? "writing" : "reading",
-				addr, data3 == SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY ? "writing read-only" : "using unmapped");
-
-			if (cpu->get_class() == thread_class::ppu)
-			{
-				if (const auto func = static_cast<ppu_thread*>(cpu)->current_function)
-				{
-					sig_log.warning("Page_fault while in function %s", func);
-				}
-			}
-
-			error_code sending_error = not_an_error(CELL_EBUSY);
-
-			// If we fail due to being busy, wait a bit and try again.
-			for (u64 sleep_until = get_system_time(); static_cast<u32>(sending_error) == CELL_EBUSY; thread_ctrl::wait_until(&sleep_until, 1000))
-			{
-				sending_error = send_event();
-
-				if (cpu->is_stopped())
-				{
-					sending_error = {};
-					break;
-				}
-			}
-
-			if (sending_error)
-			{
-				vm_log.error("Unknown error 0x%x while trying to pass page fault.", +sending_error);
-				return false;
-			}
-			else
-			{
-				// Wait until the thread is recovered
-				while (auto state = cpu->state.fetch_sub(cpu_flag::signal))
-				{
-					if (is_stopped(state) || state & cpu_flag::signal)
-					{
-						break;
-					}
-
-					thread_ctrl::wait_on(cpu->state, state);
-				}
-			}
-
-			// Reschedule, test cpu state and try recovery if stopped
-			if (cpu->test_stopped() && !hack_alloc())
-			{
-				return false;
-			}
-
 			return true;
 		}
 
+		if (pf_result == mmapper_fault_result::failed)
+		{
+			return false;
+		}
 		if (cpu->get_class() == thread_class::spu)
 		{
 			if (g_tls_access_violation_recovered != addr)
