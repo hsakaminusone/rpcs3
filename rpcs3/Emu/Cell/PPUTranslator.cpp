@@ -43,7 +43,6 @@ PPUTranslator::PPUTranslator(LLVMContext& context, Module* _module, const ppu_mo
 	// a fault no longer identifies one re-executable instruction. Enabling this
 	// before the site table exists is a correctness bug, not a tuning knob.
 	m_direct_nonvolatile = g_cfg.core.ppu_nonvolatile_memory.get();
-	m_subpage_guard = g_cfg.core.ppu_subpage_guard.get();
 
 	// Initialize transform passes
 	clear_transforms();
@@ -985,11 +984,6 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 // per direct access while no notification region exists.
 void PPUTranslator::EmitSubpageGuard(Value* addr, u32 size, bool is_write)
 {
-	if (!m_subpage_guard)
-	{
-		return;
-	}
-
 	const auto ptr_type = llvm::PointerType::get(m_context, 0);
 	const auto to_ptr = [this, ptr_type](const void* target)
 	{

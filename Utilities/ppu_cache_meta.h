@@ -15,7 +15,7 @@ namespace ppu_cache_meta
 {
 	// Bumped with the cache key prefix in PPUThread.cpp. A record written under
 	// another version is rejected, never reinterpreted.
-	constexpr u32 version = 10;
+	constexpr u32 version = 11;
 
 	// A sidecar covering more pages than this is treated as corrupt rather than
 	// used to size a table.

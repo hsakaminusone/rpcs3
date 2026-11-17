@@ -666,21 +666,6 @@ void fmt_class_string<thread_scheduler_mode>::format(std::string& out, u64 arg)
 }
 
 template <>
-void fmt_class_string<thread_priority_mode>::format(std::string& out, u64 arg)
-{
-	format_enum(out, arg, [](thread_priority_mode value)
-	{
-		switch (value)
-		{
-		case thread_priority_mode::rr: return "SCHED_RR Priority";
-		case thread_priority_mode::qos: return "QoS Class";
-		}
-
-		return unknown;
-	});
-}
-
-template <>
 void fmt_class_string<gpu_preset_level>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](gpu_preset_level value)

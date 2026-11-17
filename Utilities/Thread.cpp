@@ -2745,16 +2745,9 @@ void thread_base::start()
 	
 	// §8.5.3 (D1): a QoS class and the scheduling parameters are mutually
 	// destructive on this host — applying both leaves the class at
-	// UNSPECIFIED(0) — so exactly one of them is requested.
-	if (g_cfg.core.thread_priority == thread_priority_mode::qos)
-	{
-		pthread_attr_set_qos_class_np(&attrs, QOS_CLASS_USER_INTERACTIVE, 0);
-	}
-	else
-	{
-		pthread_attr_setschedpolicy(&attrs, SCHED_RR);
-		pthread_attr_setschedparam(&attrs, &sp);
-	}
+	// UNSPECIFIED(0) — so only the scheduling parameters are requested.
+	pthread_attr_setschedpolicy(&attrs, SCHED_RR);
+	pthread_attr_setschedparam(&attrs, &sp);
 	ensure(pthread_create(&thread_id, &attrs, entry_point, this) == 0);
 #else
 	pthread_t thread_id{};
@@ -3833,26 +3826,6 @@ void thread_ctrl::set_native_priority(int priority)
 		sig_log.error("SetThreadPriority() failed: %s", fmt::win_error{GetLastError(), nullptr});
 	}
 #else
-#ifdef __APPLE__
-	// §8.5.3: pthread_setschedparam after a QoS class has been set clears the
-	// class, so a QoS-mode thread moves between classes instead.
-	if (g_cfg.core.thread_priority == thread_priority_mode::qos)
-	{
-		qos_class_t qos = QOS_CLASS_USER_INITIATED;
-
-		if (priority > 0)
-			qos = QOS_CLASS_USER_INTERACTIVE;
-		else if (priority < 0)
-			qos = QOS_CLASS_UTILITY;
-
-		if (int err = pthread_set_qos_class_self_np(qos, 0))
-		{
-			sig_log.error("pthread_set_qos_class_self_np() failed: %d", err);
-		}
-
-		return;
-	}
-#endif
 	int policy;
 	struct sched_param param;
 
