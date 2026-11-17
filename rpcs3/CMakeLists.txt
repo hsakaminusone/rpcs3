@@ -200,6 +200,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_cpu_native_patch.cpp
             tests/test_cpu_native_stub.cpp
             tests/test_cpu_native_subpage.cpp
+            tests/test_cpu_native_page_index.cpp
             tests/test_cpu_native_vm.cpp
             tests/test_dmux_pamf.cpp
             tests/test_fmt.cpp

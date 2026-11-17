@@ -19,6 +19,7 @@
 #include "Emu/System.h"
 #include "PPUThread.h"
 #include "Utilities/subpage_map.h"
+#include "Utilities/jit_page_index.h"
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
@@ -1173,6 +1174,11 @@ void ppu_remove_hle_instructions(u32 addr, u32 size)
 	{
 		return;
 	}
+
+	// Guest code changed: bump the invalidation epoch so nothing cached over this
+	// range may be trusted (§8.1.4), and keep the index's coverage so a recompile
+	// can find which compiled module it is replacing.
+	jit_page::note_invalidated(addr, size);
 
 	auto& jumps = g_fxo->get<ppu_far_jumps_t>();
 
@@ -3866,6 +3872,13 @@ struct jit_core_allocator
 namespace
 {
 	// Compiled PPU module info
+	// Identity of a compiled module for the page index. Stable within one process,
+	// which is all it needs: nothing persists it.
+	u64 module_key(std::string_view name)
+	{
+		return rpcs3::hash_array(name.data(), name.size());
+	}
+
 	struct jit_module
 	{
 		std::vector<void(*)(u8*, u64)> symbol_resolvers;
@@ -3940,6 +3953,7 @@ namespace
 			to_destroy.symbol_resolvers = std::move(found->second.symbol_resolvers);
 
 			bucket.map.erase(found);
+			jit_page::forget_module(module_key(name));
 			cpu_stats::g_counters.block_invalidations++;
 		}
 
@@ -5214,7 +5228,12 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 	jit_write_guard jit_guard;
 
 	// Permanently loaded compiled PPU modules (name -> data)
-	jit_module& jit_mod = g_fxo->get<jit_module_manager>().get(cache_path + "_" + std::to_string(std::bit_cast<usz>(info.segs[0].ptr)));
+	const std::string module_name = cache_path + "_" + std::to_string(std::bit_cast<usz>(info.segs[0].ptr));
+	jit_module& jit_mod = g_fxo->get<jit_module_manager>().get(module_name);
+
+	// Record the pages this module covers, so a later code change can find it by
+	// page instead of dropping every module (§8.1.4).
+	jit_page::note_compiled(::at32(info.segs, 0).addr, ::at32(info.segs, 0).size, module_key(module_name));
 
 	// Compiler instance (deferred initialization)
 	std::vector<std::shared_ptr<jit_compiler>>& jits = jit_mod.pjit;

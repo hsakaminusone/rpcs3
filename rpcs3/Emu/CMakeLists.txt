@@ -82,6 +82,7 @@ target_sources(rpcs3_emu PRIVATE
     ../../Utilities/date_time.cpp
     ../../Utilities/fastmem.cpp
     ../../Utilities/subpage_map.cpp
+    ../../Utilities/jit_page_index.cpp
     ../../Utilities/File.cpp
     ../../Utilities/JITASM.cpp
     ../../Utilities/JITLLVM.cpp
