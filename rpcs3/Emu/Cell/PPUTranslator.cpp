@@ -3801,7 +3801,14 @@ void PPUTranslator::STVLX(ppu_opcode_t op)
 	const auto addr = op.ra ? m_ir->CreateAdd(GetGpr(op.ra), GetGpr(op.rb)) : GetGpr(op.rb);
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(splat<u16>(0xffff) << trunc<u16>(value<u64>(addr) & 0xf));
-	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
+	// Merge-store (§8.3.4): blend the shifted source into the 16-byte block and
+	// store it whole. The masked store this replaces lowers to 31 branches and 16
+	// stores (D6); this form is one load, one select and one store, and the block
+	// cannot straddle two guest pages because it is 16-byte aligned.
+	const auto mem = GetMemory(m_ir->CreateAnd(addr, ~0xfull));
+	const auto old = m_ir->CreateAlignedLoad(GetType<u8[16]>(), mem, llvm::MaybeAlign{16});
+	m_ir->CreateAlignedStore(m_ir->CreateSelect(mask.eval(m_ir), data.eval(m_ir), old), mem, llvm::MaybeAlign{16});
 }
 
 void PPUTranslator::STDBRX(ppu_opcode_t op)
@@ -3829,7 +3836,12 @@ void PPUTranslator::STVRX(ppu_opcode_t op)
 	const auto addr = op.ra ? m_ir->CreateAdd(GetGpr(op.ra), GetGpr(op.rb)) : GetGpr(op.rb);
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 243, 242, 241, 240) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(trunc<u16>(splat<u64>(0xffff) << (value<u64>(addr) & 0xf) >> 16));
-	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
+	// Merge-store, as STVLX: store-right keeps the low bytes of the block and
+	// replaces the rest, so the untouched bytes have to be read back first.
+	const auto mem = GetMemory(m_ir->CreateAnd(addr, ~0xfull));
+	const auto old = m_ir->CreateAlignedLoad(GetType<u8[16]>(), mem, llvm::MaybeAlign{16});
+	m_ir->CreateAlignedStore(m_ir->CreateSelect(mask.eval(m_ir), data.eval(m_ir), old), mem, llvm::MaybeAlign{16});
 }
 
 void PPUTranslator::STFSUX(ppu_opcode_t op)

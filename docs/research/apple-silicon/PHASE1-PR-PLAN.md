@@ -88,7 +88,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 
 | PR | Title | Files | Size | Gate |
 |---|---|---|---|---|
-| 17 | `cpu: merge-store and aligned LVLX/STVLX lowering` | `PPUTranslator.cpp` | M | golden assembly, alignment matrix |
+| 17 | `cpu: merge-store and aligned LVLX/STVLX lowering` | `PPUTranslator.cpp` | M | **lowering landed**: `STVLX`/`STVRX` are merge-stores (§8.3.4) and `LVLX`/`LVRX` stay branchless; the golden-assembly and alignment-matrix gates have not been run |
 | 18 | `jit: per-page invalidation and code-space reuse` | `JIT*.cpp` | L | invalidation stress |
 | 19 | `jit: PPU cache v10 with sidecar metadata` | `PPUThread.cpp` | S | **key landed** (`v10`, tier flag in the bits); sidecar waits for the page index |
 | 20 | `cpu: QoS policy split; bounded isb + park` | `Thread.cpp`, `sync.h` | M | p99, audio A/B |
