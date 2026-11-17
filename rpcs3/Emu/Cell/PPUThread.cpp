@@ -5752,6 +5752,10 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				contains_symbol_resolver,
 				daz_and_ftz,
 				accurate_vest,
+				// Emitted IR depends on these, so they belong in the cache key. A
+				// cached object built with the other value runs old code with new
+				// semantics, which is a silent correctness bug (§8.5.1).
+				nonvolatile_memory,
 
 				__bitset_enum_max
 			};
@@ -5785,8 +5789,15 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			if (g_cfg.core.ppu_set_vest)
 				settings += ppu_settings::accurate_vest;
 
+			if (g_cfg.core.ppu_nonvolatile_memory)
+				settings += ppu_settings::nonvolatile_memory;
+
 			// Write version, hash, CPU, settings
-			fmt::append(obj_name, "v9-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
+			//
+			// v10: the emitted IR now depends on the memory-tier flags, and the codegen
+			// around it changed with the W^X guard and the icache flush, so an object
+			// cached under v9 no longer means what it says.
+			fmt::append(obj_name, "v10-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
 		}
 
 		if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
