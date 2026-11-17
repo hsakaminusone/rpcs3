@@ -85,6 +85,7 @@ target_sources(rpcs3_emu PRIVATE
     ../../Utilities/jit_page_index.cpp
     ../../Utilities/ppu_cache_meta.cpp
     ../../Utilities/ppu_region_scan.cpp
+    ../../Utilities/jit_code_space.cpp
     ../../Utilities/File.cpp
     ../../Utilities/JITASM.cpp
     ../../Utilities/JITLLVM.cpp

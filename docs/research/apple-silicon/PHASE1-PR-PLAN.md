@@ -89,7 +89,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 | PR | Title | Files | Size | Gate |
 |---|---|---|---|---|
 | 17 | `cpu: merge-store and aligned LVLX/STVLX lowering` | `PPUTranslator.cpp` | M | **lowering landed**: `STVLX`/`STVRX` are merge-stores (§8.3.4) and `LVLX`/`LVRX` stay branchless; the golden-assembly and alignment-matrix gates have not been run |
-| 18 | `jit: per-page invalidation and code-space reuse` | `JIT*.cpp` | L | **index and epoch landed** (`Utilities/jit_page_index.*`, 9 tests): modules record their pages at compile and drop them at release, and `ppu_remove_hle_instructions` bumps the epoch; the per-page recompile sweep and 64 KB code-space reuse are still open |
+| 18 | `jit: per-page invalidation and code-space reuse` | `JIT*.cpp` | L | **landed**: page index + epoch (`Utilities/jit_page_index.*`, 9 tests) and epoch-gated 64 KB chunk reuse (`Utilities/jit_code_space.*`, 7 tests); the per-page recompile sweep is the part left, and it needs regions |
 | 19 | `jit: PPU cache v10 with sidecar metadata` | `PPUThread.cpp` | S | **landed**: `v10` key, tier flag in the bits, and a `<obj>.meta` sidecar written at compile and consumed on a cache hit to seed the page index (7 tests) |
 | 20 | `cpu: QoS policy split; bounded isb + park` | `Thread.cpp`, `sync.h` | M | **policy split landed**: threads request `SCHED_RR` and never layer it on a QoS class (D1), and the Apple affinity hint is gone (D3); spin-then-park is the existing bounded `busy_wait` (`isb`) + futex; the p99/audio A/B has not been run |
 | 21 | `build: PGO variant for host code` | `CMakeLists.txt` | S | **option landed** (`USE_PGO=GENERATE`/`USE`); the CI job and the corpus run are not wired |
