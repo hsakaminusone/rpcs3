@@ -216,6 +216,14 @@ namespace rsx
 
 			const u32 src_line_length = (std::min<u32>(in_w, in_x + static_cast<u32>(std::ceil(clip_w / scale_x))) * in_bpp);
 
+			// The invalidation is about the range the *destination* covers, and a
+			// scaled-up blit writes more bytes than it reads.  Use the same
+			// destination extent the reservation and the guarded copy use further
+			// down (`pitch * (clip_height - 1) + bpp * clip_width`, line ~366), and
+			// keep the source span as a floor so an unscaled copy still covers the
+			// whole read.
+			const u32 dst_write_length = out_pitch * (std::max<u32>(clip_h, 1u) - 1) + out_bpp * clip_w;
+
 			u32 src_address = 0;
 			const u32 dst_address = get_address(ctx, dst_offset, dst_dma, 1); // TODO: Add size
 
@@ -238,7 +246,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, data_length, "nv3089");
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, std::max(data_length, dst_write_length), "nv3089");
 
 				if (const auto result = RSX(ctx)->read_barrier(src_address, data_length, false);
 					result == rsx::result_zcull_intr)
@@ -262,7 +270,7 @@ namespace rsx
 					return { false, src_info, dst_info };
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, data_length, "nv3089");
+				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset + out_offset, std::max(data_length, dst_write_length), "nv3089");
 				RSX(ctx)->read_barrier(src_address, data_length, true);
 			}
 
