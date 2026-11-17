@@ -128,6 +128,12 @@ namespace mtl
 		// The scratch images of the CPU upload path, one per stereo eye.
 		std::array<MTL::Texture*, 2> m_flip_scratch{};
 
+		// The display-format correction target, one per stereo eye.  A title can
+		// render the display buffer in a format other than the AV-configured one,
+		// and the correction reinterprets the same bytes under the declared pixel
+		// format (MTLGSRender.cpp, get_present_source).
+		std::array<MTL::Texture*, 2> m_flip_convert{};
+
 		// The frame's command buffer is open.  A frame opens lazily on its first
 		// pass and closes at the flip, which submits it.
 		bool m_frame_open = false;

@@ -365,6 +365,55 @@ namespace mtl
 		m_window.gpu_address = m_window.buffer->gpuAddress();
 	}
 
+	rsx::problem_severity device::memory_load_severity() const
+	{
+		const u64 budget = m_device->recommendedMaxWorkingSetSize();
+		const u64 allocated = m_device->currentAllocatedSize();
+
+		if (!budget || !allocated)
+		{
+			return rsx::problem_severity::low;
+		}
+
+		const u64 percentage = (allocated * 100) / budget;
+
+		if (percentage <= 75)
+		{
+			return rsx::problem_severity::low;
+		}
+
+		rsx::problem_severity severity = rsx::problem_severity::moderate;
+
+		if (percentage > 95)
+		{
+			severity = rsx::problem_severity::fatal;
+		}
+		else if (percentage > 90)
+		{
+			severity = rsx::problem_severity::severe;
+		}
+
+		// The ratio alone is not the whole answer: enough headroom for the next
+		// scale's surfaces means there is no pressure, and a little headroom keeps
+		// the basic resources (VKResourceManager.cpp:237-253).
+		const f32 res_scale = rsx::get_current_renderer()->resolution_scaling_config.scale_factor();
+		constexpr u64 _1M = 0x100000;
+		const u64 threshold_1 = static_cast<u64>(256 * res_scale * res_scale) * _1M;
+		const u64 threshold_2 = static_cast<u64>(64 * res_scale * res_scale) * _1M;
+		const u64 remaining = allocated < budget ? budget - allocated : 0;
+
+		if (allocated < budget / 2 || remaining > threshold_1)
+		{
+			severity = rsx::problem_severity::low;
+		}
+		else if (remaining > threshold_2)
+		{
+			severity = rsx::problem_severity::moderate;
+		}
+
+		return severity;
+	}
+
 	void device::fill_backend_config(rsx::backend_configuration& cfg) const
 	{
 		// Metal 4 has no multi-draw command, and nothing in the tree reads this flag

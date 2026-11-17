@@ -121,7 +121,14 @@ namespace mtl
 	constexpr u32 vertex_constant_count = 468;
 
 	// The polygon-stipple pattern is 128 bytes, read as eight uvec4.
-	constexpr u32 stipple_block_count = 8;
+	constexpr u32 stipple_pattern_block_count = 8;
+
+	// Metal has no depth-bounds or sample-mask pipeline state (the depth-bounds
+	// range and the guest sample mask have no MTL::RenderPipelineDescriptor
+	// field), so the draw appends one block beside the pattern and the fragment
+	// stage performs both tests itself.  The block holds the bounds and the mask
+	// (MTLFragmentProgram.cpp reads it at fs_stipple_pattern_offset + this).
+	constexpr u32 stipple_block_count = stipple_pattern_block_count + 1;
 
 	// One texture-unit slot per RSX unit; the shader indexes the block by unit
 	// (MTLFragmentProgram.cpp:171, fs_texture_base_index).
@@ -623,6 +630,7 @@ namespace mtl
 
 		void snapshot_frame(u32 present);
 		void begin_dump(u32 index);
+		void extend_dump(u32 until_present);
 		void continue_dump();
 		// EXCISE-END constants-history-api
 
@@ -676,9 +684,10 @@ namespace mtl
 		// TODO(excise): level 5; the frame-ring capture, oldest first.
 		std::array<frame_snapshot, history_depth> m_history;
 		u32 m_history_pos = 0;
-		u32 m_dump_burst = 0;
-		u32 m_dump_total = 0;
 		u32 m_dump_index = 0;
+		u32 m_dump_until = 0;
+		u32 m_dump_frames = 0;
+		bool m_dump_active = false;
 		// EXCISE-END constants-history-state
 	};
 }

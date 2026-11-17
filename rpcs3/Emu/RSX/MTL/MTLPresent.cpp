@@ -154,41 +154,57 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "present/compose");
-		if (!encoder || !target || !source.image || !aspect.width() || !aspect.height())
+		if (!encoder || !target || !aspect.width() || !aspect.height())
 		{
 			// TODO(excise): level 2; the compose that could not run (area A, area B).
 			MTL_PROBE_LATCH(2, "present/compose refused");
 			return;
 		}
 
-		// TODO(excise): level 2; the compose ran (area A).
-		MTL_PROBE_LATCH(2, "present/compose ran");
+		// A frame whose display buffer cannot be resolved has no image to sample,
+		// but the pass that opened this encoder clears the target, so the RSX image
+		// is already black.  The UI is drawn after that branch in VK and GL
+		// (VKPresent.cpp:911-998, GLPresent.cpp:464), so it must still run here:
+		// returning would take the home menu, the perf overlay and the debug
+		// overlay off the screen for as long as the source stays unresolved.
+		//
+		// Both outcomes are counted, so the sample is present whether or not the
+		// source resolved; a latch inside a branch would leave the other branch
+		// empty once the instrumentation is excised.
+		// TODO(excise): level 2; whether the compose had an image to sample (areas A, B).
+		MTL_PROBE_HISTOGRAM(2, "present compose", source.image ? 1u : 0u, "has source");
 
-		// The calibration pass is the only one that applies gamma, the range
-		// conversion and the stereo merge, so the plain scale serves the rest
-		// (VKPresent.cpp:828).
-		if (limited_range || !rsx::fcmp(gamma, 1.f) || stereo)
+		if (source.image)
 		{
-			rsx::simple_array<MTL::Texture*> images;
-			images.push_back(source.image);
+			// TODO(excise): level 2; the compose ran (area A).
+			MTL_PROBE_LATCH(2, "present/compose ran");
 
-			if (source.image2)
+			// The calibration pass is the only one that applies gamma, the range
+			// conversion and the stereo merge, so the plain scale serves the rest
+			// (VKPresent.cpp:828).
+			if (limited_range || !rsx::fcmp(gamma, 1.f) || stereo)
 			{
-				images.push_back(source.image2);
+				rsx::simple_array<MTL::Texture*> images;
+				images.push_back(source.image);
+
+				if (source.image2)
+				{
+					images.push_back(source.image2);
+				}
+
+				m_calibration.run(encoder, constants, aspect, target, images, gamma, limited_range, stereo);
 			}
+			else
+			{
+				// The output scaling mode is the filter of the final sample.  Nearest
+				// and bilinear differ in the filter only, and the calibration path
+				// above samples with the calibration pass in both backends, so the
+				// selection lives here (VKPresent.cpp:810-821, :885).
+				present_scale_pass& scaler =
+					(g_cfg.video.output_scaling == output_scaling_mode::nearest) ? m_nearest : m_scale;
 
-			m_calibration.run(encoder, constants, aspect, target, images, gamma, limited_range, stereo);
-		}
-		else
-		{
-			// The output scaling mode is the filter of the final sample.  Nearest
-			// and bilinear differ in the filter only, and the calibration path
-			// above samples with the calibration pass in both backends, so the
-			// selection lives here (VKPresent.cpp:810-821, :885).
-			present_scale_pass& scaler =
-				(g_cfg.video.output_scaling == output_scaling_mode::nearest) ? m_nearest : m_scale;
-
-			scaler.run(encoder, constants, aspect, target, source.image);
+				scaler.run(encoder, constants, aspect, target, source.image);
+			}
 		}
 
 		if (!overlays || !overlays->has_visible())

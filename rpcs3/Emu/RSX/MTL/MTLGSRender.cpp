@@ -56,6 +56,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -240,6 +241,11 @@ namespace mtl
 		// and per-draw state but no rings.
 		bool diagnostic_capture_dump_pending = false;
 
+		// The present index the ring dump should reach.  Every F12 press rewrites
+		// it, so a press that lands inside the window keeps the per-frame snapshot
+		// write going past the first press's window.
+		u64 diagnostic_snapshot_extend_present = 0;
+
 		// TODO(excise): level 5; one counter for a presented frame, shared by the
 		// image dumps and the ring snapshots.  Two counters would name the same
 		// frame differently, and the analysis joins a screenshot to its rings by
@@ -337,14 +343,10 @@ namespace mtl
 		u32 diagnostic_capture_vertex_dumps = 0;
 
 
-		// A manual window is armed from the flip, after the frame's draws are
-		// encoded, so its first captured frame is the next one and the gap does
-		// not apply: the user pressed the screenshot key on the frame that shows
-		// the defect, and waiting out the gap would capture a later scene.  A
-		// manual press also supersedes an automatic window that is still open: the
-		// detectors can fire at a scene change, and the press is the stronger
-		// signal, so refusing it is the one ordering that loses the frame the user
-		// pointed at.
+		// Every F12 press is a manual sample.  The first press opens the window;
+		// a press while it is open *extends* it to `press + capture_frame_count`
+		// instead of starting a second dump, so a burst of presses produces one
+		// continuous capture with a marker per press and no duplicated snapshot.
 		void diagnostic_try_arm_capture(const char* reason, bool manual = false)
 		{
 			if (!probe::at_least(5))
@@ -352,21 +354,36 @@ namespace mtl
 				return;
 			}
 
-			// A manual capture is the user pointing at a live defect, and a
-			// flickering defect needs several presses to catch.  The per-run window
-			// budget therefore applies to automatic triggers only; the inter-window
-			// gap is still bypassed for a manual press, so the next press can arm as
-			// soon as the previous window ends.
-			if ((!manual && diagnostic_capture_windows >= diagnostic_capture_window_limit) ||
-				(!manual && diagnostic_frame_index <= diagnostic_capture_last_frame) ||
-				(!manual && diagnostic_frame_index < diagnostic_capture_gap_until))
+			if (!manual && ((diagnostic_capture_windows >= diagnostic_capture_window_limit) ||
+				(diagnostic_frame_index <= diagnostic_capture_last_frame) ||
+				(diagnostic_frame_index < diagnostic_capture_gap_until)))
 			{
 				return;
 			}
 
 			const u64 first_frame = diagnostic_frame_index + (manual ? 1u : 0u);
+			const u64 last_frame = first_frame + probe::capture_frame_count() - 1;
 
-			diagnostic_capture_last_frame = first_frame + probe::capture_frame_count() - 1;
+			if (diagnostic_capture_armed)
+			{
+				// A press inside the window is the user pointing again.  Extend the
+				// window, give this press its own sampled-image budget, and leave the
+				// ring history alone: it is already being written frame by frame.
+				if (last_frame > diagnostic_capture_last_frame)
+				{
+					diagnostic_capture_last_frame = last_frame;
+				}
+
+				diagnostic_reset_window_state();
+				diagnostic_snapshot_extend_present = diagnostic_present_index + probe::capture_frame_count();
+
+				MTL_NOTE(2, "Metal 4: probe capture press %s at frame %llu, extended to %llu, %.3f s",
+					reason, static_cast<unsigned long long>(diagnostic_frame_index),
+					static_cast<unsigned long long>(diagnostic_capture_last_frame), probe::elapsed_seconds());
+				return;
+			}
+
+			diagnostic_capture_last_frame = last_frame;
 			diagnostic_capture_gap_until = diagnostic_capture_last_frame + diagnostic_capture_gap_frames;
 			diagnostic_capture_armed = true;
 			diagnostic_capture_dump_pending = true;
@@ -374,6 +391,7 @@ namespace mtl
 			rsx::diagnostic_capture_window() = true;
 			diagnostic_reset_window_state();
 			diagnostic_tape_freeze();
+			diagnostic_snapshot_extend_present = diagnostic_present_index + probe::capture_frame_count();
 
 			MTL_NOTE(2, "Metal 4: probe capture %u armed by %s at frame %llu, window %llu..%llu, %.3f s",
 				diagnostic_capture_windows, reason,
@@ -652,12 +670,29 @@ namespace mtl
 		// image files in total, so one capture window cannot fill a disk.  Compile
 		// constants, not switches: a run that wants more opens a shorter window.
 		constexpr u32 diagnostic_capture_frame_budget = 6;
-		constexpr u32 diagnostic_capture_run_budget = 2048;
+		constexpr u32 diagnostic_capture_run_budget = 8192;
 		const void* diagnostic_capture_images[diagnostic_capture_image_limit] = {};
 		u32 diagnostic_capture_image_count = 0;
 		u32 diagnostic_window_dump_frames = 0;
 		u32 diagnostic_frame_dump_images = 0;
 		u32 diagnostic_run_dump_images = 0;
+		u32 diagnostic_world_target_dumps = 0;
+		u32 diagnostic_world_state_lines = 0;
+
+		// TODO(excise): level 5; the colour targets a frame writes, with the draw
+		// and world-draw counts per target.  A world that keys to a different
+		// target or format than the lit geometry is a per-target defect, and this
+		// tally is the frame-level form of the per-draw `world draw` line.
+		struct diagnostic_target_tally
+		{
+			u32 address;
+			u32 format;
+			u32 draws;
+			u32 world;
+		};
+
+		diagnostic_target_tally diagnostic_frame_targets[12] = {};
+		u32 diagnostic_frame_target_count = 0;
 		bool diagnostic_run_dump_budget_reported = false;
 
 		bool diagnostic_capture_image_seen(const void* image)
@@ -2450,7 +2485,7 @@ namespace mtl
 		// file count.  A little over a gigabyte of image files plus the tape's own
 		// half-gigabyte keeps a four-window run well inside the free space on the
 		// machine while still writing the frames that matter.
-		constexpr u64 diagnostic_image_byte_budget = 1024ull * 1024ull * 1024ull;
+		constexpr u64 diagnostic_image_byte_budget = 10ull * 1024ull * 1024ull * 1024ull;
 		static u64 diagnostic_image_bytes = 0;
 		static bool diagnostic_image_byte_budget_reported = false;
 
@@ -3139,6 +3174,8 @@ namespace mtl
 	{
 		diagnostic_capture_image_count = 0;
 		diagnostic_frame_dump_images = 0;
+		diagnostic_world_target_dumps = 0;
+		diagnostic_frame_target_count = 0;
 
 		// The black-jump baseline is per frame: the first probe of a frame
 		// establishes it, so a pass from the previous frame cannot look like a
@@ -4426,7 +4463,14 @@ namespace mtl
 			// interpreter covers that miss when it is available; a real build is
 			// synchronous only for the two non-async modes and the interpreter-only
 			// fallback (which means the interpreter rejected the program).
-			const bool compile_async = !interpreter_only && shadermode != shader_mode::recompiler;
+			//
+			// The interpreter does not emulate the depth range
+			// (MTLShaderInterpreter.cpp, the rejection set), so a program that needs
+			// it has no cover for an async first-use miss: the draw would yield and
+			// drop a frame's worth of geometry.  Vulkan compiles those programs
+			// synchronously for the same reason (VKGSRender.cpp:2045-2047).
+			const bool compile_async = !interpreter_only && shadermode != shader_mode::recompiler &&
+				!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE);
 
 			const auto data = frame.programs.get_graphics_pipeline(
 				&m_ctx->program.cache_hint,
@@ -5176,13 +5220,15 @@ namespace mtl
 #endif // MTL_DEBUG_LOGS
 
 #if MTL_DEBUG_LOGS
-		// TODO(excise): level 5; the target and the resolve readback of the first
-		// draws, and a few samples of the capture frame.
-		if (diagnostic_draws < 24 || (diagnostic_capture_active() && (diagnostic_draws % 200 == 0)))
+		// TODO(excise): level 5; the target and the resolve readback of a capture
+		// frame.  The per-window image budget applies here too, so the deep dumps
+		// stay on the frames that already carry the user's sample.
+		if (diagnostic_capture_active() && (diagnostic_draws % 200) == 0 && diagnostic_image_dump_allowed())
 		{
 			if (auto* target = frame.attachments.color(0))
 			{
 				dump_host_image(frame.recorder, frame.resources, target->value(), "target", diagnostic_draws, target->base_addr);
+				diagnostic_image_dumped();
 
 				const u32 guest_address = target->base_addr;
 				u32 nonzero = 0;
@@ -5204,7 +5250,37 @@ namespace mtl
 				if (target->resolve_surface)
 				{
 					dump_host_image(frame.recorder, frame.resources, target->resolve_surface->value(), "resolve", diagnostic_draws, guest_address);
+					diagnostic_image_dumped();
 				}
+			}
+		}
+#endif // MTL_DEBUG_LOGS
+
+#if MTL_DEBUG_LOGS
+		// TODO(excise): level 5; the world draw's own output.  The world family is
+		// the one that renders dark, so its target is read back immediately after
+		// the draw that wrote it, independent of the 200-draw stride above.
+		if (diagnostic_capture_active() && diagnostic_world_target_dumps < 8 &&
+			m_ctx->program.fragment_program.ucode_length >= 3000 && diagnostic_image_dump_allowed())
+		{
+			if (auto* target = frame.attachments.color(0))
+			{
+				++diagnostic_world_target_dumps;
+				dump_host_image(frame.recorder, frame.resources, target->value(), "world-target",
+					diagnostic_draws, target->base_addr);
+				diagnostic_image_dumped();
+
+				if (target->resolve_surface)
+				{
+					dump_host_image(frame.recorder, frame.resources, target->resolve_surface->value(),
+						"world-resolve", diagnostic_draws, target->base_addr);
+					diagnostic_image_dumped();
+				}
+
+				MTL_NOTE(5, "Metal 4: world target draw %u fp %u target 0x%x %ux%u fmt 0x%x samples %u resolve %s",
+					diagnostic_draws, frame.current_fp_id, target->base_addr,
+					target->width(), target->height(), static_cast<u32>(target->pixel_format()),
+					target->value()->sampleCount(), target->resolve_surface ? "present" : "absent");
 			}
 		}
 #endif // MTL_DEBUG_LOGS
@@ -5544,7 +5620,21 @@ namespace mtl
 
 		RSX(m_ctx)->GRAPH_frontend().fill_fragment_state_buffer(fragment, m_ctx->program.fragment_program);
 		m_ctx->program.fragment_program.texture_params.write_to(sampler, m_ctx->program.fp_metadata.referenced_textures_mask);
-		std::memcpy(stipple, m_ctx->register_state->polygon_stipple_pattern(), stipple_block_count * sizeof(vec4_block));
+		std::memcpy(stipple, m_ctx->register_state->polygon_stipple_pattern(), stipple_pattern_block_count * sizeof(vec4_block));
+
+		// The block beside the pattern carries the two pieces of rasteriser state
+		// Metal has no pipeline field for (MTLConstants.h): the depth-bounds range
+		// and the guest sample mask.  The capture reports [0,1] whenever the guest
+		// test is off, so the shader compare always passes then.
+		{
+			const bool emulate_depth_range = !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE);
+			const depth_bounds bounds = capture_depth_bounds(m_ctx->draw_state.depth_stencil, emulate_depth_range);
+			vec4_block& rasteriser_state = stipple[stipple_pattern_block_count];
+			rasteriser_state.v[0] = bounds.min;
+			rasteriser_state.v[1] = bounds.max;
+			rasteriser_state.v[2] = std::bit_cast<f32>(static_cast<u32>(m_ctx->draw_state.multisample.sample_mask));
+			rasteriser_state.v[3] = 0.0f;
+		}
 
 		// The transform constants.  The full 468-vec4 file is re-uploaded only when
 		// the shared state flag says the file changed
@@ -5898,7 +5988,7 @@ namespace mtl
 						std::memcpy(s_last_words, words, sizeof(words));
 						++s_lines;
 
-						MTL_NOTE_WITNESS(5, "Metal 4: epilogue scale fp %u offset %u word %08x, fill %.9g, halves %.9g, y %.9g (arm %s)",
+						MTL_NOTE_WITNESS(5, "Metal 4: epilogue scale fp %u offset %u word %08x, ring %.9g, halves %.9g, y %.9g (arm %s)",
 							frame.compiled_fragment->id, offset, words[0],
 							static_cast<f64>(scale.v[0]),
 							static_cast<f64>(std::bit_cast<f32>((words[0] << 16) | (words[0] >> 16))),
@@ -6224,6 +6314,123 @@ namespace mtl
 				? static_cast<u32>(probe::fnv1a(fragment_constants + params->fs_constants_offset, fragment_constant_count * sizeof(vec4_block))) : 0;
 
 			record.hash_sampler = static_cast<u32>(probe::fnv1a(sampler, sampler_info_count * sizeof(sampler_info)));
+
+			// TODO(excise): level 5; the frame's colour-target tally, for every
+			// draw.  Bounded by the twelve targets a frame realistically writes.
+			if (diagnostic_capture_active() && record.color_target[0])
+			{
+				diagnostic_target_tally* entry = nullptr;
+
+				for (u32 index = 0; index < diagnostic_frame_target_count; ++index)
+				{
+					if (diagnostic_frame_targets[index].address == record.color_target[0])
+					{
+						entry = &diagnostic_frame_targets[index];
+						break;
+					}
+				}
+
+				if (!entry && diagnostic_frame_target_count < 12)
+				{
+					entry = &diagnostic_frame_targets[diagnostic_frame_target_count++];
+					entry->address = record.color_target[0];
+					entry->format = record.color_format;
+				}
+
+				if (entry)
+				{
+					++entry->draws;
+					entry->world += m_ctx->program.fragment_program.ucode_length >= 3000 ? 1u : 0u;
+				}
+			}
+
+			// TODO(excise): level 5; the world draw as the GPU ran it.  The tail
+			// words are read from fragment_constants_data(), the same
+			// StorageModeShared memory the shader fetches, so this line carries the
+			// shader's input (including fc[67]/fc[68]), the target, the raster state
+			// and the bound texture objects together.  A dark world is then a
+			// comparison of this line against the fill and the target readback.
+			if (diagnostic_capture_active() && record.fp_id && m_ctx->program.fragment_program.ucode_length >= 3000 &&
+				diagnostic_world_state_lines < 16384)
+			{
+				++diagnostic_world_state_lines;
+
+				u32 tail[8] = {};
+
+				if (fragment_constants && fragment_constant_count >= 2 && params->fs_constants_offset)
+				{
+					const vec4_block* block = fragment_constants + params->fs_constants_offset;
+					std::memcpy(&tail[0], &block[fragment_constant_count - 2], 16);
+					std::memcpy(&tail[4], &block[fragment_constant_count - 1], 16);
+				}
+
+				MTL_NOTE(5, "Metal 4: world draw %u fp %u ucode %u+%u fc count %u index %u base 0x%llx tail %08x %08x %08x %08x / %08x %08x %08x %08x target 0x%x fmt 0x%x %ux%u depth 0x%x fmt 0x%x vp %.2f %.2f %.2f %.2f scissor %u,%u,%u,%u blend 0x%x depth 0x%x raster 0x%x",
+					record.global_id, record.fp_id, m_ctx->program.fragment_program.offset,
+					m_ctx->program.fragment_program.ucode_length,
+					static_cast<u32>(fragment_constant_count), record.fs_constants_offset,
+					static_cast<unsigned long long>(frame.constants.fragment_constants_address()),
+					tail[0], tail[1], tail[2], tail[3], tail[4], tail[5], tail[6], tail[7],
+					record.color_target[0], record.color_format, record.width, record.height,
+					record.depth_target, record.depth_format,
+					static_cast<f64>(record.viewport[0]), static_cast<f64>(record.viewport[1]),
+					static_cast<f64>(record.viewport[2]), static_cast<f64>(record.viewport[3]),
+					record.scissor[0], record.scissor[1], record.scissor[2], record.scissor[3],
+					record.blend_hash, record.depth_hash, record.raster_hash);
+
+				char textures[640];
+				usz used = std::snprintf(textures, sizeof(textures), "Metal 4: world draw %u textures", record.global_id);
+
+				for (u32 unit = 0; unit < 16; ++unit)
+				{
+					if (record.tex_addr[unit])
+					{
+						used += std::snprintf(textures + used, sizeof(textures) - used,
+							" t%u=0x%x/f0x%x/%ux%u/tid0x%llx",
+							unit, record.tex_addr[unit], record.tex_format[unit],
+							record.tex_width[unit], record.tex_height[unit],
+							static_cast<unsigned long long>(record.texture_id[unit]));
+					}
+				}
+
+				MTL_NOTE(5, "%s", textures);
+
+				// TODO(excise): level 5; the head of the constant file, which is
+				// where a program keeps the light direction, the light colour and
+				// the material factors.  A transposed tail is one failure; a zero
+				// light vector here is the other, and the two produce the same dark
+				// world.  Raw words, so the reader compares them with fill.log
+				// without a float round-trip.
+				if (fragment_constants && params->fs_constants_offset && fragment_constant_count)
+				{
+					const vec4_block* block = fragment_constants + params->fs_constants_offset;
+					u32 head[16] = {};
+					const u32 quads = fragment_constant_count < 4 ? static_cast<u32>(fragment_constant_count) : 4u;
+
+					std::memcpy(head, block, quads * sizeof(vec4_block));
+
+					MTL_NOTE(5, "Metal 4: world fc %u fp %u quads %u head %08x %08x %08x %08x / %08x %08x %08x %08x / %08x %08x %08x %08x / %08x %08x %08x %08x",
+						record.global_id, record.fp_id, quads,
+						head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
+						head[8], head[9], head[10], head[11], head[12], head[13], head[14], head[15]);
+				}
+
+				// TODO(excise): level 5; the blend the world draw actually used.  A
+				// blend enabled with a zero-alpha source, or a colour mask that drops
+				// a channel, darkens a lit world without a single wrong constant.
+				const auto& blend = m_ctx->draw_state.blend;
+				const auto& mask = blend.color_mask[0];
+
+				MTL_NOTE(5, "Metal 4: world state %u fp %u write mask %u%u%u%u blend mask 0x%x src %u/%u dst %u/%u eq %u/%u dither %u logic 0x%x ring %s",
+					record.global_id, record.fp_id,
+					mask.r ? 1u : 0u, mask.g ? 1u : 0u, mask.b ? 1u : 0u, mask.a ? 1u : 0u,
+					static_cast<u32>(blend.enable_mask),
+					static_cast<u32>(blend.sfactor_rgb), static_cast<u32>(blend.sfactor_a),
+					static_cast<u32>(blend.dfactor_rgb), static_cast<u32>(blend.dfactor_a),
+					static_cast<u32>(blend.equation_rgb), static_cast<u32>(blend.equation_a),
+					blend.dither_enabled ? 1u : 0u,
+					blend.logic_op_enabled ? static_cast<u32>(blend.logic_operation) : 0u,
+					frame.fragment_constants_ring == frame.constants.fragment_constants_address() ? "same" : "stale");
+			}
 
 			frame.constants.record_draw(record);
 		}
@@ -6936,6 +7143,109 @@ namespace mtl
 		// ends the RSX thread.
 		const u32 format_bpp = rsx::get_format_block_size_in_bytes(format);
 
+		// The format the display expects for this buffer.  The surface and cache
+		// paths below can resolve an image that was rendered in a different format
+		// ("some devs are creative", VKPresent.cpp:404-430); the correction brings
+		// it to this one before the compose samples it.
+		const MTL::PixelFormat expected_format = mtl::get_texture_format(format, resources.resources.supports_bc_texture_compression());
+		const u32 pixel_size = get_pixel_size(expected_format);
+
+		// The guest bytes are what the display interprets, so the correction is a
+		// bitcast: the same bytes read under the declared pixel format, not a
+		// channel conversion.  Vulkan does the same (VKPresent.cpp:412-421).  A
+		// pair with different texel sizes cannot be bitcast, and is left alone.
+		const auto enforce_display_format = [&](MTL::Texture*& tex)
+		{
+			if (!tex || tex->pixelFormat() == expected_format)
+			{
+				return;
+			}
+
+			const u32 source_size = get_pixel_size(tex->pixelFormat());
+
+			if (!source_size || source_size != pixel_size)
+			{
+				// One report per run: a format pair the display cannot bitcast is a
+				// guest/driver condition, not a per-frame event.
+				static bool bitcast_refused_reported = false;
+
+				if (!bitcast_refused_reported)
+				{
+					bitcast_refused_reported = true;
+					rsx_log.error("Metal 4: display format 0x%x cannot be bitcast from the present source (source %u bytes, expected %u)",
+						format, source_size, pixel_size);
+				}
+
+				return;
+			}
+
+			const u32 convert_width = static_cast<u32>(tex->width());
+			const u32 convert_height = static_cast<u32>(tex->height());
+			MTL::Texture*& convert = m_flip_convert[eye];
+
+			if (!convert || convert->width() != convert_width || convert->height() != convert_height ||
+				convert->pixelFormat() != expected_format)
+			{
+				if (convert)
+				{
+					resources.resources.defer_release(convert);
+					convert = nullptr;
+				}
+
+				MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+				descriptor->setTextureType(MTL::TextureType2D);
+				descriptor->setPixelFormat(expected_format);
+				descriptor->setWidth(convert_width);
+				descriptor->setHeight(convert_height);
+				descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageRenderTarget);
+				convert = resources.resources.new_texture(descriptor, MTL::StorageModePrivate);
+				descriptor->release();
+
+				if (!convert)
+				{
+					return;
+				}
+
+				resources.resources.make_persistent(convert);
+			}
+
+			// A texture-to-texture copy would need two pixel formats Metal treats as
+			// compatible, which an arbitrary pair is not.  The bytes go through a
+			// buffer instead, which is a plain memory copy on both sides.
+			const u32 row_pitch = utils::align<u32>(convert_width * pixel_size, 256);
+			MTL::Buffer* staging = resources.resources.new_buffer(
+				static_cast<u64>(row_pitch) * convert_height, MTL::StorageModeShared);
+
+			if (!staging)
+			{
+				return;
+			}
+
+			MTL4::ComputeCommandEncoder* encoder = resources.recorder.open_compute();
+
+			if (!encoder)
+			{
+				resources.resources.defer_release(staging);
+				return;
+			}
+
+			// The source was written by this frame's encoders, so the read takes the
+			// queue form of the edge (HLD-03 §2.1 item 6).
+			emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+
+			encoder->copyFromTexture(tex, 0, 0, MTL::Origin::Make(0, 0, 0),
+				MTL::Size::Make(convert_width, convert_height, 1),
+				staging, 0, row_pitch, row_pitch * convert_height);
+			encoder->copyFromBuffer(staging, 0, row_pitch, row_pitch * convert_height,
+				MTL::Size::Make(convert_width, convert_height, 1),
+				convert, 0, 0, MTL::Origin::Make(0, 0, 0));
+
+			resources.recorder.close_encoder();
+			resources.resources.defer_release(staging);
+
+			tex = convert;
+		};
+
 		const auto overlap_info = resources.cache.get_merged_texture_memory_region(
 			resources.recorder, address, width, height, pitch, format_bpp, rsx::surface_access::transfer_read);
 
@@ -6983,6 +7293,7 @@ namespace mtl
 
 						std::tie(width, height) = rsx::apply_resolution_scale<true>(
 							RSX(m_ctx)->resolution_scaling_config, std::min(surface_width, width), std::min(surface_height, height));
+						enforce_display_format(image);
 						return;
 					}
 				}
@@ -6994,6 +7305,7 @@ namespace mtl
 		{
 			// The frame was drawn offscreen or in software and blitted to display.
 			image = cached->get_raw_texture()->value();
+			enforce_display_format(image);
 
 			// TODO(excise): level 3; per-event trace line.
 			MTL_NOTE(3, "Metal 4: present source from the texture cache, address 0x%x", address);
@@ -7002,9 +7314,6 @@ namespace mtl
 
 		// TODO(excise): level 3; per-event trace line.
 		MTL_NOTE(3, "Metal 4: flip image was not in the cache, uploading the surface from the CPU (address 0x%x, format 0x%x)", address, format);
-
-		const MTL::PixelFormat expected_format = mtl::get_texture_format(format, resources.resources.supports_bc_texture_compression());
-		const u32 pixel_size = get_pixel_size(expected_format);
 
 		if (!pixel_size || !address || !pitch)
 		{
@@ -7135,8 +7444,25 @@ namespace mtl
 
 		if (active_scaling_config != RSX(m_ctx)->resolution_scaling_config)
 		{
+			// A scale change is the most allocation-heavy point of a run, so the
+			// caches give memory back first and last (VKPresent.cpp:1013-1041).
+			// Metal has no queue flush to push the returns through: the frees are
+			// deferred to slot completion by the resource manager, so the request
+			// is all this path can make.
+			const auto reclaim = [this]()
+			{
+				const auto severity = m_device->memory_load_severity();
+
+				if (severity > rsx::problem_severity::low)
+				{
+					m_frame_resources->cache.handle_memory_pressure(m_frame_resources->recorder, severity);
+				}
+			};
+
+			reclaim();
 			m_frame_resources->cache.sync_scaling_config(m_frame_resources->recorder, active_scaling_config);
 			RSX(m_ctx)->resolution_scaling_config = active_scaling_config;
+			reclaim();
 		}
 
 		auto& resources = *m_frame_resources;
@@ -7235,11 +7561,19 @@ namespace mtl
 				buffer_pitch = buffer_width * 4;
 			}
 
+			// The stereo second eye is resolved from the same guest rectangle the
+			// first eye started from, and get_present_source converts the extent to
+			// the host space in place, so the guest values are recorded first
+			// (VKPresent.cpp:584-585).
+			const u32 guest_width = buffer_width;
+			const u32 guest_height = buffer_height;
+
 			if (buffer_width && buffer_height)
 			{
 				// The source is the surface at the display buffer's guest address,
 				// not the display-buffer index (VKPresent.cpp:551).
 				const u32 address = rsx::get_address(m_ctx, m_ctx->display_buffers[info.buffer].offset, CELL_GCM_LOCATION_LOCAL);
+
 				get_present_source(address, buffer_width, buffer_height, buffer_pitch, av_format, 0, image);
 
 				// EXCISE-BEGIN present-census
@@ -7291,7 +7625,7 @@ namespace mtl
 				// TODO(excise): level 5; the present-source dump budget, per run.
 				// A bare run reaches 5-6 presents at this cap; the sparse and
 				// capture-window branches would otherwise dump every present.
-				constexpr u32 diagnostic_present_dump_budget = 64;
+				constexpr u32 diagnostic_present_dump_budget = 2048;
 				static u32 diagnostic_present_dumps = 0;
 				// EXCISE-END present-trace
 
@@ -7353,35 +7687,37 @@ namespace mtl
 #endif // MTL_DEBUG_LOGS
 
 #if MTL_DEBUG_LOGS
-				// TODO(excise): level 5; the present readback of the first presents,
-				// a sparse sample of the whole run, and every eighth present of a
-				// capture window.  The user presses F12 three or four times, so a
-				// dense window dump would be hundreds of megabytes per press; the tape
-				// already keeps the dense pre-trigger frames and the per-draw probe
-				// keeps the patch timeline, so eight-frame sampling is enough here.
-				const bool periodic_present = diagnostic_present_index < 20000 && (diagnostic_present_index % 600) == 0;
-				const bool window_present = diagnostic_capture_active() && (diagnostic_present_index % 8) == 0;
+				// TODO(excise): level 5; every presented frame of a capture window.
+				// The window is the user's manual sample, and the per-frame present
+				// image is what makes the dump a timeline instead of a single still.
+				const bool window_present = diagnostic_capture_active();
 
-				if (image && diagnostic_present_dumps < diagnostic_present_dump_budget &&
-					(diagnostic_present_index < 6 || window_present || periodic_present))
+				if (image && window_present && diagnostic_present_dumps < diagnostic_present_dump_budget)
 				{
 					dump_host_image(resources.recorder, resources.resources, image, "present", diagnostic_present_index, address);
 					++diagnostic_present_dumps;
 				}
 
-				if (diagnostic_present_index < 4 && diagnostic_present_dumps < diagnostic_present_dump_budget)
+				// TODO(excise): level 5; the frame's targets, with their draw and
+				// world-draw counts and the source the present path samples.  This
+				// is the join between the per-draw `world draw` lines and the
+				// presented image: same target, different target, or a format that
+				// only the world family writes.
+				if (window_present)
 				{
-					for (u32 sample = 0; sample < diagnostic_sampled_count && diagnostic_present_dumps < diagnostic_present_dump_budget; ++sample)
-					{
-						// TODO(excise): level 5; sampled byte dump.
-						MTL_NOTE(5, "Metal 4: readback at present %u, sample %u, address 0x%x, context %u",
-							diagnostic_present_index, sample, diagnostic_sampled_address[sample],
-							diagnostic_sampled_context[sample]);
+					char tally[384];
+					usz tally_used = std::snprintf(tally, sizeof(tally), "Metal 4: frame targets frame %llu source 0x%x",
+						static_cast<unsigned long long>(diagnostic_frame_index), address);
 
-						dump_host_image(resources.recorder, resources.resources, diagnostic_sampled_image[sample],
-							"sample", diagnostic_present_index * 16u + sample, diagnostic_sampled_address[sample]);
-						++diagnostic_present_dumps;
+					for (u32 index = 0; index < diagnostic_frame_target_count && tally_used < sizeof(tally) - 40; ++index)
+					{
+						tally_used += std::snprintf(tally + tally_used, sizeof(tally) - tally_used,
+							" 0x%x/f0x%x/%u/%u",
+							diagnostic_frame_targets[index].address, diagnostic_frame_targets[index].format,
+							diagnostic_frame_targets[index].draws, diagnostic_frame_targets[index].world);
 					}
+
+					MTL_NOTE(5, "%s", tally);
 				}
 #endif // MTL_DEBUG_LOGS
 
@@ -7402,7 +7738,28 @@ namespace mtl
 				if (image->height() < min_expected_height)
 				{
 					const u32 image_offset = (m_ctx->display_buffers[info.buffer].height + 30) * buffer_pitch + m_ctx->display_buffers[info.buffer].offset;
-					get_present_source(rsx::get_address(m_ctx, image_offset, CELL_GCM_LOCATION_LOCAL), buffer_width, buffer_height, buffer_pitch, av_format, 1, image2);
+
+					// The second eye is its own guest rectangle, so it is resolved
+					// from the guest extent and the result replaces the source extent
+					// only when it resolved (VKPresent.cpp:586-591).
+					u32 eye_width = guest_width;
+					u32 eye_height = guest_height;
+					get_present_source(rsx::get_address(m_ctx, image_offset, CELL_GCM_LOCATION_LOCAL), eye_width, eye_height, buffer_pitch, av_format, 1, image2);
+
+					if (image2)
+					{
+						buffer_width = eye_width;
+						buffer_height = eye_height;
+					}
+				}
+				else
+				{
+					// The first eye already contains both eyes with the blanking
+					// interval between them, so the reported height covers one eye and
+					// the insets are cropped away (VKPresent.cpp:593-599).
+					const auto [unused2, scaled_buffer_height] = rsx::apply_resolution_scale<true>(
+						RSX(m_ctx)->resolution_scaling_config, RSX_SURFACE_DIMENSION_IGNORED, guest_height);
+					buffer_height = std::min<u32>(static_cast<u32>(image->height()) - min_expected_height, scaled_buffer_height);
 				}
 			}
 		}
@@ -7427,14 +7784,6 @@ namespace mtl
 		{
 			diagnostic_try_arm_capture("screenshot", true);
 			diagnostic_tape_freeze();
-		}
-
-		// TODO(excise): level 5; MTL_PROBE_ARM_FRAME=<frame> is the headless form
-		// of the same press, so a run with no keyboard still dumps the frame that
-		// shows the defect and the tape that leads up to it.
-		if (probe::arm_frame_matches(diagnostic_frame_index))
-		{
-			diagnostic_try_arm_capture("arm-frame", true);
 		}
 #else
 		const bool user_asked_for_screenshot = g_user_asked_for_screenshot.exchange(false);
@@ -7513,6 +7862,39 @@ namespace mtl
 			// it has to run before the drawable's render pass opens.
 			const present_source output_source = resources.output.upscale_source(resources.recorder,
 				resources.constants, source, aspect);
+
+#if MTL_DEBUG_LOGS
+			// TODO(excise): level 5; the post-chain middle.  `present-<n>` is the
+			// source before the upscaler and the F12 screenshot is the drawable after
+			// the compose; this is the image the upscaler produced.  A world that is
+			// lit in the source but dark here convicts the upscaler, one that is dark
+			// in both is the world shading, and one that is lit here but dark on
+			// screen convicts the compose.
+			if (diagnostic_capture_active() && output_source.image && output_source.image != source.image)
+			{
+				dump_host_image(resources.recorder, resources.resources, output_source.image,
+					"upscaled", diagnostic_present_index, 0);
+			}
+
+			// TODO(excise): level 5; the three formats of the output chain.  A
+			// world that is lit in the source but dark after the upscaler or the
+			// compose is a colour-space or range fault in the Metal output path,
+			// and the pixel format is where that starts.
+			{
+				static u32 s_format_lines = 0;
+
+				if (diagnostic_capture_active() && s_format_lines++ < 128)
+				{
+					MTL_NOTE(5, "Metal 4: present format frame %llu source %ux%u fmt 0x%x, upscaled %ux%u fmt 0x%x, drawable %ux%u fmt 0x%x",
+						static_cast<unsigned long long>(diagnostic_frame_index),
+						source.width, source.height,
+						source.image ? static_cast<u32>(source.image->pixelFormat()) : 0u,
+						output_source.width, output_source.height,
+						output_source.image ? static_cast<u32>(output_source.image->pixelFormat()) : 0u,
+						present_width, present_height, static_cast<u32>(drawable->pixelFormat()));
+				}
+			}
+#endif
 
 			MTL4::RenderPassDescriptor* pass = MTL4::RenderPassDescriptor::alloc()->init();
 			MTL::RenderPassColorAttachmentDescriptor* attachment = pass->colorAttachments()->object(0);
@@ -7623,6 +8005,11 @@ namespace mtl
 		{
 			diagnostic_capture_dump_pending = false;
 			resources.constants.begin_dump(diagnostic_present_index);
+		}
+
+		if (diagnostic_capture_armed)
+		{
+			resources.constants.extend_dump(static_cast<u32>(diagnostic_snapshot_extend_present));
 		}
 
 		resources.constants.snapshot_frame(diagnostic_present_index);

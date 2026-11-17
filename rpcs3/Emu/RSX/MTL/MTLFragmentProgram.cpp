@@ -3,6 +3,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLArgumentBinds.h"
+#include "MTLConstants.h"
 #include "MTLInstrumentation.h"
 #include "MTLVertexProgram.h"
 
@@ -652,6 +653,36 @@ namespace mtl
 		}
 
 		glsl::insert_fragment_epilogue(OS, m_shader_props);
+
+		// Metal has no depth-bounds or sample-mask pipeline state.  The draw
+		// appends the bounds and the guest mask beside the stipple pattern
+		// (MTLConstants.h), and the fragment stage performs both tests itself.
+		// The capture reports [0,1] whenever the guest bounds test is off, so the
+		// compare always passes then and no enable flag is needed.
+		OS <<
+			"	uvec4 mtl_rasteriser_state = stipple_pattern[_fs_stipple_pattern_array_offset + "
+			<< stipple_pattern_block_count << "u];\n"
+			"	float mtl_rasteriser_depth = gl_FragCoord.z;\n";
+
+		if (m_prog.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE)
+		{
+			// The epilogue wrote this same encoded value to gl_FragDepth.
+			OS << "	mtl_rasteriser_depth = emulated_depth;\n";
+		}
+		else if ((m_prog.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT) &&
+			m_parr.HasParam(PF_PARAM_NONE, "vec4", "r1"))
+		{
+			// The same value the depth export above wrote.
+			OS << "	mtl_rasteriser_depth = r1.z;\n";
+		}
+
+		OS <<
+			"	if (mtl_rasteriser_depth < uintBitsToFloat(mtl_rasteriser_state.x) ||\n"
+			"		mtl_rasteriser_depth > uintBitsToFloat(mtl_rasteriser_state.y))\n"
+			"	{\n"
+			"		discard;\n"
+			"	}\n\n"
+			"	gl_SampleMask[0] = int(mtl_rasteriser_state.z);\n\n";
 
 		OS << "}\n";
 	}

@@ -13,6 +13,7 @@
 namespace rsx
 {
 	struct backend_configuration;
+	enum class problem_severity : u8;
 }
 
 namespace mtl
@@ -68,6 +69,13 @@ namespace mtl
 		// (docs/research/metal4/10 §2.2): 7 free, 4 work-to-land, 4 forced false,
 		// 1 reshaped.  Work fields stay false until their sub-system lands.
 		void fill_backend_config(rsx::backend_configuration& cfg) const;
+
+		// Device-allocator pressure, in the same severity scale Vulkan derives
+		// from its VMM (VKResourceManager.cpp:204).  The resolution-scale change
+		// reclaims the caches at these thresholds (VKPresent.cpp:1013-1041), and
+		// Metal has no allocator report of its own, so it uses what the device
+		// reports: allocated bytes against the recommended working set.
+		rsx::problem_severity memory_load_severity() const;
 
 	private:
 		device() = default;

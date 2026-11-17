@@ -867,7 +867,18 @@ namespace mtl
 
 		bool render_target_format_is_compatible(texture* tex, u32 gcm_format) override
 		{
-			return tex->pixel_format() == get_texture_format(gcm_format, m_supports_bc);
+			if (tex->pixel_format() == get_texture_format(gcm_format, m_supports_bc))
+			{
+				return true;
+			}
+
+			// Any depth surface can serve any depth request.  The shader samples the
+			// plane as a depth value, so the surface's own precision is what the guest
+			// gets; the request only names the pack it would have been uploaded from.
+			// Vulkan accepts the same depth set (VKTextureCache.cpp:1408-1412).  Its
+			// colour/depth pairs cannot be mirrored: Metal cannot view a depth texture
+			// as a colour one, and the sampler's channel swizzle is per-format.
+			return is_depth_format(tex->pixel_format()) && rsx::helpers::is_gcm_depth_format(gcm_format);
 		}
 
 		void prepare_for_dma_transfers(command_recorder&) override

@@ -48,6 +48,69 @@ namespace mtl
 
 		std::ofstream(base + ".glsl") << glsl;
 		std::ofstream(base + ".metal") << msl;
+
+		// TODO(excise): level 5; the constant slots the compiled shader actually
+		// reads.  A fill that writes fc[67]/fc[68] is only a cause if the MSL reads
+		// them, and a shader that reads a different slot is the Metal-side fault.
+		bool slots[256] = {};
+		u32 references = 0;
+
+		for (usz at = msl.find("fc["); at != std::string::npos; at = msl.find("fc[", at + 3))
+		{
+			usz cursor = at + 3;
+			u32 index = 0;
+			bool digits = false;
+
+			while (cursor < msl.size() && msl[cursor] >= '0' && msl[cursor] <= '9')
+			{
+				index = index * 10 + static_cast<u32>(msl[cursor] - '0');
+				++cursor;
+				digits = true;
+			}
+
+			if (digits)
+			{
+				++references;
+
+				if (index < std::size(slots))
+				{
+					slots[index] = true;
+				}
+			}
+		}
+
+		char list[320];
+		usz used = std::snprintf(list, sizeof(list), "Metal 4: msl constants %s id %u, fc refs %u, slots",
+			stage, id, references);
+
+		for (u32 index = 0; index < std::size(slots) && used < sizeof(list); ++index)
+		{
+			if (slots[index])
+			{
+				used += std::snprintf(list + used, sizeof(list) - used, " %u", index);
+			}
+		}
+
+		MTL_NOTE(5, "%s", list);
+
+		// TODO(excise): level 5; the argument-table index each MSL buffer is
+		// declared at.  The backend binds `fc` at slot 2 (MTLArgumentBinds.h); a
+		// compiled shader that declares the constant file somewhere else would
+		// read a different buffer, which is exactly the Metal-only fault this run
+		// has to be able to see.
+		char buffers[420];
+		usz buffer_used = std::snprintf(buffers, sizeof(buffers), "Metal 4: msl buffers %s id %u:", stage, id);
+
+		for (usz at = msl.find("[[buffer("); at != std::string::npos && buffer_used + 56 < sizeof(buffers);
+			at = msl.find("[[buffer(", at + 9))
+		{
+			const usz start = at > 40 ? at - 40 : 0;
+			const usz span = std::min<usz>(at - start + 14, sizeof(buffers) - buffer_used - 2);
+			buffer_used += std::snprintf(buffers + buffer_used, sizeof(buffers) - buffer_used, " |%.*s",
+				static_cast<int>(span), msl.data() + start);
+		}
+
+		MTL_NOTE(5, "%s", buffers);
 	}
 
 	// TODO(excise): level 5; the ucode and the constant map of one fragment

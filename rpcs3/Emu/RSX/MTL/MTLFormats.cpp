@@ -317,6 +317,27 @@ namespace mtl
 		}
 	}
 
+	void decode_stencil_plane(void* dst, const void* src, u32 width, u32 height, u32 src_pitch, u32 src_bpp, u32 dst_pitch)
+	{
+		const u8* src_row = static_cast<const u8*>(src);
+		u8* dst_row = static_cast<u8*>(dst);
+
+		for (u32 y = 0; y < height; ++y)
+		{
+			for (u32 x = 0; x < width; ++x)
+			{
+				// Only the z24s8 packs carry a stencil byte, and both store it in the
+				// low byte of the 32-bit word (the float form keeps it in the low
+				// mantissa bits, which is the same byte).
+				const u32 word = src_bpp == 4 ? read_from_ptr_unsafe<u32>(src_row, x * 4) : 0u;
+				dst_row[x] = static_cast<u8>(word);
+			}
+
+			src_row += src_pitch;
+			dst_row += dst_pitch;
+		}
+	}
+
 	namespace
 	{
 		// The scalar form of pack_e4m12_pack16

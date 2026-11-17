@@ -951,6 +951,26 @@ void main()
 	ocol3 = remap_ROP_output(ocol3, ROP_remap);
 #endif
 #endif
+
+#ifdef MTL_RASTERISER_STATE
+	// Metal has no depth-bounds or sample-mask pipeline state, so the draw appends
+	// both beside the stipple pattern (MTLConstants.h).  The captured bounds are
+	// [0, 1] whenever the guest bounds test is off, so the compare always passes
+	// then and no enable flag is needed.
+	{
+		uvec4 mtl_rasteriser_state = stipple_pattern[_fs_stipple_pattern_array_offset + MTL_RASTERISER_STATE_BLOCK];
+		float mtl_rasteriser_depth = gl_FragCoord.z;
+#ifdef WITH_DEPTH_EXPORT
+		mtl_rasteriser_depth = regs32[1].z;
+#endif
+		if (mtl_rasteriser_depth < uintBitsToFloat(mtl_rasteriser_state.x) ||
+			mtl_rasteriser_depth > uintBitsToFloat(mtl_rasteriser_state.y))
+		{
+			discard;
+		}
+		gl_SampleMask[0] = int(mtl_rasteriser_state.z);
+	}
+#endif
 }
 
 )"

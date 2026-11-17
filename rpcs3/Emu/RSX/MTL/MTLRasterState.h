@@ -58,12 +58,12 @@ namespace mtl
 		bool stipple_enabled = false;
 
 		// The RSX polygon stipple pattern is a 32-word register array
-		// (rsx_methods.h:1349, stipple_block_count = 8 blocks of four words).  The
-		// latch copies it rather than holding a guest pointer into register space, so a
-		// consumer that holds the latch across a register write cannot read retired
-		// data (E13); every other field of this struct copies its value.  The stipple
-		// heap copies from register space at the point of use, not from here
-		// (MTLGSRender.cpp:1013).
+		// (rsx_methods.h:1349, stipple_pattern_block_count = 8 blocks of four
+		// words).  The latch copies it rather than holding a guest pointer into
+		// register space, so a consumer that holds the latch across a register
+		// write cannot read retired data (E13); every other field of this struct
+		// copies its value.  The stipple heap copies from register space at the
+		// point of use, not from here (MTLGSRender.cpp:1013).
 		static constexpr u32 stipple_word_count = 32;
 		std::array<u32, stipple_word_count> stipple_pattern{};
 

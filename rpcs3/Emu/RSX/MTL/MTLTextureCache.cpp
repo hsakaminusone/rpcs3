@@ -472,6 +472,37 @@ namespace mtl
 					get_depth_plane_option(dst->value()->pixelFormat(), false));
 
 				cmd.resources().defer_release(plane);
+
+				if (rsx::is_depth_stencil_format(depth_format))
+				{
+					// The stencil plane is a separate resource that the depth copy
+					// does not touch.  VK scatters the pack's stencil bytes into it
+					// (VKTexture.cpp:361-426); without this the uploaded texture keeps
+					// whatever its allocation held, which a later blit or read-back
+					// would expose.
+					const u32 stencil_pitch = utils::align<u32>(layout.width_in_texel, 4);
+					MTL::Buffer* stencil = cmd.resources().new_buffer(
+						static_cast<u64>(stencil_pitch) * plane_rows, MTL::StorageModeShared);
+
+					if (stencil)
+					{
+						decode_stencil_plane(stencil->contents(), staging_data,
+							layout.width_in_texel, plane_rows, span.row_pitch,
+							rsx::get_format_block_size_in_bytes(gcm_format), stencil_pitch);
+
+						encoder->copyFromBuffer(stencil, 0, stencil_pitch, stencil_pitch * plane_rows,
+							MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
+							dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z),
+							get_depth_plane_option(dst->value()->pixelFormat(), true));
+
+						cmd.resources().defer_release(stencil);
+					}
+					else
+					{
+						rsx_log.error("Metal 4: the %llu byte stencil upload plane buffer could not be created",
+							static_cast<unsigned long long>(stencil_pitch) * plane_rows);
+					}
+				}
 			}
 			else
 			{

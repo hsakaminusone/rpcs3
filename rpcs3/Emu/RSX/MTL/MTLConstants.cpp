@@ -705,30 +705,43 @@ namespace mtl
 		}
 
 		m_dump_index = index;
-		// The forward half follows the same window the capture uses, so a run that
-		// widens the window to a whole scene also keeps the rings of every frame in
-		// it.  The history above is always the twelve frames before the press; the
-		// default burst keeps the six frames a one-frame defect needs.
-		m_dump_total = static_cast<u32>(probe::dump_frame_count());
-		m_dump_burst = m_dump_total;
+		m_dump_until = index + static_cast<u32>(probe::capture_frame_count());
+		m_dump_frames = 0;
+		m_dump_active = true;
+	}
+
+	// TODO(excise): whole-unit; level 5; a press inside an open window extends
+	// the frames whose rings are written.  The ring history is not dumped again:
+	// those frames are already on disk, and a second press is a marker, not a new
+	// window.
+	void constants_heap::extend_dump(u32 until_present)
+	{
+		if (m_dump_active && until_present > m_dump_until)
+		{
+			m_dump_until = until_present;
+		}
 	}
 
 	// TODO(excise): whole-unit; level 5; the frames that follow a key press, so a defect that
 	// lasts more than one frame is caught from both sides of the press.
 	void constants_heap::continue_dump()
 	{
-		if (!m_dump_burst)
+		if (!m_dump_active)
 		{
 			return;
 		}
 
 		const frame_snapshot& frame = m_history[(m_history_pos + history_depth - 1) % history_depth];
 
-		char age[16];
-		std::snprintf(age, sizeof(age), "p%u", m_dump_total - m_dump_burst + 1);
-		dump_snapshot(frame, m_dump_index, age);
+		if (!frame.valid || frame.present > m_dump_until)
+		{
+			m_dump_active = false;
+			return;
+		}
 
-		--m_dump_burst;
+		char age[16];
+		std::snprintf(age, sizeof(age), "p%u", ++m_dump_frames);
+		dump_snapshot(frame, m_dump_index, age);
 	}
 }
 

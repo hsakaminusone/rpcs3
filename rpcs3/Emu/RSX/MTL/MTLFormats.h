@@ -58,6 +58,13 @@ namespace mtl
 	void decode_depth_plane(void* dst, const void* src, u32 width, u32 height,
 		u32 src_pitch, u32 src_bpp, rsx::surface_depth_format2 format);
 
+	// Extract the stencil plane of a guest z24s8 pack into the Metal stencil plane.
+	// A z24s8 pack carries the stencil byte in bits 7:0 of each 32-bit texel, so dst
+	// is one byte per texel at dst_pitch bytes per row and src rows are src_pitch
+	// bytes apart.  The inverse of the stencil arm of encode_depth_plane.
+	void decode_stencil_plane(void* dst, const void* src, u32 width, u32 height,
+		u32 src_pitch, u32 src_bpp, u32 dst_pitch);
+
 	// Encode the Metal depth plane back into the guest depth pack: the inverse of
 	// decode_depth_plane.  dst rows are dst_pitch bytes apart with dst_bpp bytes per
 	// texel; src rows are width * 4 bytes, one f32 per texel.  A z24s8 pack carries

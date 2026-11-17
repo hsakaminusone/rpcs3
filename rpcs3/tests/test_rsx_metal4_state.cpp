@@ -805,7 +805,10 @@ TEST(MTLConstantsLayout, SamplerInfoMatchesTheRsxSlot)
 TEST(MTLConstantsLayout, CapacityConstantsDescribeTheRings)
 {
 	EXPECT_EQ(mtl::vertex_constant_count, 468u);
-	EXPECT_EQ(mtl::stipple_block_count, 8u);
+	// The 128-byte stipple pattern plus the per-draw rasteriser-state block
+	// (depth bounds + sample mask) the fragment stage reads.
+	EXPECT_EQ(mtl::stipple_pattern_block_count, 8u);
+	EXPECT_EQ(mtl::stipple_block_count, mtl::stipple_pattern_block_count + 1u);
 	EXPECT_EQ(mtl::sampler_info_count, 16u);
 	EXPECT_EQ(mtl::frame_slot_count, 3u);
 

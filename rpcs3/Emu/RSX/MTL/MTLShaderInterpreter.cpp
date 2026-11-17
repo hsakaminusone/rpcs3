@@ -3,6 +3,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLFragmentProgram.h"
+#include "MTLConstants.h"
 #include "MTLInstrumentation.h"
 #include "MTLProgramPipeline.h"
 #include "MTLShader.h"
@@ -299,6 +300,12 @@ namespace mtl
 			{
 				out << "#define WITH_STIPPLING\n";
 			}
+
+			// The depth-bounds range and the guest sample mask travel beside the
+			// stipple pattern (MTLConstants.h): Metal has no pipeline field for
+			// either, so the interpreter performs both tests itself.
+			out << "#define MTL_RASTERISER_STATE\n"
+				"#define MTL_RASTERISER_STATE_BLOCK " << stipple_pattern_block_count << "u\n\n";
 
 			if (key.options & COMPILER_OPT_ENABLE_ALPHA_TEST_GE) out << "#define ALPHA_TEST_GEQUAL\n";
 			if (key.options & COMPILER_OPT_ENABLE_ALPHA_TEST_G) out << "#define ALPHA_TEST_GREATER\n";
@@ -722,7 +729,11 @@ namespace mtl
 		if (fragment.ctrl & RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP) options |= COMPILER_OPT_ENABLE_ROP_REMAP;
 		if (fragment_metadata.has_branch_instructions) options |= COMPILER_OPT_ENABLE_FLOW_CTRL;
 		if (fragment_metadata.has_pack_instructions) options |= COMPILER_OPT_ENABLE_PACKING;
-		if (ctx.draw_state.stipple.enabled) options |= COMPILER_OPT_ENABLE_STIPPLING;
+		// The stipple gate is the shared program control bit, which the RSX engine
+		// sets only for a polygon-class draw (RSXGraphEngine.cpp:1245-1252).  The
+		// live register bit is also set for point and line draws, which must not
+		// be stippled (VKShaderInterpreter.cpp:590).
+		if (fragment.ctrl & RSX_SHADER_CONTROL_POLYGON_STIPPLE) options |= COMPILER_OPT_ENABLE_STIPPLING;
 		if (vertex.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS) options |= COMPILER_OPT_ENABLE_INSTANCING;
 
 		interpreter_texture_mapping mapping = interpreter_texture_mapping::from_mask(

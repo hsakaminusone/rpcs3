@@ -29,12 +29,6 @@
  *   MTL_PROBE_FRAME_COUNT  frames an F12 capture window covers (default 1).
  *                        Rings for that many frames after the press are kept
  *                        too, so a race scene is dumped as a whole.
- *   MTL_PROBE_ARM_FRAME  the headless form of the F12 press: a comma list of the
- *                        frame numbers the user would have photographed.  Each
- *                        window starts on the frame after its number, exactly as a
- *                        press does, so a run driven from a shell can still dump
- *                        the frame that shows the defect and the tape that leads
- *                        up to it.
  *   MTL_PROBE_ONLY_DRAW  the bisection filter, <n> or <lo>-<hi> of the draw ids
  *                        printed by the per-draw trace; every other draw is
  *                        counted and dropped.
@@ -458,58 +452,6 @@ namespace mtl::probe
 		}();
 
 		return cached;
-	}
-
-	// TODO(excise): level 5; the headless form of the screenshot key.  A run
-	// driven from a shell has no keyboard, so the manual window the key arms can
-	// be armed from a frame list instead.  Each value names a frame the user would
-	// have photographed, so the window starts on the next one, exactly as a press
-	// does.  Up to 32 comma-separated frames, so one run can catch a scene that
-	// only settles after the third attempt.
-	inline bool arm_frame_matches(u64 frame)
-	{
-		struct table
-		{
-			u64 values[32]{};
-			u32 count = 0;
-		};
-
-		static const table cached = [] {
-			table parsed;
-
-			const char* text = std::getenv("MTL_PROBE_ARM_FRAME");
-
-			while (text && *text && parsed.count < 32)
-			{
-				char* end = nullptr;
-				const u64 value = std::strtoull(text, &end, 10);
-
-				if (!end || end == text)
-				{
-					break;
-				}
-
-				parsed.values[parsed.count++] = value;
-				text = end;
-
-				while (*text == ',' || *text == ' ')
-				{
-					++text;
-				}
-			}
-
-			return parsed;
-		}();
-
-		for (u32 index = 0; index < cached.count; ++index)
-		{
-			if (cached.values[index] == frame)
-			{
-				return true;
-			}
-		}
-
-		return false;
 	}
 
 	// TODO(excise): level 5; the forward half of a ring capture.  The history
