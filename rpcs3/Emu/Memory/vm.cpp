@@ -5,6 +5,7 @@
 
 #include "Utilities/Thread.h"
 #include "Utilities/address_range.h"
+#include "Utilities/subpage_map.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/Cell/SPURecompiler.h"
@@ -965,6 +966,10 @@ namespace vm
 			}
 		}
 
+		// §8.1.3: the guest pages are mapped now, so every host page inside a
+		// notification region derives its sub-page state from the new bits.
+		subpage::note_mapped(addr, size);
+
 		return true;
 	}
 
@@ -1390,6 +1395,8 @@ namespace vm
 				std::vector<std::pair<u64, u64>> event_data;
 				ensure(size == _page_unmap(it->first, size, this->flags, it->second.second.get(), unmapped ? *unmapped : event_data, true));
 
+				subpage::note_unmapped(it->first, size);
+
 				if (it->second.second && addr < 0xE0000000)
 				{
 					if (it->second.second.use_count() != 1)
@@ -1630,6 +1637,8 @@ namespace vm
 
 			// Unmap "real" memory pages
 			ensure(size == _page_unmap(addr, size, this->flags, found->second.second.get(), unmap_notification.event_data));
+
+			subpage::note_unmapped(addr, size);
 
 			// Clear stack guards
 			if (flags & stack_guarded)
@@ -1944,6 +1953,13 @@ namespace vm
 
 	bool _unmap_block(const std::shared_ptr<block_t>& block, std::vector<std::pair<u64, u64>>* unmapped = nullptr)
 	{
+		// §8.1.3: the area is going away, so its host pages stop being notification
+		// pages. Checked rather than assumed, so this is a no-op for ordinary areas.
+		if (!block->size || subpage::query(block->addr) != subpage::not_notify)
+		{
+			subpage::note_notification(block->addr, block->size, false);
+		}
+
 		return block->unmap(unmapped);
 	}
 
@@ -2156,11 +2172,26 @@ namespace vm
 	{
 		vm::writer_lock lock;
 
+		// §8.1.3: a `user64k` area is where sys_mmapper maps guest pages into, and
+		// the only place where a 4 KB guest page can be unmapped inside a host page
+		// that is mapped because a sibling guest page is valid. Mark it before
+		// anything can be mapped into it, so the first mapping already sees the
+		// right state.
+		const auto finish = [location](std::shared_ptr<block_t> block)
+		{
+			if (block && location == vm::user64k)
+			{
+				subpage::note_notification(block->addr, block->size, true);
+			}
+
+			return block;
+		};
+
 		auto area = _get_map(location, addr);
 
 		if (area)
 		{
-			return area;
+			return finish(std::move(area));
 		}
 
 		// Allocation on arbitrary address
@@ -2183,7 +2214,7 @@ namespace vm
 				}
 			}
 
-			return loc;
+			return finish(std::move(loc));
 		}
 
 		// Fixed address allocation
@@ -2191,10 +2222,10 @@ namespace vm
 
 		if (area)
 		{
-			return area;
+			return finish(std::move(area));
 		}
 
-		return _map(addr, area_size, flags);
+		return finish(_map(addr, area_size, flags));
 	}
 
 	static bool try_access_internal(u32 addr, void* ptr, u32 size, bool is_write)
