@@ -2743,9 +2743,18 @@ void thread_base::start()
 	pthread_attr_init(&attrs);
 	pthread_attr_setstacksize(&attrs, 0x800000);
 	
-	pthread_attr_set_qos_class_np(&attrs, QOS_CLASS_USER_INTERACTIVE, 0);
-	pthread_attr_setschedpolicy(&attrs, SCHED_RR);
-	pthread_attr_setschedparam(&attrs, &sp);
+	// §8.5.3 (D1): a QoS class and the scheduling parameters are mutually
+	// destructive on this host — applying both leaves the class at
+	// UNSPECIFIED(0) — so exactly one of them is requested.
+	if (g_cfg.core.thread_priority == thread_priority_mode::qos)
+	{
+		pthread_attr_set_qos_class_np(&attrs, QOS_CLASS_USER_INTERACTIVE, 0);
+	}
+	else
+	{
+		pthread_attr_setschedpolicy(&attrs, SCHED_RR);
+		pthread_attr_setschedparam(&attrs, &sp);
+	}
 	ensure(pthread_create(&thread_id, &attrs, entry_point, this) == 0);
 #else
 	pthread_t thread_id{};
@@ -3824,6 +3833,26 @@ void thread_ctrl::set_native_priority(int priority)
 		sig_log.error("SetThreadPriority() failed: %s", fmt::win_error{GetLastError(), nullptr});
 	}
 #else
+#ifdef __APPLE__
+	// §8.5.3: pthread_setschedparam after a QoS class has been set clears the
+	// class, so a QoS-mode thread moves between classes instead.
+	if (g_cfg.core.thread_priority == thread_priority_mode::qos)
+	{
+		qos_class_t qos = QOS_CLASS_USER_INITIATED;
+
+		if (priority > 0)
+			qos = QOS_CLASS_USER_INTERACTIVE;
+		else if (priority < 0)
+			qos = QOS_CLASS_UTILITY;
+
+		if (int err = pthread_set_qos_class_self_np(qos, 0))
+		{
+			sig_log.error("pthread_set_qos_class_self_np() failed: %d", err);
+		}
+
+		return;
+	}
+#endif
 	int policy;
 	struct sched_param param;
 
@@ -3876,10 +3905,11 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 		sig_log.error("Failed to set thread affinity 0x%x: error: %s", mask, fmt::win_error{GetLastError(), nullptr});
 	}
 #elif __APPLE__
-	// Supports only one core
-	thread_affinity_policy_data_t policy = { static_cast<integer_t>(std::countr_zero(mask)) };
-	thread_port_t mach_thread = pthread_mach_thread_np(pthread_self());
-	thread_policy_set(mach_thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&policy), !mask ? 0 : 1);
+	// §8.5.3 (D3): THREAD_AFFINITY_POLICY is advisory and the lowest set bit of
+	// the mask is not the core the thread ends up on, so the hint is dropped
+	// rather than wrong. A deliberate P/E tag needs the cluster layout, which the
+	// process cannot read here.
+	(void)mask;
 #elif !defined(ANDROID) && (defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__))
 	if (!mask)
 	{

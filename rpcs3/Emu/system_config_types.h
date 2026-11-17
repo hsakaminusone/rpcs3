@@ -334,6 +334,15 @@ enum class thread_scheduler_mode
 	alt
 };
 
+// How emulation threads ask the host for CPU time (§8.5.3). On Apple the two
+// mechanisms are mutually destructive: setting the scheduling parameters after a
+// QoS class leaves the class at UNSPECIFIED, so exactly one is applied.
+enum class thread_priority_mode
+{
+	rr,  // SCHED_RR at the maximum priority, no QoS class
+	qos  // QoS class only
+};
+
 enum class perf_graph_detail_level
 {
 	minimal,
