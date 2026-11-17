@@ -202,6 +202,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_cpu_native_subpage.cpp
             tests/test_cpu_native_page_index.cpp
             tests/test_cpu_native_cache_meta.cpp
+            tests/test_cpu_native_region_scan.cpp
             tests/test_cpu_native_vm.cpp
             tests/test_dmux_pamf.cpp
             tests/test_fmt.cpp
