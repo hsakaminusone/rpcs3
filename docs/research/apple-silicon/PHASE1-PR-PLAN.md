@@ -92,7 +92,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 | 18 | `jit: per-page invalidation and code-space reuse` | `JIT*.cpp` | L | invalidation stress |
 | 19 | `jit: PPU cache v10 with sidecar metadata` | `PPUThread.cpp` | S | **key landed** (`v10`, tier flag in the bits); sidecar waits for the page index |
 | 20 | `cpu: QoS policy split; bounded isb + park` | `Thread.cpp`, `sync.h` | M | p99, audio A/B |
-| 21 | `build: PGO variant for host code` | CI | S | CI build + corpus run |
+| 21 | `build: PGO variant for host code` | `CMakeLists.txt` | S | **option landed** (`USE_PGO=GENERATE`/`USE`); the CI job and the corpus run are not wired |
 
 ## Honest ordering note
 

@@ -30,6 +30,9 @@ endif()
 
 option(USE_NATIVE_INSTRUCTIONS "USE_NATIVE_INSTRUCTIONS makes rpcs3 compile with -march=native, which is useful for local builds, but not good for packages." ON)
 option(USE_ARM_LSE2 "Compile with LSE2 instructions" OFF)
+set(USE_PGO "OFF" CACHE STRING "Profile-guided optimisation of the emulator's own code. OFF: nothing. GENERATE: instrument a build, run the corpus, and merge the profiles. USE: consume the merged profile. It does not change JIT output, so a profile trained on one title must be validated outside the training set before it becomes a default.")
+set_property(CACHE USE_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(PGO_PROFILE "" CACHE FILEPATH "The .profdata to consume when USE_PGO=USE, or the directory that generated profiles are written to when USE_PGO=GENERATE.")
 option(WITH_LLVM "Enable usage of LLVM library" ON)
 option(BUILD_LLVM "Build LLVM from git submodule" OFF)
 option(STATIC_LINK_LLVM "Link against LLVM statically. This will get set to ON if you build LLVM from the submodule." OFF)
@@ -102,6 +105,38 @@ endif()
 
 if(MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/wd4530;/utf-8>") # C++ exception handler used, but unwind semantics are not enabled
+endif()
+
+# Profile-guided optimisation of host code (§8.5.1). Two separate builds: the
+# first is instrumented and writes profiles while the corpus runs, the second
+# consumes the merged profile. Both are confined to Release, because the
+# instrumented build is not something to ship.
+if(NOT USE_PGO STREQUAL "OFF")
+    if(MSVC)
+        message(FATAL_ERROR "USE_PGO uses the clang/gcc profile flow, which MSVC does not have. Use /GL and /LTCG in a CI variant instead.")
+    endif()
+
+    if(USE_PGO STREQUAL "GENERATE")
+        if(NOT PGO_PROFILE)
+            message(FATAL_ERROR "USE_PGO=GENERATE needs PGO_PROFILE set to the directory the profiles are written to.")
+        endif()
+        add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-fprofile-generate=${PGO_PROFILE}>")
+        add_link_options("$<$<CONFIG:Release>:-fprofile-generate=${PGO_PROFILE}>")
+    elseif(USE_PGO STREQUAL "USE")
+        if(NOT PGO_PROFILE OR NOT EXISTS "${PGO_PROFILE}")
+            message(FATAL_ERROR "USE_PGO=USE needs PGO_PROFILE set to an existing .profdata file.")
+        endif()
+        add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-fprofile-use=${PGO_PROFILE}>")
+        # A profile is never complete: code that did not run has no counts, and
+        # clang refuses to compile it without this.
+        add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-Wno-profile-instr-unprofiled>")
+        add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-Wno-profile-instr-out-of-date>")
+        add_link_options("$<$<CONFIG:Release>:-fprofile-use=${PGO_PROFILE}>")
+    else()
+        message(FATAL_ERROR "USE_PGO must be OFF, GENERATE or USE (got '${USE_PGO}').")
+    endif()
+
+    message(STATUS "USE_PGO=${USE_PGO}, profile path: ${PGO_PROFILE}")
 endif()
 
 add_subdirectory(3rdparty)
