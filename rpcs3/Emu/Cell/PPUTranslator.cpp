@@ -4,6 +4,7 @@
 #include "Emu/Cell/Common.h"
 #include "Emu/Cell/lv2/sys_sync.h"
 #include "PPUTranslator.h"
+#include "Utilities/subpage_map.h"
 #include "PPUThread.h"
 #include "SPUThread.h"
 
@@ -42,6 +43,7 @@ PPUTranslator::PPUTranslator(LLVMContext& context, Module* _module, const ppu_mo
 	// a fault no longer identifies one re-executable instruction. Enabling this
 	// before the site table exists is a correctness bug, not a tuning knob.
 	m_direct_nonvolatile = g_cfg.core.ppu_nonvolatile_memory.get();
+	m_subpage_guard = g_cfg.core.ppu_subpage_guard.get();
 
 	// Initialize transform passes
 	clear_transforms();
@@ -969,9 +971,64 @@ Value* PPUTranslator::ReadMemory(Value* addr, Type* type, bool is_be, u32 align)
 	// re-executes the single access the site record points at. Without the site
 	// record the access stays volatile so a fault always identifies the
 	// instruction that caused it.
+	EmitSubpageGuard(addr, size, false);
+
 	const auto inst = m_ir->CreateAlignedLoad(type, GetMemory(addr), llvm::MaybeAlign{align});
 	inst->setVolatile(!m_direct_nonvolatile);
 	return inst;
+}
+
+// §8.1.3. A host page is 16 KB and a guest page is 4 KB, so four guest pages
+// share one: when sys_mmapper leaves one of them unmapped while a sibling maps
+// the host page, an access to the hole raises no hardware fault at all. The
+// check below catches it, and costs one load and a predicted-not-taken branch
+// per direct access while no notification region exists.
+void PPUTranslator::EmitSubpageGuard(Value* addr, u32 size, bool is_write)
+{
+	if (!m_subpage_guard)
+	{
+		return;
+	}
+
+	const auto ptr_type = llvm::PointerType::get(m_context, 0);
+	const auto to_ptr = [this, ptr_type](const void* target)
+	{
+		return m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(target)), ptr_type);
+	};
+
+	const auto slow = BasicBlock::Create(m_context, "__subpage", m_function);
+	const auto cont = BasicBlock::Create(m_context, "__subpage_cont", m_function);
+
+	// if (unlikely(g_mem_subpage_active))
+	const auto active = m_ir->CreateLoad(GetType<u32>(), to_ptr(&vm::subpage::g_mem_subpage_active), true);
+	m_ir->CreateCondBr(m_ir->CreateICmpEQ(active, m_ir->getInt32(0)), cont, slow, m_md_likely);
+
+	// host page state (top 16 bits of the 32-bit guest address)
+	m_ir->SetInsertPoint(slow);
+	const auto index = m_ir->CreateLShr(ZExt(addr, GetType<u64>()), vm::subpage::host_page_shift);
+	const auto state = m_ir->CreateLoad(GetType<u8>(), m_ir->CreatePtrAdd(to_ptr(vm::subpage::g_host_page_state), index), true);
+
+	const auto hole = BasicBlock::Create(m_context, "__subpage_hole", m_function);
+	m_ir->CreateCondBr(m_ir->CreateICmpEQ(state, m_ir->getInt8(vm::subpage::partial)), hole, cont);
+
+	// which of the four guest pages inside it
+	m_ir->SetInsertPoint(hole);
+	const auto bits = m_ir->CreateLoad(GetType<u8>(), m_ir->CreatePtrAdd(to_ptr(vm::subpage::g_subpage_mapped), index), true);
+	const auto bit = m_ir->CreateTrunc(m_ir->CreateAnd(m_ir->CreateLShr(ZExt(addr, GetType<u64>()), 12), m_ir->getInt64(3)), GetType<u8>());
+	const auto mask = m_ir->CreateShl(m_ir->getInt8(1), bit);
+	const auto mapped = m_ir->CreateICmpNE(m_ir->CreateAnd(bits, mask), m_ir->getInt8(0));
+
+	const auto fault = BasicBlock::Create(m_context, "__subpage_fault", m_function);
+	m_ir->CreateCondBr(mapped, cont, fault);
+
+	// The page is gone. Report it and let the access retry, exactly as a hardware
+	// fault on an empty host page would.
+	m_ir->SetInsertPoint(fault);
+	FlushRegisters();
+	Call(GetType<void>(), "__subpage_fault", addr, m_ir->getInt32(size), m_ir->getInt1(is_write));
+	TestAborted();
+
+	m_ir->SetInsertPoint(cont);
 }
 
 void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align)
@@ -997,6 +1054,8 @@ void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align
 		TestAborted();
 		return;
 	}
+
+	EmitSubpageGuard(addr, size, true);
 
 	// Write. See ReadMemory: non-volatile only with the fault-site contract.
 	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align})->setVolatile(!m_direct_nonvolatile);

@@ -79,6 +79,7 @@ struct cfg_root : cfg::node
 		// 8/9); until then a merged or hoisted load cannot be re-executed and the
 		// handler may resume with a stale value. Diagnostic flag, not a tuning knob.
 		cfg::_bool ppu_nonvolatile_memory{ this, "PPU Non-Volatile Memory Access", false, true };
+		cfg::_bool ppu_subpage_guard{ this, "PPU Sub-Page Guard", false, true };
 
 		cfg::_bool debug_console_mode{ this, "Debug Console Mode", false }; // Debug console emulation, not recommended
 		cfg::_bool hook_functions{ this, "Hook static functions" };

@@ -89,6 +89,12 @@ class PPUTranslator final : public cpu_translator
 	// every host. See g_cfg.core.ppu_nonvolatile_memory.
 	bool m_direct_nonvolatile = false;
 
+	// T1 sub-page guard (§8.1.3). Off by default until it has run a title.
+	bool m_subpage_guard = false;
+
+	// Emit the check that catches a guest page unmapped inside a mapped host page.
+	void EmitSubpageGuard(llvm::Value* addr, u32 size, bool is_write);
+
 	// Classify the current access. Only the 32-bit heuristic below can prove T2
 	// at translation time; everything else starts as T1 and is promoted to T0
 	// by the fault path.

@@ -57,3 +57,10 @@ namespace vm::subpage
 	// Forget everything. Used by the VM reset path and by tests.
 	void reset();
 }
+
+namespace vm
+{
+	// The slow path of the check above: a guest page inside a mapped host page is
+	// not mapped. Called once from generated code, never in a loop.
+	void handle_guest_subpage_fault(u32 addr, u32 size, bool is_write);
+}

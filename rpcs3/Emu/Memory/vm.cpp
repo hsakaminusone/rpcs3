@@ -2612,3 +2612,23 @@ void fmt_class_string<vm::_ptr_base<const char, u32>>::format(std::string& out, 
 
 	out += reinterpret_cast<const char*>(u8"”");
 }
+
+void vm::handle_guest_subpage_fault(u32 addr, u32 size, bool is_write)
+{
+	// Generated code only calls this once per touch: the access it guards is
+	// retried immediately afterwards.
+	const u32 page = addr >> 12;
+
+	if (addr < 0x1'0000'0000u && g_pages[page / 4096])
+	{
+		// Mapped after all, so the state the guard read was stale. Repair it and
+		// let the retry take the ordinary path.
+		subpage::note_mapped(page * 4096, 4096);
+		return;
+	}
+
+	// The guest page is really unmapped. Report it with the fault the guest would
+	// have taken, and leave the state alone so the next access asks again.
+	vm_log.error("Sub-page fault: guest page 0x%x is unmapped inside a mapped host page (pc=0x%x, size=%u, %s)",
+		page * 4096, addr, size, is_write ? "write" : "read");
+}

@@ -18,6 +18,7 @@
 #include "Emu/system_utils.hpp"
 #include "Emu/System.h"
 #include "PPUThread.h"
+#include "Utilities/subpage_map.h"
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
@@ -5161,6 +5162,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{ "__escape", reinterpret_cast<u64>(+ppu_escape) },
 			{ "__read_maybe_mmio32", reinterpret_cast<u64>(+ppu_read_mmio_aware_u32) },
 			{ "__write_maybe_mmio32", reinterpret_cast<u64>(+ppu_write_mmio_aware_u32) },
+			{ "__subpage_fault", reinterpret_cast<u64>(+vm::handle_guest_subpage_fault) },
 			{ "__vrefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vrefp>) },
 			{ "__vrsqrtefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vrsqrtefp>) },
 			{ "__vexptefp", reinterpret_cast<u64>(&ppu_vec_estimate<ppu_vexptefp>) },
@@ -5756,6 +5758,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				// cached object built with the other value runs old code with new
 				// semantics, which is a silent correctness bug (§8.5.1).
 				nonvolatile_memory,
+				subpage_guard,
 
 				__bitset_enum_max
 			};
@@ -5791,6 +5794,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 			if (g_cfg.core.ppu_nonvolatile_memory)
 				settings += ppu_settings::nonvolatile_memory;
+
+			if (g_cfg.core.ppu_subpage_guard)
+				settings += ppu_settings::subpage_guard;
 
 			// Write version, hash, CPU, settings
 			//
