@@ -64,8 +64,8 @@ adds is the thing that keeps a fault from being generated in the first place.
 
 | PR | Title | Files | Size | Gate |
 |---|---|---|---|---|
-| 10a | `vm: track sub-page state per host page` | `vm.cpp`, `vm.h` | M | state transitions under mmap/unmap, unit tested |
-| 10b | `cpu: emit the T1 sub-page guard for notification pages` | `PPUTranslator.cpp`, `CPUTranslator.*` | L | golden IR; #19881 narrowed or explained |
+| 10a | `vm: track sub-page state per host page` | `vm.cpp`, `vm.h` | M | **landed**: 7 tests, state derived from the mapped bits |
+| 10b | `cpu: emit the T1 sub-page guard for notification pages` | `PPUTranslator.cpp`, `CPUTranslator.*` | L | guard + `handle_guest_subpage_fault`; needs a live title |
 
 ## W4 — dispatch (PR 11–14)
 
@@ -90,7 +90,7 @@ adds is the thing that keeps a fault from being generated in the first place.
 |---|---|---|---|---|
 | 17 | `cpu: merge-store and aligned LVLX/STVLX lowering` | `PPUTranslator.cpp` | M | golden assembly, alignment matrix |
 | 18 | `jit: per-page invalidation and code-space reuse` | `JIT*.cpp` | L | invalidation stress |
-| 19 | `jit: PPU cache v10 with sidecar metadata` | `PPUThread.cpp` | S | cold-cache measurement |
+| 19 | `jit: PPU cache v10 with sidecar metadata` | `PPUThread.cpp` | S | **key landed** (`v10`, tier flag in the bits); sidecar waits for the page index |
 | 20 | `cpu: QoS policy split; bounded isb + park` | `Thread.cpp`, `sync.h` | M | p99, audio A/B |
 | 21 | `build: PGO variant for host code` | CI | S | CI build + corpus run |
 
