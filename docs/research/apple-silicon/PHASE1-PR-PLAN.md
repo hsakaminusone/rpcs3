@@ -101,3 +101,19 @@ adds is the thing that keeps a fault from being generated in the first place.
 address hangs the process, which is the failure the design's prototype hit.
 Nothing above claims a title-level gain; the p99 and A/B gates in §11.2 still
 have to be run on hardware with the corpus.
+
+## What is still open, and what each one is waiting for
+
+| PR | Waiting for |
+|---|---|
+| 9d, 9e | the site metadata of PR 8 to reach the fault handler, then a resume-address test on a running module |
+| 11a, 11b | golden IR for straight-line and loop bodies: needs a build of `rpcs3_test` (the `llvm` and `asmjit` submodules are empty in this worktree, so it does not link) |
+| 12, 13, 14 | the same build plus an invalidation epoch: a link cell or IBTC entry that outlives an invalidation jumps into recompiled code |
+| 15, 16 | the differential corpus; both change the state carried across a region edge |
+| 18 | a consumer: per-page invalidation earns nothing until the compiler consults the page index, and code-space reuse needs an invalidation epoch to judge a chunk free |
+| 19 (sidecar) | the page index from 18 and the frame-size decode, which produce every field the sidecar would carry |
+| 21 (CI job) | a runner with the corpus; the option itself was verified end to end (two-stage build, `xcrun llvm-profdata` merge) |
+
+Every row above changes either generated code or the state carried across a
+block edge, so none of them can be closed by inspection, and none is claimed as
+done here.
