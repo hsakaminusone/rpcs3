@@ -3389,6 +3389,37 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Avoid inlining huge transfers because it intentionally drops range lock unlock
 		else if (optimization_compatible == MFC_PUT_CMD && ((addr >> 28 == rsx::constants::local_mem_base >> 28) || (addr < RAW_SPU_BASE_ADDR && size - 1 <= 0x400 - 1 && (addr % 0x10000 + (size - 1)) < 0x10000)))
 		{
+			// EXCISE-BEGIN fp-stage-store-watch
+			// TODO(excise): level 5; the inline PUT writes guest RAM through raw
+			// pointers and never reaches do_dma_transfer's stage guard.  Report
+			// the element on every exit so a staging word written here is still
+			// attributed.  Inert unless the watch is enabled and the address is
+			// in the ring or an nv308a source range.
+			struct stage_list_guard_t
+			{
+				u32 addr;
+				u32 size;
+				const spu_thread* thread;
+				u32 tag;
+				u32 lsa;
+				bool active;
+
+				~stage_list_guard_t()
+				{
+					if (!active)
+					{
+						return;
+					}
+
+					char detail[64];
+					std::snprintf(detail, sizeof(detail), "tag=%u lsa=%03x", tag, lsa);
+					rsx::fp_stage_watch::note_mem(addr, size, "spu-list-put", 0,
+						thread ? thread->get_name().c_str() : "-", detail);
+				}
+			} stage_list_guard{addr, size, this, args.tag, arg_lsa | (addr & 0xf),
+				rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, size)};
+			// EXCISE-END fp-stage-store-watch
+
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
 			{
 				rsx_lock.update_if_enabled(addr, size, range_lock);
@@ -3528,6 +3559,34 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 
 	// Store conditionally
 	const u32 addr = args.eal & -128;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; a reservation store writes 128 guest bytes with
+	// raw pointers.  Report the region on every exit; the watch dedupes and
+	// drops it unless it is in the ring or an nv308a source range.
+	struct stage_putllc_guard_t
+	{
+		u32 addr;
+		const spu_thread* thread;
+		u32 tag;
+		u32 lsa;
+		bool active;
+
+		~stage_putllc_guard_t()
+		{
+			if (!active)
+			{
+				return;
+			}
+
+			char detail[64];
+			std::snprintf(detail, sizeof(detail), "tag=%u lsa=%03x", tag, lsa);
+			rsx::fp_stage_watch::note_mem(addr, 128, "spu-putllc", 0,
+				thread ? thread->get_name().c_str() : "-", detail);
+		}
+	} stage_putllc_guard{addr, this, args.tag, args.lsa,
+		rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, 128)};
+	// EXCISE-END fp-stage-store-watch
 
 	if ([&]()
 	{
@@ -3853,6 +3912,34 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 	perf_meter<"PUTLLUC"_u64> perf0;
 
 	const u32 addr = args.eal & -128;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; do_cell_atomic_128_store bypasses do_dma_transfer.
+	// Report the region on every exit; a PUTLLUC handled through do_putllc is
+	// deduped by (site, address, word).
+	struct stage_putlluc_guard_t
+	{
+		u32 addr;
+		const spu_thread* thread;
+		u32 tag;
+		u32 lsa;
+		bool active;
+
+		~stage_putlluc_guard_t()
+		{
+			if (!active)
+			{
+				return;
+			}
+
+			char detail[64];
+			std::snprintf(detail, sizeof(detail), "tag=%u lsa=%03x", tag, lsa);
+			rsx::fp_stage_watch::note_mem(addr, 128, "spu-putlluc", 0,
+				thread ? thread->get_name().c_str() : "-", detail);
+		}
+	} stage_putlluc_guard{addr, this, args.tag, args.lsa,
+		rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, 128)};
+	// EXCISE-END fp-stage-store-watch
 
 	if (raddr && addr == raddr && g_cfg.core.spu_accurate_reservations)
 	{
