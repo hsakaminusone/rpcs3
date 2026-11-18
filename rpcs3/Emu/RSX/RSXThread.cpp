@@ -1849,17 +1849,9 @@ namespace rsx
 				info.words_before_valid = true;
 			}
 
-			// TODO(excise): level 1; the cache snapshot the host was parsing out of,
-			// and the position it expected the next command at.
-			info.cache_addr = fifo_ctrl->cache_addr();
-			info.cache_size = fifo_ctrl->cache_size();
-			info.next_cmd_entry = fifo_ctrl->next_cmd_entry();
-
-			for (u32 index = 0; index < 16; ++index)
-			{
-				const u32 position = info.get - 32 + index * 4;
-				info.cache_words_valid[index] = fifo_ctrl->peek_cache(position, info.cache_words[index]);
-			}
+			// The cache snapshot fields were tied to the experimental parser and
+			// are unused with upstream FIFO behaviour; the ring-word capture above
+			// remains valid.
 
 			const u32 count = m_dispatch_history_count;
 			const u32 first = (m_dispatch_history_next + dispatch_history_size - count) % dispatch_history_size;
@@ -1896,26 +1888,15 @@ namespace rsx
 				"\nTry increasing \"Driver Wake-Up Delay\" setting or setting \"RSX FIFO Accuracy\" to \"%s\", both in Advanced settings. Called from %s", std::min<rsx_fifo_mode>(rsx_fifo_mode{static_cast<u32>(g_cfg.core.rsx_fifo_accuracy.get()) + 1}, rsx_fifo_mode::atomic_ordered), src_loc);
 		}
 
-		// Error. Should reset the queue.  The rollback target is validated: the
-		// address restore_point was captured at may have been reused by the guest
-		// since (RR7: the word there became a data value and recovery re-entered
-		// it twenty times in two seconds).  Prefer the newest executed packet
-		// whose header is still in the ring.  umax means every candidate is
-		// poisoned and this exact position/word was already resumed once, so leave
-		// GET where it is rather than jump back to the same faulting word.  The
-		// repeated fault is bounded by the 20-fault watchdog above; because the
-		// check is on the word, a producer write at that position re-arms recovery.
-		if (const u32 resume = fifo_ctrl->recovery_point(fifo_ctrl->get_pos(), restore_point); resume != umax)
-		{
-			fifo_ctrl->set_get(resume);
-			fifo_ret_addr = saved_fifo_ret;
-			std::this_thread::sleep_for(2ms);
-			fifo_ctrl->abort();
+		// Error. Should reset the queue
+		fifo_ctrl->set_get(restore_point);
+		fifo_ret_addr = saved_fifo_ret;
+		std::this_thread::sleep_for(2ms);
+		fifo_ctrl->abort();
 
-			if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
-			{
-				discard_draw();
-			}
+		if (std::exchange(m_ctx->in_begin_end, false) && !REGS(m_ctx)->current_draw_clause.empty())
+		{
+			discard_draw();
 		}
 
 		recovered_fifo_cmds_history.push({fifo_ctrl->last_cmd(), current_time});

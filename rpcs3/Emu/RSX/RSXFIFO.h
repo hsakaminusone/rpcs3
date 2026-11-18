@@ -145,65 +145,6 @@ namespace rsx
 			flattening_helper flattener;
 		};
 
-		// Pure decision table for the single-cursor parser (handoff §17, §18).
-		//
-		// Hardware has one read cursor and one producer position. PUT is the
-		// producer's watermark and it is *exclusive*: the word at PUT is not
-		// published, and there is no exception. A word there that looks like a
-		// link is previous-lap data; consuming it jumps into unwritten memory
-		// (the 2026-11-11 Demon's Souls regression, L214).
-		//
-		// Keeping the decision free of parser state lets the rule be tested
-		// directly.
-		struct cursor_rules
-		{
-			enum class action : u8
-			{
-				read,  // the cursor is not on the producer: read the command there
-				idle,  // the cursor is on the producer: nothing is published yet
-			};
-
-			static action decide(u32 pos, u32 put)
-			{
-				return put == pos ? action::idle : action::read;
-			}
-		};
-
-		// A packet start the parser executed, kept so that a recovery can roll
-		// back to a boundary that is still the one that was parsed there.  The
-		// position alone proves nothing: the guest recycles the ring, so the
-		// header has to be compared as well.  RR7 re-entered 0x10a588c twenty
-		// times in two seconds because recovery trusted the address and the word
-		// there had become the next generation's data.
-		struct packet_boundary
-		{
-			u32 pos;
-			u32 header;
-		};
-
-		struct recovery_rules
-		{
-			// Newest first.  A boundary is usable when it is strictly below the
-			// failure - re-entering the failing packet reproduces the failure,
-			// because the parse is deterministic - and the word there is still
-			// the header that was parsed.
-			template <typename ReadWord>
-			static u32 select(const packet_boundary* boundaries, u32 count, u32 failing, ReadWord&& read_word)
-			{
-				for (u32 i = 0; i < count; i++)
-				{
-					const packet_boundary& boundary = boundaries[i];
-
-					if (boundary.pos < failing && read_word(boundary.pos) == boundary.header)
-					{
-						return boundary.pos;
-					}
-				}
-
-				return umax;
-			}
-		};
-
 		class FIFO_control
 		{
 		private:
@@ -222,91 +163,9 @@ namespace rsx
 			u32 m_cmd = ~0u;
 			u32 m_next_cmd_entry = ~0u;
 
-			// Last executed packet starts, used only by recovery.  Bounded: a
-			// chunk is hundreds of packets, so no finite history spans one; the
-			// point is the common case where the guest rewrote only the tail the
-			// parser had not reached yet.
-			static constexpr u32 boundary_capacity = 32;
-			packet_boundary m_boundaries[boundary_capacity] = {};
-			u32 m_boundary_head = 0;
-			u32 m_boundary_total = 0;
-			u32 m_recovery_pos = umax;
-			u32 m_recovery_word = 0;
-
-			void note_boundary(u32 pos, u32 header);
-
 			u32 m_cache_addr = 0;
 			u32 m_cache_size = 0;
-
-			// The window inside which the cache snapshot may be served.  PUT is
-			// the producer's watermark and GET is the consumer's acknowledgement;
-			// the producer may rewrite anything below the GET it has seen, and the
-			// cache line start is rounded down below the frontier, so a snapshot
-			// holds words the guest is entitled to overwrite.  Only [get, put) as
-			// they were when the block was filled is immutable: the guest cannot
-			// have touched it and the producer has already written all of it.  A
-			// hit outside that window re-reads the ring instead of stitching two
-			// generations together (L145 and the cache rule are one invariant).
-			u32 m_cache_get = 0;
-			u32 m_cache_put = 0;
 			alignas(64) std::byte m_cache[8][128];
-
-			// One cursor, no stream table. PUT is the producer's watermark and
-			// the producer's exit link is the only other way the cursor moves.
-			// See the FIFO park handoff, §17. The decision itself is
-			// cursor_rules::decide().
-
-			// A word of the command ring, read through the iomap. Used at a park
-			// (once per producer move) and by the diagnostics.
-			u32 ring_word(u32 addr) const;
-
-			// EXCISE-BEGIN fifo-diag-state
-			// TODO(excise): level 1; FIFO desync instrumentation.  The desync only
-			// shows up downstream, as a data word read as a command header.  These
-			// record the producer frontier and the parser's own boundary so the
-			// first overrun / phase slip is in the log instead of just its symptom.
-			u32 m_diag_max_put = 0;
-			u32 m_diag_prev_put = 0;
-			u32 m_diag_max_jump = 0;
-			u64 m_diag_last_log = 0;
-			u32 m_diag_suppressed = 0;
-			bool m_diag_retry = false;
-
-			// TODO(excise): level 1; a caught-up parser waits on "put == position",
-			// and that is the only stop condition it has.  These record what happens
-			// when the producer then moves that frontier: whether the parser resumes
-			// at a word the producer has not written yet, and how far it walks before
-			// a non-NOP word appears.
-			u32 m_diag_parked_put = umax;
-			u32 m_diag_park_word = 0;
-
-			// TODO(excise): level 1; the last few producer moves.  A park is
-			// explained by the move that preceded it, so keep the old and the new
-			// PUT plus the word that was at the old frontier when it moved.
-			struct diag_put_entry { u32 prev, put, old_word, new_word, get, get_reg; };
-			diag_put_entry m_diag_puts[8] = {};
-			u32 m_diag_put_count = 0;
-
-			u32 m_diag_nop_run = 0;
-			u32 m_diag_nop_start = 0;
-			u64 m_diag_nop_log = 0;
-			u32 m_diag_nop_suppressed = 0;
-
-			// TODO(excise): level 1; the jump chain that led to a desync is gone by
-			// the time the bad word is read, so keep the last few in memory and dump
-			// them with the failing word.  Independent of MTL_PROBE: this is shared
-			// RSX code and must also work with the Metal probes off.
-			struct diag_jump_entry { u32 from, target, put, cmd; };
-			diag_jump_entry m_diag_jumps[32] = {};
-			u32 m_diag_jump_next = 0;
-			u32 m_diag_jump_count = 0;
-			u32 m_diag_last_jump_from = 0;
-			u32 m_diag_last_jump_target = 0;
-			u32 m_diag_cross_logged = 0;
-			u32 m_diag_slab[2] = {};
-			u64 m_diag_dump_time = 0;
-			u32 m_diag_dump_pos = 0;
-			// EXCISE-END fifo-diag-state
 
 		public:
 			FIFO_control(rsx::thread* pctrl);
@@ -319,21 +178,6 @@ namespace rsx
 
 			u32 get_pos() const { return m_fifo_pos; }
 			u32 last_cmd() const { return m_cmd; }
-
-			// Rollback target for recover_fifo().  Prefers the newest executed
-			// packet start whose header is still intact; falls back to `fallback`
-			// unless that is the same poisoned word the previous recovery already
-			// tried, in which case there is no point in re-parsing it (returns
-			// umax and lets the caller stop).
-			u32 recovery_point(u32 failing, u32 fallback);
-			// A desync capture compares the cache snapshot with the ring, which
-			// is how a stale read is told from a mis-parse.  The accessor is
-			// production code -- the definition lives in the .cpp -- so it stays
-			// in the release tree; only the capture that calls it is excised.
-			bool peek_cache(u32 pos, u32& word) const;
-			u32 cache_addr() const { return m_cache_addr; }
-			u32 cache_size() const { return m_cache_size; }
-			u32 next_cmd_entry() const { return m_next_cmd_entry; }
 			void sync_get() const;
 			std::span<const u32> get_current_arg_ptr(u32 length_in_words) const;
 			u32 get_remaining_args_count() const { return m_remaining_commands; }
@@ -352,19 +196,6 @@ namespace rsx
 			void read(register_pair& data);
 			inline bool read_unsafe(register_pair& data);
 			bool skip_methods(u32 count);
-
-			// EXCISE-BEGIN fifo-diag-methods
-			// TODO(excise): level 1; FIFO desync instrumentation, see the members.
-			void diag_put_sample(u32 put, u32 addr);
-			void diag_read_ahead(u32 addr, u32 put);
-			void diag_phase(u32 pos);
-			void diag_jump(u32 target);
-			void diag_park(u32 addr, u32 put, u32 word);
-			void diag_link(u32 addr, u32 put, u32 word);
-			void diag_resume(u32 addr, u32 put);
-			void diag_nop(u32 pos);
-			void diag_desync(u32 pos, u32 word);
-			// EXCISE-END fifo-diag-methods
 		};
 	}
 }

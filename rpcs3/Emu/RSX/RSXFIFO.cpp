@@ -46,13 +46,15 @@ namespace rsx
 
 		void FIFO_control::sync_get() const
 		{
-			// GET is the consumer's acknowledgement, not a read-ahead hint. The
-			// guest uses it as the licence to recycle a command buffer, so it must
-			// name only the position the parser has actually reached. Publishing
-			// the end of the prefetched block told the guest that a chunk was free
-			// while the parser was still inside it; the guest then reused the
-			// chunk and overwrote the link the parser needed (L119, L126, L144).
-			m_ctrl->get.release(m_fifo_pos);
+			if (m_fifo_pos - m_cache_addr <= m_cache_size)
+			{
+				// Atomic FIFO only path
+				m_ctrl->get.release(m_cache_addr + m_cache_size);
+			}
+			else
+			{
+				m_ctrl->get.release(m_fifo_pos);
+			}
 		}
 
 		void FIFO_control::restore_state(u32 cmd, u32 count, u32 position)
@@ -63,10 +65,6 @@ namespace rsx
 			m_fifo_pos = position - (count ? 4 : 0);
 			m_args_ptr = m_iotable->get_addr(m_fifo_pos);
 			m_command_reg = (m_cmd & 0xffff) + m_command_inc * (((m_cmd >> 18) - count) & 0x7ff) - m_command_inc;
-			// position is the next argument to read, so the packet ends count
-			// words later. Using the rewound m_fifo_pos left the boundary one
-			// word short and made the parser re-read the packet's last argument
-			// as the next header.
 			m_next_cmd_entry = position + m_remaining_commands * 4;
 		}
 
@@ -117,616 +115,177 @@ namespace rsx
 			}
 		}
 
-		// A word of the command ring, read through the iomap. Called once per
-		// producer move, so the cost does not matter.
-		u32 FIFO_control::ring_word(u32 addr) const
-		{
-			const u32 host = m_iotable->get_addr(addr & -128);
-			return host == umax ? 0 : +vm::read32(host | (addr & 127));
-		}
-
-		// EXCISE-BEGIN fifo-diag-impl
-		// TODO(excise): level 1; FIFO desync instrumentation.  A desync only ever
-		// shows up downstream, as a data word read as a command header; the state
-		// that makes that possible (the parser at or past the producer frontier, or
-		// a jump landing outside it) is gone by then.  These log that state when it
-		// first happens.  Removed together with the probe work.
-		void FIFO_control::diag_put_sample(u32 put, u32 addr)
-		{
-			if (put > m_diag_max_put)
-			{
-				m_diag_max_put = put;
-			}
-
-			// TODO(excise): level 1; record the frontier word at the moment the
-			// producer moved away from it.  This is the only instant that separates
-			// "the link was never written for this pass" from "it was written after
-			// the move and the parser missed it".
-			if (put != m_diag_prev_put && m_diag_prev_put)
-			{
-				diag_put_entry& entry = m_diag_puts[m_diag_put_count++ & 7u];
-				entry.prev = m_diag_prev_put;
-				entry.put = put;
-				entry.old_word = ring_word(m_diag_prev_put);
-				entry.new_word = ring_word(put);
-				entry.get = m_fifo_pos;
-				entry.get_reg = +m_ctrl->get;
-			}
-
-			// The producer pointer only moves backwards when the guest wraps its
-			// command buffers, which is the one place the ring extent is observable.
-			if (m_diag_prev_put > put && m_diag_prev_put - put > 0x10000)
-			{
-				rsx_log.warning("FIFO diag: PUT rewind prev=0x%x put=0x%x max=0x%x get=0x%x fetch=0x%x",
-					m_diag_prev_put, put, m_diag_max_put, m_fifo_pos, addr);
-			}
-			else if (put != m_diag_prev_put && m_diag_prev_put)
-			{
-				// TODO(excise): level 1; the interesting case is not the rewind but
-				// the move that ends a catch-up: the parser was stopped exactly on
-				// the old frontier, so the next read resumes on a word the producer
-				// may not have written yet.
-				const bool parked = m_fifo_pos == m_diag_prev_put;
-				const bool sideways = put > m_diag_prev_put && put - m_diag_prev_put > 0x10000;
-
-				if (parked || sideways)
-				{
-					const u64 now = get_system_time();
-
-					if (m_diag_last_log && now - m_diag_last_log < 20000)
-					{
-						m_diag_suppressed++;
-					}
-					else
-					{
-						m_diag_last_log = now;
-						rsx_log.warning("FIFO diag: PUT move prev=0x%x put=0x%x parked=%u delta=%+d get=0x%x fetch=0x%x old_word=0x%x cache=0x%x+0x%x last_cmd=0x%x suppressed=%u",
-							m_diag_prev_put, put, parked, static_cast<s32>(put - m_diag_prev_put), m_fifo_pos, addr,
-							ring_word(m_diag_prev_put), m_cache_addr, m_cache_size, m_cmd, std::exchange(m_diag_suppressed, 0u));
-					}
-				}
-			}
-
-			// TODO(excise): level 1; learn the two command-buffer slabs from the
-			// producer pointer.  This is what makes the cross-buffer filter generic:
-			// only hops that land inside a buffer the guest actually publishes to
-			// are reported, not loops that cross an arbitrary 64 KB line.
-			{
-				const u32 slab = put & ~0xffffu;
-
-				if (slab != m_diag_slab[0] && slab != m_diag_slab[1])
-				{
-					if (!m_diag_slab[0]) m_diag_slab[0] = slab;
-					else if (!m_diag_slab[1]) m_diag_slab[1] = slab;
-				}
-			}
-
-			m_diag_prev_put = put;
-		}
-
-		void FIFO_control::diag_read_ahead(u32 addr, u32 put)
-		{
-			const u64 now = get_system_time();
-
-			if (m_diag_last_log && now - m_diag_last_log < 20000)
-			{
-				m_diag_suppressed++;
-				return;
-			}
-
-			m_diag_last_log = now;
-			rsx_log.warning("FIFO diag: read ahead fetch=0x%x put=0x%x delta=0x%x cross=%u get=0x%x next=0x%x remaining=%u last_cmd=0x%x suppressed=%u",
-				addr, put, addr - put, u32{!!((addr ^ put) & ~0xffffu)}, m_fifo_pos, m_next_cmd_entry, m_remaining_commands, m_cmd, std::exchange(m_diag_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_phase(u32 pos)
-		{
-			if (m_diag_retry || m_next_cmd_entry == umax || pos == m_next_cmd_entry)
-			{
-				m_diag_retry = false;
-				return;
-			}
-
-			const u64 now = get_system_time();
-
-			if (m_diag_last_log && now - m_diag_last_log < 20000)
-			{
-				m_diag_suppressed++;
-				return;
-			}
-
-			m_diag_last_log = now;
-			rsx_log.warning("FIFO diag: header phase slip pos=0x%x expected=0x%x delta=%d last_cmd=0x%x put=0x%x suppressed=%u",
-				pos, m_next_cmd_entry, static_cast<s32>(pos - m_next_cmd_entry), m_cmd, read_put(), std::exchange(m_diag_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_jump(u32 target)
-		{
-			const u32 put = read_put();
-
-			// TODO(excise): level 1; keep the chain in memory, the log is too slow to
-			// hold every jump of a free-running parser.
-			{
-				auto& entry = m_diag_jumps[m_diag_jump_next];
-				entry.from = m_fifo_pos;
-				entry.target = target;
-				entry.put = put;
-				entry.cmd = m_cmd;
-				m_diag_jump_next = (m_diag_jump_next + 1) & 31;
-				m_diag_jump_count++;
-			}
-
-			// Remember the last jump for the NOP-run report: a free run that starts
-			// right after a jump points at the jump as the thing that landed wrong.
-			m_diag_last_jump_from = m_fifo_pos;
-			m_diag_last_jump_target = target;
-
-			// EXCISE-BEGIN fifo-chunk-tail
-			// TODO(excise): level 1; capture the chunk before the producer
-			// recycles it.  The parked tail is already zeroed, so the methods
-			// that release the producer are only visible at entry.
-			static std::atomic<u32> dump_count{0};
-
-			if ((target == 0xcb0000 || target == 0x10a0000) && put > target && put - target <= 0x10000 &&
-				dump_count.fetch_add(1, std::memory_order_relaxed) < 4)
-			{
-				const u32 start = put - std::min<u32>(put - target, 0x400);
-				std::string dump;
-
-				for (u32 addr = start; addr <= put; addr += 4)
-				{
-					const u32 host = m_iotable->get_addr(addr);
-					dump += fmt::format(" %08x", host == umax ? 0 : vm::_ref<be_t<u32>>(host).value());
-				}
-
-				rsx_log.warning("FIFO diag: chunk tail %x..%x%s", start, put, dump.c_str());
-			}
-			// EXCISE-END fifo-chunk-tail
-
-			// TODO(excise): level 1; a jump between the guest's two command
-			// buffers is invisible to every numeric test in this file: the buffer
-			// the parser is not filling has the lower address, so `target <= put`
-			// holds and the jump reads as "inside the frontier" when it is really
-			// entering the other buffer.  This is the only unconditional record of
-			// those hops; a buffer is 64 KB and the hop happens once a chunk, so it
-			// is not a flood.  Capped so a desync loop cannot fill the log.
-			const u32 target_slab = target & ~0xffffu;
-
-			if (target_slab != (m_fifo_pos & ~0xffffu) &&
-				(target_slab == m_diag_slab[0] || target_slab == m_diag_slab[1]) &&
-				m_diag_cross_logged < 8192)
-			{
-				m_diag_cross_logged++;
-				rsx_log.warning("FIFO diag: jump cross-buffer from=0x%x target=0x%x put=0x%x cmd=0x%x count=%u",
-					m_fifo_pos, target, put, m_cmd, m_diag_cross_logged);
-			}
-
-			if (target > m_diag_max_jump)
-			{
-				// New high-water mark: bounds the guest's command buffer ring.
-				m_diag_max_jump = target;
-				rsx_log.warning("FIFO diag: jump high-water target=0x%x from=0x%x put=0x%x", target, m_fifo_pos, put);
-			}
-
-			if (target <= put || target - put < 0x10000)
-			{
-				return;
-			}
-
-			const u64 now = get_system_time();
-
-			if (m_diag_last_log && now - m_diag_last_log < 20000)
-			{
-				m_diag_suppressed++;
-				return;
-			}
-
-			m_diag_last_log = now;
-			rsx_log.warning("FIFO diag: jump past PUT target=0x%x put=0x%x delta=0x%x from=0x%x cmd=0x%x suppressed=%u",
-				target, put, target - put, m_fifo_pos, m_cmd, std::exchange(m_diag_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_park(u32 addr, u32 put, u32 word)
-		{
-			// TODO(excise): level 1; a park is the parser's only stop condition.
-			// Record where it stopped and what the word there was. The producer
-			// publishing the next chunk is what wakes it; the word changing under
-			// the parser is the handshake. Do not let a jump logged in the same
-			// millisecond hide the first stop.
-			m_diag_last_log = get_system_time();
-			rsx_log.warning("FIFO diag: parked addr=0x%x put=0x%x word=0x%x get=0x%x get_reg=0x%x cache=0x%x+0x%x next=0x%x last_cmd=0x%x suppressed=%u",
-				addr, put, word, m_fifo_pos, +m_ctrl->get, m_cache_addr, m_cache_size, m_next_cmd_entry, m_cmd, std::exchange(m_diag_suppressed, 0u));
-
-			// TODO(excise): level 1; the tail of the chunk that parked.  The
-			// producer waits on the last methods of this chunk, not on the park word.
-			if (addr >= 0x100)
-			{
-				std::string tail;
-
-				for (u32 i = 64; i-- > 0;)
-				{
-					tail += fmt::format(" %08x", ring_word(addr - (i + 1) * 4));
-				}
-
-				rsx_log.warning("FIFO diag: park tail%s", tail.c_str());
-			}
-
-			// TODO(excise): level 1; the producer moves that led here, each with the
-			// word that was at the frontier it left.  If none of them had a link at
-			// the old frontier, the guest never published one for this pass.
-			const u32 count = std::min<u32>(m_diag_put_count, 8);
-
-			for (u32 i = 0; i < count; i++)
-			{
-				const diag_put_entry& entry = m_diag_puts[(m_diag_put_count - count + i) & 7u];
-				rsx_log.warning("FIFO diag: park put[%u] prev=0x%x put=0x%x old_word=0x%x new_word=0x%x get=0x%x get_reg=0x%x",
-					i, entry.prev, entry.put, entry.old_word, entry.new_word, entry.get, entry.get_reg);
-			}
-		}
-
-		// TODO(excise): level 1; the producer's exit link. The cursor was on
-		// the producer and the word there is a live link, so the producer's
-		// own way out of the chunk is being consumed. The target is the
-		// producer's next command region; for a ring it is the ring start.
-		void FIFO_control::diag_link(u32 addr, u32 put, u32 word)
-		{
-			const u64 now = get_system_time();
-
-			if (m_diag_last_log && now - m_diag_last_log < 20000)
-			{
-				m_diag_suppressed++;
-				return;
-			}
-
-			m_diag_last_log = now;
-
-			u32 target = 0;
-
-			if ((word & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
-			{
-				target = word & RSX_METHOD_OLD_JUMP_OFFSET_MASK;
-			}
-			else if ((word & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
-			{
-				target = word & RSX_METHOD_CALL_OFFSET_MASK;
-			}
-
-			rsx_log.warning("FIFO diag: link at PUT addr=0x%x put=0x%x word=0x%x target=0x%x get=0x%x get_reg=0x%x next=0x%x last_cmd=0x%x suppressed=%u",
-				addr, put, word, target, m_fifo_pos, +m_ctrl->get, m_next_cmd_entry, m_cmd,
-				std::exchange(m_diag_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_resume(u32 addr, u32 put)
-		{
-			// TODO(excise): level 1; the parser stopped here because it had reached
-			// the producer, and is now reading here again.  A resume is only safe if
-			// the producer moved forward by a sane amount; a producer behind the
-			// resume point, or one that jumped to another region, both mean the word
-			// at addr belongs to an older pass.
-			if (put > addr && put - addr <= 0x10000)
-			{
-				return;
-			}
-
-			const u64 now = get_system_time();
-
-			if (m_diag_last_log && now - m_diag_last_log < 20000)
-			{
-				m_diag_suppressed++;
-				return;
-			}
-
-			m_diag_last_log = now;
-			rsx_log.warning("FIFO diag: resume at former PUT addr=0x%x put=0x%x delta=%+d cache=0x%x+0x%x next=0x%x last_cmd=0x%x jump=0x%x->0x%x suppressed=%u",
-				addr, put, static_cast<s32>(put - addr), m_cache_addr, m_cache_size, m_next_cmd_entry, m_cmd,
-				m_diag_last_jump_from, m_diag_last_jump_target, std::exchange(m_diag_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_nop(u32 pos)
-		{
-			if (!m_diag_nop_run)
-			{
-				m_diag_nop_start = pos;
-			}
-
-			if (++m_diag_nop_run != 256)
-			{
-				return;
-			}
-
-			// TODO(excise): level 1; 256 consecutive NOP headers is 1 KB of words
-			// with a zero command count.  That is what unwritten IO memory parses
-			// as, and the NOP path has no PUT check, so this is the shape of an
-			// unbounded walk.  Report the start so the entry point is visible.
-			const u64 now = get_system_time();
-
-			if (m_diag_nop_log && now - m_diag_nop_log < 20000)
-			{
-				m_diag_nop_suppressed++;
-				return;
-			}
-
-			m_diag_nop_log = now;
-			const u32 put = read_put();
-			rsx_log.warning("FIFO diag: NOP run start=0x%x cur=0x%x len=%u put=0x%x delta=%+d cache=0x%x+0x%x jump=0x%x->0x%x suppressed=%u",
-				m_diag_nop_start, pos, m_diag_nop_run, put, static_cast<s32>(pos - put),
-				m_cache_addr, m_cache_size, m_diag_last_jump_from, m_diag_last_jump_target,
-				std::exchange(m_diag_nop_suppressed, 0u));
-		}
-
-		void FIFO_control::diag_desync(u32 pos, u32 word)
-		{
-			// TODO(excise): level 1; dump the jump chain once per failing word.
-			const u64 now = get_system_time();
-
-			if (m_diag_dump_pos == pos && now - m_diag_dump_time < 1000000)
-			{
-				return;
-			}
-
-			m_diag_dump_pos = pos;
-			m_diag_dump_time = now;
-
-			const u32 put = read_put();
-			rsx_log.error("FIFO diag: desync word=0x%x pos=0x%x put=0x%x delta=%+d cache=0x%x+0x%x next=0x%x nops=%u",
-				word, pos, put, static_cast<s32>(pos - put), m_cache_addr, m_cache_size, m_next_cmd_entry, m_diag_nop_run);
-
-			const u32 count = std::min<u32>(m_diag_jump_count, 32);
-
-			for (u32 i = 0; i < count; i++)
-			{
-				const auto& entry = m_diag_jumps[(m_diag_jump_next + 32 - count + i) & 31];
-				rsx_log.error("FIFO diag: desync jump[%u] from=0x%x target=0x%x put=0x%x cmd=0x%x", i, entry.from, entry.target, entry.put, entry.cmd);
-			}
-		}
-		// EXCISE-END fifo-diag-impl
-
 		std::pair<bool, u32> FIFO_control::fetch_u32(u32 addr)
 		{
-			if (addr - m_cache_addr < m_cache_size &&
-				static_cast<s32>(addr - m_cache_get) >= 0 && static_cast<s32>(addr - m_cache_put) < 0)
+			if (addr - m_cache_addr >= m_cache_size)
 			{
-				// Only the part of the snapshot the guest could not have touched is
-				// served: it was at or above the GET published when the block was
-				// filled (everything below that is licenced for reuse) and below the
-				// PUT that was current then (everything at or above it was read
-				// ahead of the producer).  Anything else drops to the slow path and
-				// is re-read, which is the only way to avoid stitching two
-				// generations of the same ring together.
-				return {true, read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr)};
-			}
+				const u32 put = read_put();
 
-			const u32 put = read_put();
-
-			// TODO(excise): level 1; sample the producer frontier.
-			diag_put_sample(put, addr);
-
-			// R1: the cursor is on the producer. There is nothing to read.
-			if (put == addr)
-			{
-				return {false, FIFO_EMPTY};
-			}
-
-			m_cache_addr = addr & -128;
-
-			const u32 addr1 = translate_address(m_cache_addr);
-
-			if (addr1 == umax)
-			{
-				m_cache_size = 0;
-				return {false, FIFO_ERROR};
-			}
-
-			if (addr == m_next_cmd_entry)
-			{
-				if (u32 cmd = vm::read32(addr1 | (addr & 127)); cmd & RSX_METHOD_NON_METHOD_CMD_MASK)
+				if (put == addr)
 				{
-					// FIFO control commands (including invalid)
-					// No GET update here
-					m_cache_addr = addr;
-					m_cache_size = 4;
-					// The cache is now the source for this position, so it has to
-					// hold the word the caller is about to receive (a retry at the
-					// same position must see the command, not the stale bytes), and
-					// it is the only word of the window: nothing above it was
-					// published or copied.
-					m_cache_get = addr;
-					m_cache_put = addr + 4;
-					const be_t<u32> raw = cmd;
-					std::memcpy(+m_cache[0], &raw, sizeof(raw));
-					return {true, cmd};
+					return {false, FIFO_EMPTY};
 				}
-			}
 
-			// R2/R3: while the cursor is behind PUT only the published range
-			// enters the cache. When it is ahead (a jump target the producer has
-			// not reached), the region is walked exactly as hardware walks it;
-			// dispatch is gated by the whole-packet rule in read(), not by a
-			// per-stream frontier.
-			const u32 cache_end = (addr < put) ? put : (addr + sizeof(m_cache));
+				m_cache_addr = addr & -128;
 
-			m_cache_size = std::min<u32>((cache_end | 0x7f) - m_cache_addr, u32{sizeof(m_cache)} - 1) + 1;
+				const u32 addr1 = translate_address(m_cache_addr);
 
-			if (0x100000 - (m_cache_addr & 0xfffff) < m_cache_size)
-			{
-				// Check if memory layout changes in the next 1MB page boundary
-				if ((addr1 >> 20) + 1 != (translate_address(m_cache_addr + 0x100000) >> 20))
+				if (addr1 == umax)
 				{
-					// Trim cache as needed if memory layout changes
-					m_cache_size = 0x100000 - (m_cache_addr & 0xfffff);
+					m_cache_size = 0;
+					return {false, FIFO_ERROR};
 				}
-			}
 
-			// Make mask of cache lines to fetch
-			u8 to_fetch = static_cast<u8>((1u << (m_cache_size / 128)) - 1);
-
-			// PUT is exclusive: the word at PUT is not published. The cache is
-			// filled in 128-byte lines, so the line that contains PUT is read up
-			// to 0x7f bytes past it; hide that read-ahead from hits. Otherwise a
-			// word written by the producer after the line was fetched (the exit
-			// link at the frontier) is served from the stale copy. The check has
-			// to be positional, not a comparison of PUT against the address: the
-			// producer re-points PUT to a numerically lower offset when it wraps
-			// or reuses a command buffer (RR7: 0x10a0e20 -> 0xcb13bc after the
-			// frontier link was written), and any "PUT moved past addr" test
-			// fails open there. A frontier word is always the first byte past
-			// the exposed range, so the retry re-reads it.
-			if (addr < put)
-			{
-				m_cache_size = std::min<u32>(m_cache_size, put - m_cache_addr);
-			}
-
-			// Snapshot the window this block is valid in: from the GET that
-			// sync_get() is about to publish (the frontier word the caller is
-			// waiting on, so everything below it is licenced for reuse) up to the
-			// PUT read above. A hit outside it re-reads rather than stitches.
-			m_cache_get = addr;
-			m_cache_put = put;
-
-			// Atomic FIFO debug options
-			const bool force_cache_fill = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::atomic_ordered;
-			const bool strict_fetch_ordering = g_cfg.core.rsx_fifo_accuracy >= rsx_fifo_mode::atomic_ordered;
-
-			rsx::reservation_lock<true, 1> rsx_lock(addr1, m_cache_size, true);
-			const auto src = vm::_ptr<spu_rdata_t>(addr1);
-
-			u64 start_time = 0;
-			// EXCISE-BEGIN fifo-stall-state
-			u64 stall_start = 0;
-			bool stall_logged = false;
-			// EXCISE-END fifo-stall-state
-			u32 bytes_read = 0;
-
-			u32 fifo_code_path = m_next_cmd_entry;
-			ensure(m_next_cmd_entry >= m_fifo_pos && m_next_cmd_entry < m_fifo_pos + 8192);
-
-			// Find the next set bit after every iteration
-			for (int i = 0;; i = (std::countr_zero<u32>(std::rotl<u8>(to_fetch, 0 - i - 1)) + i + 1) % 8)
-			{
-				// If a reservation is being updated, try to load another
-				const auto& res = vm::reservation_acquire(addr1 + i * 128);
-				const u64 time0 = res;
-
-				if (!(time0 & 127))
+				if (addr == m_next_cmd_entry)
 				{
-					mov_rdata(m_cache[i], src[i]);
+					 if (u32 cmd = vm::read32(addr1 | (addr & 127)); cmd & RSX_METHOD_NON_METHOD_CMD_MASK)
+					 {
+					 	// FIFO control commands (including invalid)
+					 	// No GET update here
+					 	m_cache_addr = addr;
+					 	m_cache_size = 4;
+					 	return {true, cmd};
+					 }
+				}
 
-					if (time0 == res && cmp_rdata(m_cache[i], src[i]))
+				m_cache_size = std::min<u32>((put | 0x7f) - m_cache_addr, u32{sizeof(m_cache)} - 1) + 1;
+
+				if (0x100000 - (m_cache_addr & 0xfffff) < m_cache_size)
+				{
+					// Check if memory layout changes in the next 1MB page boundary
+					if ((addr1 >> 20) + 1 != (translate_address(m_cache_addr + 0x100000) >> 20))
 					{
-						// The fetch of the cache line content has been successful, unset its bit
-						to_fetch &= ~(1u << i);
+						// Trim cache as needed if memory layout changes
+						m_cache_size = 0x100000 - (m_cache_addr & 0xfffff);
+					}
+				}
 
-						if ((to_fetch & ((1u << i) - 1)) == 0)
+				// Make mask of cache lines to fetch
+				u8 to_fetch = static_cast<u8>((1u << (m_cache_size / 128)) - 1);
+
+				if (addr < put && put < m_cache_addr + m_cache_size)
+				{
+					// Adjust to knownly-prepared FIFO buffer bounds
+					m_cache_size = put - m_cache_addr;
+				}
+
+				// Atomic FIFO debug options
+				const bool force_cache_fill = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::atomic_ordered;
+				const bool strict_fetch_ordering = g_cfg.core.rsx_fifo_accuracy >= rsx_fifo_mode::atomic_ordered;
+
+				rsx::reservation_lock<true, 1> rsx_lock(addr1, m_cache_size, true);
+				const auto src = vm::_ptr<spu_rdata_t>(addr1);
+
+				u64 start_time = 0;
+				u32 bytes_read = 0;
+
+				u32 fifo_code_path = m_next_cmd_entry;
+				ensure(m_next_cmd_entry >= m_fifo_pos && m_next_cmd_entry < m_fifo_pos + 8192);
+
+				// Find the next set bit after every iteration
+				for (int i = 0;; i = (std::countr_zero<u32>(std::rotl<u8>(to_fetch, 0 - i - 1)) + i + 1) % 8)
+				{
+					// If a reservation is being updated, try to load another
+					const auto& res = vm::reservation_acquire(addr1 + i * 128);
+					const u64 time0 = res;
+
+					if (!(time0 & 127))
+					{
+						mov_rdata(m_cache[i], src[i]);
+
+						if (time0 == res && cmp_rdata(m_cache[i], src[i]))
 						{
-							const u32 highest_clear = std::min<u32>(m_cache_size, to_fetch ? std::bit_width<u8>(to_fetch & ~(to_fetch - 1)) * 128 - 128 : bytes_read + 128);
+							// The fetch of the cache line content has been successful, unset its bit
+							to_fetch &= ~(1u << i);
 
-							ensure(highest_clear <= 1024);
-
-							const u32 high_addr = m_cache_addr + highest_clear;
-
-							while (fifo_code_path < high_addr)
+							if ((to_fetch & ((1u << i) - 1)) == 0)
 							{
-								const auto cmd = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], fifo_code_path - m_cache_addr);
+								const u32 highest_clear = std::min<u32>(m_cache_size, to_fetch ? std::bit_width<u8>(to_fetch & ~(to_fetch - 1)) * 128 - 128 : bytes_read + 128);
 
-								if (cmd & RSX_METHOD_NON_METHOD_CMD_MASK) [[unlikely]]
+								ensure(highest_clear <= 1024);
+
+								const u32 high_addr = m_cache_addr + highest_clear;
+
+								while (fifo_code_path < high_addr)
 								{
-									// FIFO control commands (including invalid)
-									fifo_code_path += 4;
-									break;
+									const auto cmd = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], fifo_code_path - m_cache_addr);
+
+									if (cmd & RSX_METHOD_NON_METHOD_CMD_MASK) [[unlikely]]
+									{
+										// FIFO control commands (including invalid)
+										fifo_code_path += 4;
+										break;
+									}
+
+									const u32 count = (cmd >> 18) & 0x7ff;
+									fifo_code_path += count * 4 + 4;
 								}
 
-								const u32 count = (cmd >> 18) & 0x7ff;
-								fifo_code_path += count * 4 + 4;
+
+								if (fifo_code_path < high_addr)
+								{
+									// Cache trimmed due to FIFO control command
+									m_cache_size = std::max<u32>(fifo_code_path, addr + 4) - m_cache_addr;
+									break;
+								}
 							}
 
-
-							if (fifo_code_path < high_addr)
+							if (!to_fetch)
 							{
-								// Cache trimmed due to FIFO control command
-								m_cache_size = std::max<u32>(fifo_code_path, addr + 4) - m_cache_addr;
 								break;
 							}
-						}
 
-						if (!to_fetch)
+							bytes_read += 128;
+							continue;
+						}
+					}
+
+					if (!start_time)
+					{
+						if (bytes_read >= 256 && !force_cache_fill)
 						{
+							// Cut our losses if we have something to work with.
+							// This is the first time falling out of the reservation loop above, so we have clean data with no holes.
+							m_cache_size = bytes_read;
 							break;
 						}
 
-						bytes_read += 128;
-						continue;
+						start_time = get_system_time();
 					}
-				}
 
-				if (!start_time)
-				{
-					if (bytes_read >= 256 && !force_cache_fill)
+					auto now = get_system_time();
+					if (now - start_time >= 50u)
 					{
-						// Most of the data seems to be in cache already, don't over-wait
-						break;
+						if (m_thread->is_stopped())
+						{
+							return {};
+						}
+
+						m_thread->cpu_wait({});
+
+						const auto then = std::exchange(now, get_system_time());
+						start_time = now;
+						m_thread->performance_counters.idle_time += now - then;
 					}
-
-					start_time = get_system_time();
-					// EXCISE-BEGIN fifo-stall-start
-					stall_start = start_time;
-					// EXCISE-END fifo-stall-start
-				}
-
-				auto now = get_system_time();
-
-				// EXCISE-BEGIN fifo-stall-log
-				if (stall_start && !stall_logged && now - stall_start >= 1000000)
-				{
-					// TODO(excise): level 1; a fill that cannot commit for a
-					// second is a parser stall, not a slow producer.
-					stall_logged = true;
-					rsx_log.warning("FIFO diag: fetch wait addr=0x%x put=0x%x cache=0x%x+0x%x to_fetch=0x%x bytes=%u next=0x%x",
-						addr, put, m_cache_addr, m_cache_size, to_fetch, bytes_read, m_next_cmd_entry);
-				}
-				// EXCISE-END fifo-stall-log
-
-				if (now - start_time >= 50u)
-				{
-					if (m_thread->is_stopped())
+					else
 					{
-						return {};
+						busy_wait(200);
 					}
 
-					m_thread->cpu_wait({});
-
-					const auto then = std::exchange(now, get_system_time());
-					start_time = now;
-					m_thread->performance_counters.idle_time += now - then;
-				}
-				else
-				{
-					busy_wait(200);
+					if (strict_fetch_ordering)
+					{
+						i = (i - 1) % 8;
+					}
 				}
 
-				if (strict_fetch_ordering)
-				{
-					i = (i - 1) % 8;
-				}
+				// Update FIFO GET
+				sync_get();
+				atomic_fence_seq_cst();
 			}
-
-			// Update FIFO GET
-			sync_get();
-			atomic_fence_seq_cst();
 
 			ensure(addr < m_cache_addr + m_cache_size);
 			const auto ret = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr);
 			return {true, ret};
-		}
-
-		bool FIFO_control::peek_cache(u32 pos, u32& word) const
-		{
-			if (pos - m_cache_addr >= m_cache_size)
-			{
-				return false;
-			}
-
-			word = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], pos - m_cache_addr);
-			return true;
 		}
 
 		void FIFO_control::set_get(u32 get, u32 spin_cmd)
@@ -747,49 +306,6 @@ namespace rsx
 			// Update ctrl registers
 			m_ctrl->get.release(m_fifo_pos = get);
 			m_remaining_commands = 0;
-		}
-
-		void FIFO_control::note_boundary(u32 pos, u32 header)
-		{
-			m_boundaries[m_boundary_head] = {pos, header};
-
-			if (++m_boundary_head == boundary_capacity)
-			{
-				m_boundary_head = 0;
-			}
-
-			m_boundary_total = std::min<u32>(m_boundary_total + 1, boundary_capacity);
-		}
-
-		u32 FIFO_control::recovery_point(u32 failing, u32 fallback)
-		{
-			packet_boundary ordered[boundary_capacity];
-
-			for (u32 i = 0; i < m_boundary_total; i++)
-			{
-				ordered[i] = m_boundaries[(m_boundary_head + boundary_capacity - 1 - i) % boundary_capacity];
-			}
-
-			if (const u32 pos = recovery_rules::select(ordered, m_boundary_total, failing, [this](u32 addr) { return ring_word(addr); });
-				pos != umax)
-			{
-				m_recovery_pos = pos;
-				m_recovery_word = ring_word(pos);
-				return pos;
-			}
-
-			// Nothing that was executed is still intact. Re-entering the position
-			// the previous recovery already resumed at cannot make progress: the
-			// word there is the one that failed and the parse is deterministic.
-			// That is the RR7 loop; stop instead of spinning the watchdog.
-			if (fallback == m_recovery_pos && ring_word(fallback) == m_recovery_word)
-			{
-				return umax;
-			}
-
-			m_recovery_pos = fallback;
-			m_recovery_word = ring_word(fallback);
-			return fallback;
 		}
 
 		std::span<const u32> FIFO_control::get_current_arg_ptr(u32 length_in_words) const
@@ -945,63 +461,16 @@ namespace rsx
 				m_memwatch_cmp = 0;
 			}
 
-			const u32 put = read_put();
-
-			// R1: the cursor is on the producer. PUT is exclusive and there is no
-			// exception: a word at that position is not published, so the parser
-			// idles.
-			//
-			// A word there can *look* like a link - a stale wrap jump, or an
-			// argument whose bits happen to match the jump encoding - and acting
-			// on it is the 2026-11-11 regression: Demon's Souls parked at
-			// 0x3f454 with 0x20040000 in the slot, the parser read it as
-			// OLD_JUMP|0x40000, walked unwritten memory to 0x600000, read
-			// 0x39300000 there and desynced at 0x19300000. The producer's exit
-			// link is readable only once PUT has moved past it (or the producer
-			// has rewound); the normal read path handles it then.
-			if (put == m_fifo_pos)
-			{
-				// EXCISE-BEGIN fifo-park-word
-				const u32 word = ring_word(m_fifo_pos);
-
-				if (m_diag_parked_put != m_fifo_pos)
-				{
-					// TODO(excise): level 1; new park, remember the word.
-					diag_park(m_fifo_pos, put, word);
-					m_diag_park_word = word;
-				}
-				else if (word != m_diag_park_word)
-				{
-					// TODO(excise): level 1; the producer wrote the park word
-					// while the parser waited. This is the healthy wake-up.
-					rsx_log.warning("FIFO diag: park word change addr=0x%x old=0x%x new=0x%x put=0x%x",
-						m_fifo_pos, m_diag_park_word, word, put);
-
-					m_diag_park_word = word;
-				}
-
-				m_diag_parked_put = m_fifo_pos;
-				// EXCISE-END fifo-park-word
-
-				data.reg = FIFO_EMPTY;
-				return;
-			}
-
-			// EXCISE-BEGIN fifo-resume
-			m_diag_parked_put = umax;
-			// EXCISE-END fifo-resume
-
-			// R2/R3: read at the cursor whether it is behind PUT (published) or
-			// ahead of it (a jump target the producer has not reached yet). There
-			// is no per-stream frontier; PUT gates whole-packet dispatch below.
 			if (!g_cfg.core.rsx_fifo_accuracy) [[ likely ]]
 			{
-				// EXCISE-BEGIN fifo-read-ahead
-				if (m_fifo_pos > put)
+				const u32 put = read_put();
+
+				if (put == m_fifo_pos)
 				{
-					diag_read_ahead(m_fifo_pos, put);
+					// Nothing to do
+					data.reg = FIFO_EMPTY;
+					return;
 				}
-				// EXCISE-END fifo-read-ahead
 
 				if (const u32 addr = translate_address(m_fifo_pos); addr + 1)
 				{
@@ -1015,10 +484,6 @@ namespace rsx
 			}
 			else
 			{
-				// TODO(excise): level 1; the parser is about to read a header, so its
-				// position must match the boundary the previous command predicted.
-				diag_phase(m_fifo_pos);
-
 				if (auto [ok, arg] = fetch_u32(m_fifo_pos); ok)
 				{
 					m_cmd = arg;
@@ -1039,21 +504,10 @@ namespace rsx
 					(m_cmd & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD ||
 					(m_cmd & RSX_METHOD_RETURN_MASK) == RSX_METHOD_RETURN_CMD)
 				{
-					// TODO(excise): level 1; a jump ends any NOP run.
-					m_diag_nop_run = 0;
-
-					// A flow-control command is a legal packet boundary too: if
-					// the stream is broken after it, resuming here re-follows the
-					// same link instead of re-entering a word that changed.
-					note_boundary(m_fifo_pos, m_cmd);
-
 					// Flow control, stop reading
 					data.reg = m_cmd;
 					return;
 				}
-
-				// TODO(excise): level 1; the data word that broke the parse.
-				diag_desync(m_fifo_pos, m_cmd);
 
 				// Malformed command, optional recovery
 				data.reg = FIFO_ERROR;
@@ -1065,43 +519,13 @@ namespace rsx
 
 			m_next_cmd_entry = m_fifo_pos + count * 4 + 4;
 
-			// R2: dispatch a packet only when all of it is published. While the
-			// cursor is behind PUT, a packet that ends past PUT is a mid-fill:
-			// leave the header in place and wait for the last argument, so no
-			// method is ever entered with a partially published argument block.
-			// Upstream dispatches on the header and parks on the first unpublished
-			// argument instead; this is the one dispatch rule we keep locally
-			// (handoff §19.4). A cursor ahead of PUT is in a region the guest
-			// jumped to before publishing it (R3); that region is walked as
-			// hardware walks it and is not gated.
-			if (m_fifo_pos < put && m_next_cmd_entry > put)
-			{
-				// Nothing of the packet was consumed. Keep the boundary on the
-				// header so the retry is not mistaken for a phase slip.
-				m_next_cmd_entry = m_fifo_pos;
-				data.reg = FIFO_EMPTY;
-				return;
-			}
-
 			if (!count)
 			{
-				// TODO(excise): level 1; the count-0 path advances without any PUT
-				// check, so this is the only place a walk through unwritten memory
-				// is visible as such.
-				diag_nop(m_fifo_pos);
-
 				m_fifo_pos += 4;
 				sync_get();
 				data.reg = FIFO_NOP;
 				return;
 			}
-
-			// TODO(excise): level 1; a real method ends any NOP run.
-			m_diag_nop_run = 0;
-
-			// This packet was accepted and is about to execute, so its start is a
-			// valid rollback target while its header is still in the ring.
-			note_boundary(m_fifo_pos, m_cmd);
 
 			if (count > 1)
 			{
@@ -1126,18 +550,13 @@ namespace rsx
 					}
 					else
 					{
-						// The first argument has not been published yet.  Nothing of
-						// this command has been consumed, so put the position back on
-						// the header and let the next read() parse the command again.
-						// read_unsafe() advances before it fetches: leaving the
-						// position on the argument and raising the remaining count
-						// made the retry read the second argument first, shift the
-						// whole argument block by one word and swallow the next
-						// header.  The stream then parsed an argument as a command.
-						m_fifo_pos -= 4;
-						m_remaining_commands = 0;
-						m_diag_retry = true; // TODO(excise): level 1; not a phase slip
+						// Rewind to the header so read_unsafe() resumes from the first argument
+						// (it pre-increments both the FIFO position and the method register)
 						data.reg = FIFO_EMPTY;
+						m_fifo_pos -= 4;
+						m_command_inc = ((m_cmd & RSX_METHOD_NON_INCREMENT_CMD_MASK) == RSX_METHOD_NON_INCREMENT_CMD) ? 0 : 4;
+						m_command_reg = (m_cmd & 0xfffc) - m_command_inc;
+						m_remaining_commands++;
 					}
 
 					return;
@@ -1396,26 +815,22 @@ namespace rsx
 					last_known_code_start = offs;
 				}
 
-				// TODO(excise): level 1; a jump is the only way the parser reaches a
-				// position the producer has not published, so its target is checked
-				// against PUT here rather than after the next stale read.
-				fifo_ctrl->diag_jump(offs);
-
 				//rsx_log.warning("rsx jump(0x%x) #addr=0x%x, cmd=0x%x, get=0x%x, put=0x%x", offs, m_ioAddress + get, cmd, get, put);
 				fifo_ctrl->set_get(offs, cmd);
 				return;
 			}
 			if ((cmd & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
 			{
+				if (fifo_ret_addr != RSX_CALL_STACK_EMPTY)
+				{
+					// Only one layer is allowed in the call stack.
+					rsx_log.error("FIFO: CALL found inside a subroutine (last cmd = 0x%x)", get_fifo_cmd());
+					recover_fifo();
+					return;
+				}
+
 				const u32 offs = cmd & RSX_METHOD_CALL_OFFSET_MASK;
-				// Hardware has one return-address register, and every CALL
-				// overwrites it: the outer caller's frame is lost, which is what
-				// the guest's trampoline path relies on (the command chunk it
-				// walks ends with a JUMP, not a RET, so the outer return is
-				// never used). A nested CALL is therefore legal, not a fault
-				// (L149).
 				fifo_ret_addr = fifo_ctrl->get_pos() + 4;
-				fifo_ctrl->diag_jump(offs); // TODO(excise): level 1
 				fifo_ctrl->set_get(offs);
 				last_known_code_start = offs;
 				return;
@@ -1582,11 +997,6 @@ namespace rsx
 				// Mark the decoded draw state that depends on this register. Applies to method registers too.
 				m_ctx->draw_state.pending |= draw_state_signals[reg];
 			}
-
-			// TODO(excise): level 1; the dispatch history is a diagnostic: a desync
-			// capture prints it, so the command that precedes the corruption is
-			// visible.  The ring is written on every command, so it must stay cheap.
-			note_dispatch(reg, value, fifo_ctrl->get_pos(), fifo_ctrl->last_cmd());
 
 			if (auto method = methods[reg])
 			{
