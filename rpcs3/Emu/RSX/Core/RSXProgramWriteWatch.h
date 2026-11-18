@@ -540,8 +540,15 @@ namespace rsx
 			return std::getenv("RSX_FP_STAGE_WATCH");
 		}
 
-		// The io region the guest builds its command stream in.  Armed once, at
-		// cellGcmInit, so a patch written before the first nv308a is still seen.
+		static bool ring_armed()
+		{
+			return ring_len().load(std::memory_order_relaxed) != 0;
+		}
+
+		// The io region the guest builds its command stream in.  Announced as
+		// early as cellGcmMapEaIoAddress, since a patch written before the first
+		// nv308a is otherwise invisible to every store hook.  Repeated calls
+		// extend the union instead of replacing it.
 		static void arm_ring(u32 addr, u32 len, u32 cmd_size)
 		{
 			if (!enabled() || !addr || !len)
@@ -549,8 +556,17 @@ namespace rsx
 				return;
 			}
 
-			// The same region can be announced by cellGcmInit and again by the
-			// first nv308a source; keep one line per distinct range.
+			const u32 old_base = ring_base().load(std::memory_order_relaxed);
+			const u32 old_len = ring_len().load(std::memory_order_relaxed);
+
+			if (old_len)
+			{
+				const u32 lo = std::min(old_base, addr);
+				const u32 hi = std::max(old_base + old_len, addr + len);
+				addr = lo;
+				len = hi - lo;
+			}
+
 			if (ring_base().load(std::memory_order_relaxed) == addr &&
 				ring_len().load(std::memory_order_relaxed) == len)
 			{
@@ -720,9 +736,16 @@ namespace rsx
 				const u32 alt = std::byteswap(slot);
 				const bool suspect = !plausible(slot) && plausible(alt);
 				const bool needle = word == needle_word() || std::byteswap(word) == needle_word();
+				const bool band = world_quad_shape(addr + off) && !authored_word(slot) && authored_word(alt);
 				const bool stage = in_stage;
 
-				if (!in_ring && !in_stage && !needle)
+				// A shape hit is as rare as an exact needle hit and names the
+				// writer for any of the game's animated words, not just the one
+				// the needle happens to hold this run.  Passed through the
+				// needle field of the log so a grep for needle=1 still finds it.
+				const bool hit = needle || band;
+
+				if (!in_ring && !in_stage && !hit)
 				{
 					continue;
 				}
@@ -736,7 +759,7 @@ namespace rsx
 				// word is printed alongside.  Guarded by the same `bswap32-any`
 				// shape and an optional staging-range restriction, so a normal run
 				// is not rewritten.  RSX_FP_STAGE_FIX=stage|io|all.
-				const bool steer = suspect && quad_sibling_plausible(addr + off)
+				const bool steer = (suspect || band) && quad_sibling_plausible(addr + off)
 					&& ((stage && fix_level() >= 1) || (in_ring && fix_level() >= 2));
 
 				if (steer)
@@ -745,9 +768,13 @@ namespace rsx
 					std::memcpy(const_cast<u8*>(mem) + off, &corrected, 4);
 				}
 
-				if (stage || suspect || needle || probe_allow(writer))
+				// With the ring armed across all mapped regions the loose F31
+				// predicate would fill the line cap with noise.  Stage-range
+				// stores keep the full census; outside them only a precise
+				// needle/shape hit is logged.
+				if (stage || hit || probe_allow(writer))
 				{
-					log_word(addr + off, word, slot, alt, suspect, needle, stage, in_ring, steer, writer, pc, thread, detail);
+					log_word(addr + off, word, slot, alt, suspect, hit, stage, in_ring, steer, writer, pc, thread, detail);
 				}
 			}
 
@@ -853,6 +880,42 @@ namespace rsx
 		{
 			const f32 value = std::bit_cast<f32>(bits);
 			return std::isfinite(value) && (value == 0.0f || (std::abs(value) >= 1.0e-6f && std::abs(value) <= 1.0e6f));
+		}
+
+		// The animated word is authored in a narrow band.  The generic
+		// plausible() test above is ~13% likely on random words and misses the
+		// transposed values that land inside [1e-6,1e6]; this shape is exact
+		// enough to name the producer without guessing a literal (the literal
+		// changes every frame).
+		static bool authored_word(u32 bits)
+		{
+			const f32 value = std::bit_cast<f32>(bits);
+			return std::isfinite(value) && value >= 0.315f && value <= 2.222f;
+		}
+
+		static bool world_quad_shape(u32 addr)
+		{
+			const u32 base = addr & ~15u;
+
+			if (!vm::check_addr(base, vm::page_readable, 16))
+			{
+				return false;
+			}
+
+			const u8* mem = static_cast<const u8*>(vm::base(base));
+			u32 words[4] = {};
+			std::memcpy(words, mem, sizeof(words));
+
+			const f32 v0 = std::bit_cast<f32>(de_transpose(words[0]));
+			const f32 v1 = std::bit_cast<f32>(de_transpose(words[1]));
+			const f32 v2 = std::bit_cast<f32>(de_transpose(words[2]));
+			const f32 v3 = std::bit_cast<f32>(de_transpose(words[3]));
+
+			return words[0] == words[2]
+				&& std::abs(v1 - 2.0f) < 1.0e-3f
+				&& std::abs(v3 - 1.0f) < 1.0e-3f
+				&& !authored_word(de_transpose(words[0]))
+				&& authored_word(std::byteswap(de_transpose(words[0])));
 		}
 
 		static u32 needle_word()

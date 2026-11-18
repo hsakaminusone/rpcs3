@@ -1201,6 +1201,18 @@ error_code gcmMapEaIoAddress(ppu_thread& ppu, u32 ea, u32 io, u32 size, bool is_
 	}
 
 	gcm_cfg.IoMapTable[ea] = size;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; the guest maps the io region early and may build
+	// its command buffers immediately after, before the first nv308a gives the
+	// watch a source range to arm from.  Announce every mapping so a producer
+	// write is visible from the first frame.  arm_ring unions the ranges.
+	if (ea && size)
+	{
+		rsx::fp_stage_watch::arm_ring(ea, size, 0);
+	}
+	// EXCISE-END fp-stage-store-watch
+
 	return CELL_OK;
 }
 
