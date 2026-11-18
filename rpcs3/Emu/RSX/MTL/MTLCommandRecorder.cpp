@@ -582,6 +582,19 @@ namespace mtl
 
 		frame_slot& slot = m_slots[m_slot];
 
+		if (!slot.buffer_open)
+		{
+			// A readback can be requested from the RSX thread's local task
+			// (ZCULL sync), which is not necessarily inside a frame.  After the
+			// last commit the buffer is already ended, and Metal 4 asserts in
+			// endCommandBuffer when it has no allocator/storage.  The work that
+			// must be visible is in that earlier commit: awaiting it is what
+			// reenter_slot does, and it opens a fresh buffer for the frame.
+			// Nothing was encoded for this flush, so commit nothing.
+			reenter_slot();
+			return;
+		}
+
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/readback wait/end buffer");

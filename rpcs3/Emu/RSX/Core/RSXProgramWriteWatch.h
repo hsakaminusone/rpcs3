@@ -549,6 +549,14 @@ namespace rsx
 				return;
 			}
 
+			// The same region can be announced by cellGcmInit and again by the
+			// first nv308a source; keep one line per distinct range.
+			if (ring_base().load(std::memory_order_relaxed) == addr &&
+				ring_len().load(std::memory_order_relaxed) == len)
+			{
+				return;
+			}
+
 			ring_base().store(addr, std::memory_order_relaxed);
 			ring_len().store(len, std::memory_order_relaxed);
 
@@ -569,6 +577,16 @@ namespace rsx
 			if (len > 0x100000)
 			{
 				len = 0x100000;
+			}
+
+			// The cellGcmInit arm can be missed (fifo_ctrl not up yet, ioAddress
+			// zero).  A source EA is in the same io region the guest builds
+			// commands in, so arm a 32 MiB window around the first one: the
+			// staging writes that precede later copies then land in the ring.
+			// arm_ring dedupes, so this emits one line for the run.
+			if (ring_len().load(std::memory_order_relaxed) == 0)
+			{
+				arm_ring(addr & ~0x1ff'ffffu, 0x200'0000, 0);
 			}
 
 			std::lock_guard lock(guard());
@@ -680,11 +698,11 @@ namespace rsx
 			const bool in_ring = rl && alo < static_cast<u64>(rb) + rl && static_cast<u64>(rb) < ahi;
 			const bool in_stage = range_hit(addr, size);
 
-			if (!in_ring && !in_stage)
-			{
-				return;
-			}
-
+			// The F31 shape fires on ~13% of random words, so a shape-only hit
+			// outside a watched range would flood the log with noise; an exact
+			// needle hit is rare enough to log from anywhere.  Scan every store
+			// for the needle, and keep the full convention census inside the
+			// watched ranges.
 			const u32 n = std::min<u32>(size, scan_limit);
 			const u8* mem = static_cast<const u8*>(vm::base(addr));
 
@@ -703,6 +721,11 @@ namespace rsx
 				const bool suspect = !plausible(slot) && plausible(alt);
 				const bool needle = word == needle_word() || std::byteswap(word) == needle_word();
 				const bool stage = in_stage;
+
+				if (!in_ring && !in_stage && !needle)
+				{
+					continue;
+				}
 
 				// TODO(excise): level 5; the producer-side experiment.  If the
 				// hypothesis holds - the animated lane is a plain big-endian store
