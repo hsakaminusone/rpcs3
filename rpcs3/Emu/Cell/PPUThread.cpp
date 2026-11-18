@@ -621,6 +621,14 @@ void ppu_write_mmio_aware_u32(u8* vm_base, u32 eal, u32 value)
 
 	// Value is assumed swapped
 	write_to_ptr_unsafe<u32>(vm_base + eal, value);
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; WriteMemory returns before its own watch call when
+	// the store is routed through this MMIO-aware path, so the raw u32 write
+	// above is otherwise invisible.  The hook reads the bytes back after the
+	// store, which is the value the watch must attribute.
+	vm::fp_stage_watch_write(eal, sizeof(u32), "ppu-mmio", 0, false);
+	// EXCISE-END fp-stage-store-watch
 }
 
 extern bool ppu_test_address_may_be_mmio(std::span<const be_t<u32>> insts)
