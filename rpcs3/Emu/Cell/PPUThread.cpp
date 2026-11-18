@@ -5183,6 +5183,15 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{ "__dcbz", reinterpret_cast<u64>(+[](u32 addr){ alignas(64) static constexpr u8 z[128]{}; do_cell_atomic_128_store(addr, z); }) },
 			{ "__resupdate", reinterpret_cast<u64>(vm::reservation_update) },
 			{ "__resinterp", reinterpret_cast<u64>(ppu_reservation_fallback) },
+			// EXCISE-BEGIN fp-stage-store-watch
+			// TODO(excise): level 5; generated stores call this after they have
+			// written, so the staging watch sees the bytes a guest instruction
+			// left in memory.  `is_be` is a compile-time constant per opcode, so
+			// the line separates a plain `stw` (which reverses the bytes) from a
+			// byte-reverse form (stwbrx); `pc` is the guest instruction.
+			{ "__ppu_stage_watch", reinterpret_cast<u64>(+[](u32 addr, u32 size, u32 is_be, u32 pc)
+				{ vm::fp_stage_watch_write(addr, size, is_be ? "ppu-stw" : "ppu-stwbrx", pc, true); }) },
+			// EXCISE-END fp-stage-store-watch
 			{ "__escape", reinterpret_cast<u64>(+ppu_escape) },
 			{ "__read_maybe_mmio32", reinterpret_cast<u64>(+ppu_read_mmio_aware_u32) },
 			{ "__write_maybe_mmio32", reinterpret_cast<u64>(+ppu_write_mmio_aware_u32) },

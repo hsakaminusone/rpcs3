@@ -61,9 +61,35 @@
  *                          serialise                       (one command per encoder, wait-idle per draw)
  *                          force-fp=<ids>                  (colour output of the listed compiled fp ids is forced magenta; own archive)
  *                          force-fp-tex=<count>            (same, for fps enabling <count> textures; own archive)
+ *                          literal-provenance              (fill vs draw classification of the fragment-constant block; level 5)
+ *                          freeze-fc                       (replay the first fill of each fp; level 5)
+ *                          freeze-fs-offset[=<n>]          (every draw reads block <n>, default 0; level 5)
+ *                          freeze-present[=<frames>]       (hold the present source for <frames>, default 120; level 5)
  *                          lod0                            (force min LOD 0)
  *                          dump-tex=<hex>                  (every upload and every sample of that guest address dumps its bytes; bypasses the dedupe and the run budgets; 16 files, 64 MB per run)
  *                          dump-draw=<id>                  (the named draw's raw persistent and volatile vertex streams dump; 16 MB per run)
+ *
+ * The fragment-literal family is a separate switch, because it is shared with
+ * the program cache rather than the Metal renderer:
+ *   RSX_FP_LITERAL_LOG      every world-family constant fill, one folded line
+ *                           per changed image: the guest words, the f32 the
+ *                           shader gets, the FIFO cursor/PUT and a convention
+ *                           census (`conv`, `xfp`) that names quads arriving in
+ *                           the other byte order.
+ *   RSX_FP_WATCH_LOG        the global blit-write ring (`ring`), the first
+ *                           sight of each program image (`claim`), and the ring
+ *                           scans for the tail (`fill-tail`) and the whole image
+ *                           (`fill-world`).  Each nv308a record carries the FIFO
+ *                           cursor/PUT, the span address, both byte-order
+ *                           readings, and a guest-memory comparison (`same=`).
+ *   RSX_FP_LITERAL_FIX      the functional oracle.  `bswap32` reverses any lane
+ *                           whose delivered value is implausible; `halves`
+ *                           swaps the 16-bit halves; `bswap32-all` restricts to
+ *                           lanes 0/2 of the two trailing quads of a
+ *                           `[W,2,W,1]` image and reverses both the huge and
+ *                           the tiny values, leaving the authored lanes and any
+ *                           already-plausible value untouched.
+ *   RSX_FP_LITERAL_FIX_LOG  one line per corrected lane.
  *
  * With the level at 5 a per-address upload/sample census is kept for the whole
  * run and printed when a capture window closes (the Metal 4: census lines, plus
@@ -199,6 +225,7 @@ namespace mtl::probe
 	//   replace-units=0,2,5               ...narrowed to the listed units
 	//   no-alpha-test no-depth no-cull sentinel poison heaps serialise lod0
 	//   dump-tex=<hex> dump-draw=<n> force-fp=<ids> force-fp-tex=<count>
+	//   literal-provenance freeze-fc freeze-fs-offset[=<n>] freeze-present[=<frames>]
 	// Read once.
 	inline std::vector<std::string> variant_tokens()
 	{

@@ -3,11 +3,20 @@
 #include <util/types.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+
+// EXCISE-BEGIN fp-stage-store-watch-include
+// TODO(excise): level 5; the stage watcher reads guest memory at a post-store
+// address, so it needs vm::base and the guest address space.
+#include "Emu/Memory/vm.h"
+// EXCISE-END fp-stage-store-watch-include
 
 // EXCISE-BEGIN fp-literal-write-watch
 // TODO(excise): level 5; attributes a change in a fragment program's trailing
@@ -62,12 +71,13 @@ namespace rsx
 		{
 			bool used = false;
 			const char* writer = nullptr;
+			u64 seq = 0;
 			u64 dst = 0;
 			u32 size = 0;
 			u64 src = 0;
 			u8 src_bytes[32] = {};
 			u8 dst_bytes[32] = {};
-			char detail[192] = {};
+			char detail[512] = {};
 		};
 		// EXCISE-END fp-literal-write-ring
 
@@ -147,6 +157,32 @@ namespace rsx
 			std::memcpy(e->shadow, e->tail, n);
 
 			// EXCISE-BEGIN fp-literal-write-ring
+			// TODO(excise): level 5; first sight of a program image.  The host
+			// pointer, the ucode offset/length and the tail hash make the fill,
+			// draw and ring lines joinable without guessing which image is
+			// which.  Bounded to the first 256 claims.
+			static unsigned s_claims = 0;
+
+			if (s_claims < 256)
+			{
+				u64 claim_hash = 0xcbf29ce484222325ull;
+
+				for (u32 i = 0; i < n; ++i)
+				{
+					claim_hash = (claim_hash ^ e->tail[i]) * 0x100000001b3ull;
+				}
+
+				if (std::FILE* out = std::fopen(std::getenv("RSX_FP_WATCH_LOG"), "a"))
+				{
+					std::fprintf(out, "claim #%u img=%llx off=%u len=%u tail=%u hash=%016llx\n",
+						++s_claims, static_cast<unsigned long long>(addr), offset, len, n,
+						static_cast<unsigned long long>(claim_hash));
+					std::fclose(out);
+				}
+			}
+			// EXCISE-END fp-literal-write-ring
+
+			// EXCISE-BEGIN fp-literal-write-ring
 			// TODO(excise): level 5; first sight of this image.  Dump every
 			// instrumented write that landed inside its range before now -- those
 			// are the writes the watch could not have attributed (they predate the
@@ -187,7 +223,7 @@ namespace rsx
 					continue;
 				}
 
-				char buffer[192] = {};
+				char buffer[512] = {};
 				detail(buffer, sizeof(buffer));
 
 				report(e, writer, addr, size, src, src_len, buffer, e->tail);
@@ -208,12 +244,14 @@ namespace rsx
 		static void record_write(const char* writer, u64 addr, u32 size, const void* src, u32 src_len, Detail& detail)
 		{
 			static unsigned cursor = 0;
+			static u64 s_seq = 0;
 			write_record& r = ring()[cursor];
 			cursor = (cursor + 1) % write_ring_slots;
 
 			r = write_record{};
 			r.used = true;
 			r.writer = writer;
+			r.seq = ++s_seq;
 			r.dst = addr;
 			r.size = size;
 			r.src = reinterpret_cast<u64>(src);
@@ -260,7 +298,8 @@ namespace rsx
 				u32 dstw[4], srcw[4];
 				std::memcpy(dstw, r.dst_bytes, sizeof(dstw));
 				std::memcpy(srcw, r.src_bytes, sizeof(srcw));
-				std::fprintf(out, "  ring %s dst=%llx size=%u src=%llx %s\n",
+				std::fprintf(out, "  ring seq=%llu %s dst=%llx size=%u src=%llx %s\n",
+					static_cast<unsigned long long>(r.seq),
 					r.writer, static_cast<unsigned long long>(r.dst), r.size,
 					static_cast<unsigned long long>(r.src), r.detail);
 				std::fprintf(out, "    dst_bytes=%08x %08x %08x %08x src_bytes=%08x %08x %08x %08x\n",
@@ -431,3 +470,711 @@ namespace rsx
 	};
 }
 // EXCISE-END fp-literal-write-watch
+
+// EXCISE-BEGIN fp-stage-store-watch
+// TODO(excise): level 5; the phase-3 producer watch.  Names the code that wrote
+// a byte-reversed staging word, by hooking every layer that can store into the
+// RSX command ring: guest PPU stores (LLVM and interpreter/HLE through
+// vm::write), SPU DMA, HLE command builders, and the RSX blit engines.  The
+// watched set is the io region armed at cellGcmInit plus every guest range an
+// nv308a chunk has read from, so a store is reported when it lands where the
+// blit engine will later find it, not merely when its value looks odd.
+//
+// A 4-byte word is logged when any of these holds:
+//   - its address is inside an nv308a source range (unconditional; this is the
+//     precise trap: the ring is re-written every frame, so the producer repeats);
+//   - `!plausible(T(word)) && plausible(bswap32(T(word)))` (the F31 shape, used
+//     for the io region outside a known staging range);
+//   - it equals the configured needle word (RSX_FP_STAGE_NEEDLE, default the
+//     observed a1273fbd), so the exact defect value is never filtered out.
+// Each distinct (site, address, word) prints once; repeats are counted into a
+// per-site cap.  The line carries the previous word seen at that address, the
+// de-transposed decode, both endian conventions, the writer label, the guest
+// PC (writer layers that have one) and the writer-specific detail string.
+// Bounded (65536 lines, 4096 per site, 2048 ranges) and inert unless
+// RSX_FP_STAGE_WATCH names a file.
+namespace rsx
+{
+	class fp_stage_watch
+	{
+	public:
+		static constexpr u32 max_ranges = 2048;
+		static constexpr u32 max_lines = 65536;
+		static constexpr u32 max_lines_per_site = 4096;
+		static constexpr u32 dedupe_slots = 65536;
+		static constexpr u32 shadow_slots = 16384;
+		static constexpr u32 scan_limit = 0x8000;
+
+		static bool enabled()
+		{
+			static const bool value = [] {
+				const char* text = std::getenv("RSX_FP_STAGE_WATCH");
+				return text && *text;
+			}();
+
+			return value;
+		}
+
+		// Per-layer kill switches, for bisecting a crash without a rebuild.
+		// RSX_FP_STAGE_NO_JIT / _NO_SPU / _NO_VMW each disable one hook family.
+		static bool jit_hook()
+		{
+			static const bool value = !std::getenv("RSX_FP_STAGE_NO_JIT");
+			return value;
+		}
+
+		static bool spu_hook()
+		{
+			static const bool value = !std::getenv("RSX_FP_STAGE_NO_SPU");
+			return value;
+		}
+
+		static bool vmw_hook()
+		{
+			static const bool value = !std::getenv("RSX_FP_STAGE_NO_VMW");
+			return value;
+		}
+
+		static const char* path()
+		{
+			return std::getenv("RSX_FP_STAGE_WATCH");
+		}
+
+		// The io region the guest builds its command stream in.  Armed once, at
+		// cellGcmInit, so a patch written before the first nv308a is still seen.
+		static void arm_ring(u32 addr, u32 len, u32 cmd_size)
+		{
+			if (!enabled() || !addr || !len)
+			{
+				return;
+			}
+
+			ring_base().store(addr, std::memory_order_relaxed);
+			ring_len().store(len, std::memory_order_relaxed);
+
+			std::lock_guard lock(guard());
+			emit("stage-arm ring=%08x len=%08x cmd=%08x\n", addr, len, cmd_size);
+		}
+
+		// Called by nv308a with the guest address a chunk consumed.  Adjacent and
+		// overlapping ranges are merged, so the command stream's inline payload
+		// collapses to a handful of intervals instead of thousands of quads.
+		static void watch_range(u32 addr, u32 len)
+		{
+			if (!enabled() || !addr || !len)
+			{
+				return;
+			}
+
+			if (len > 0x100000)
+			{
+				len = 0x100000;
+			}
+
+			std::lock_guard lock(guard());
+
+			// Merge repeatedly: extending one range can make it touch another.
+			bool merged = true;
+
+			while (merged)
+			{
+				merged = false;
+				u32 count = range_count().load(std::memory_order_relaxed);
+
+				for (u32 i = 0; i < count; ++i)
+				{
+					range& r = ranges()[i];
+					const u64 rlo = r.addr;
+					const u64 rhi = static_cast<u64>(r.addr) + r.len;
+					const u64 alo = addr;
+					const u64 ahi = static_cast<u64>(addr) + len;
+
+					// Overlap, or within 64 bytes (a command packet header
+					// separates two payloads often enough to matter).
+					if (alo <= rhi + 64 && rlo <= ahi + 64)
+					{
+						const u64 lo = std::min<u64>(alo, rlo);
+						const u64 hi = std::max<u64>(ahi, rhi);
+						r.addr = static_cast<u32>(lo);
+						r.len = static_cast<u32>(hi - lo);
+
+						// Remove the last entry into this slot, so the array stays
+						// dense and lock-free membership scans stay short.
+						if (i + 1 != count)
+						{
+							ranges()[i] = ranges()[count - 1];
+						}
+
+						range_count().store(count - 1, std::memory_order_release);
+						merged = true;
+						break;
+					}
+				}
+			}
+
+			u32 count = range_count().load(std::memory_order_relaxed);
+			u32 slot = 0;
+
+			if (count < max_ranges)
+			{
+				slot = count;
+
+				// Fill the slot before publishing the count: a reader that sees
+				// the new count must never observe an entry that is not yet
+				// written.
+				ranges()[slot].addr = addr;
+				ranges()[slot].len = len;
+				range_count().store(count + 1, std::memory_order_release);
+			}
+			else
+			{
+				slot = range_cursor()++ % max_ranges;
+				ranges()[slot].addr = addr;
+				ranges()[slot].len = len;
+			}
+		}
+
+		// Cheap pre-check, so a caller on a hot path can decide whether asking
+		// for the thread name and formatting a detail string is worth it.
+		static bool interesting(u32 addr, u32 size)
+		{
+			if (!enabled() || !size || !addr || static_cast<u64>(addr) + size > 0x1'0000'0000ull)
+			{
+				return false;
+			}
+
+			const u64 alo = addr;
+			const u64 ahi = alo + size;
+			const u32 rb = ring_base().load(std::memory_order_relaxed);
+			const u32 rl = ring_len().load(std::memory_order_relaxed);
+
+			if (rl && alo < static_cast<u64>(rb) + rl && static_cast<u64>(rb) < ahi)
+			{
+				return true;
+			}
+
+			return range_hit(addr, size);
+		}
+
+		// A store has completed at `addr` (size bytes).  Reads the bytes back from
+		// guest memory, so every layer calls the same entry point regardless of
+		// whether it knows the value it wrote.
+		static void note_mem(u32 addr, u32 size, const char* writer, u32 pc, const char* thread, const char* detail)
+		{
+			if (!enabled() || !size || !addr)
+			{
+				return;
+			}
+
+			// A store into a staging range whose page is not committed would
+			// fault on the read-back below, so the mapping is checked first.
+			if (!vm::check_addr(addr, vm::page_readable, size))
+			{
+				return;
+			}
+
+			const u64 alo = addr;
+			const u64 ahi = alo + size;
+			const u32 rb = ring_base().load(std::memory_order_relaxed);
+			const u32 rl = ring_len().load(std::memory_order_relaxed);
+			const bool in_ring = rl && alo < static_cast<u64>(rb) + rl && static_cast<u64>(rb) < ahi;
+			const bool in_stage = range_hit(addr, size);
+
+			if (!in_ring && !in_stage)
+			{
+				return;
+			}
+
+			const u32 n = std::min<u32>(size, scan_limit);
+			const u8* mem = static_cast<const u8*>(vm::base(addr));
+
+			for (u32 off = 0; off + 4 <= n; ++off)
+			{
+				if (((addr + off) & 3) != 0)
+				{
+					continue;
+				}
+
+				u32 word = 0;
+				std::memcpy(&word, mem + off, 4);
+
+				const u32 slot = de_transpose(word);
+				const u32 alt = std::byteswap(slot);
+				const bool suspect = !plausible(slot) && plausible(alt);
+				const bool needle = word == needle_word() || std::byteswap(word) == needle_word();
+				const bool stage = in_stage;
+
+				// TODO(excise): level 5; the producer-side experiment.  If the
+				// hypothesis holds - the animated lane is a plain big-endian store
+				// of the word the fill will `T` - then byte-reversing the word the
+				// store left in guest memory makes the image word the fill expects.
+				// The correction is applied after the store, so the log below still
+				// records what the producer wrote (`fix=0` values) and the corrected
+				// word is printed alongside.  Guarded by the same `bswap32-any`
+				// shape and an optional staging-range restriction, so a normal run
+				// is not rewritten.  RSX_FP_STAGE_FIX=stage|io|all.
+				const bool steer = suspect && quad_sibling_plausible(addr + off)
+					&& ((stage && fix_level() >= 1) || (in_ring && fix_level() >= 2));
+
+				if (steer)
+				{
+					const u32 corrected = std::byteswap(word);
+					std::memcpy(const_cast<u8*>(mem) + off, &corrected, 4);
+				}
+
+				if (stage || suspect || needle || probe_allow(writer))
+				{
+					log_word(addr + off, word, slot, alt, suspect, needle, stage, in_ring, steer, writer, pc, thread, detail);
+				}
+			}
+
+			// A 1- or 2-byte store cannot complete an image word by itself, but
+			// inside a known staging range its bytes are part of one.  Log it so a
+			// split producer is visible; the address and byte value compose later.
+			if (in_stage && n < 4)
+			{
+				log_partial(addr, size, mem, n, writer, pc, thread, detail);
+			}
+		}
+
+		// The submit boundary.  The PPU thread and its PC at the store that raised
+		// the ring's put name the frame that carried a staging write.
+		static void log_submit(u64 get_put, u32 pc, const char* thread)
+		{
+			if (!enabled())
+			{
+				return;
+			}
+
+			std::lock_guard lock(guard());
+			emit("stage-submit get_put=%016llx pc=%08x thread=%s\n",
+				static_cast<unsigned long long>(get_put), pc, thread ? thread : "-");
+		}
+
+	private:
+		struct range
+		{
+			u32 addr = 0;
+			u32 len = 0;
+		};
+
+		static std::mutex& guard()
+		{
+			static std::mutex value;
+			return value;
+		}
+
+		static std::atomic<u32>& ring_base()
+		{
+			static std::atomic<u32> value{0};
+			return value;
+		}
+
+		static std::atomic<u32>& ring_len()
+		{
+			static std::atomic<u32> value{0};
+			return value;
+		}
+
+		static std::atomic<u32>& range_count()
+		{
+			static std::atomic<u32> value{0};
+			return value;
+		}
+
+		static range* ranges()
+		{
+			static range value[max_ranges];
+			return value;
+		}
+
+		static u32& range_cursor()
+		{
+			static u32 value = 0;
+			return value;
+		}
+
+		// Lock-free membership test.  Writers publish the count with release and
+		// never shrink below a slot a reader may be looking at, so a torn read is
+		// a missed range, not a crash; the ring check catches the common case.
+		static bool range_hit(u32 addr, u32 size)
+		{
+			const u32 count = range_count().load(std::memory_order_acquire);
+			const u64 alo = addr;
+			const u64 ahi = alo + size;
+
+			for (u32 i = 0; i < count && i < max_ranges; ++i)
+			{
+				const range& r = ranges()[i];
+				const u64 rlo = r.addr;
+				const u64 rhi = rlo + r.len;
+
+				if (alo < rhi && rlo < ahi)
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		// `T` from the fragment-constant fill: swap the bytes inside each 16-bit
+		// half.  The fill applies it to every image word, so an image word `w`
+		// decodes to `T(w)`.
+		static u32 de_transpose(u32 word)
+		{
+			return ((word & 0x00ff00ffu) << 8) | ((word & 0xff00ff00u) >> 8);
+		}
+
+		static bool plausible(u32 bits)
+		{
+			const f32 value = std::bit_cast<f32>(bits);
+			return std::isfinite(value) && (value == 0.0f || (std::abs(value) >= 1.0e-6f && std::abs(value) <= 1.0e6f));
+		}
+
+		static u32 needle_word()
+		{
+			static const u32 value = [] {
+				const char* text = std::getenv("RSX_FP_STAGE_NEEDLE");
+				char* end = nullptr;
+				const unsigned long parsed = text && *text ? std::strtoul(text, &end, 16) : 0;
+				return (end && *end == '\0' && end != text) ? static_cast<u32>(parsed) : 0xa1273fbdu;
+			}();
+
+			return value;
+		}
+
+		// RSX_FP_STAGE_FIX=stage|io|all.  Level 0 is off and is the default.
+		// Level 1 corrects a suspect word only inside a known nv308a source
+		// range; level 2 also corrects the ring outside those ranges.  `all` is
+		// accepted as an explicit spelling of level 2.
+		static u32 fix_level()
+		{
+			static const u32 value = [] {
+				const char* text = std::getenv("RSX_FP_STAGE_FIX");
+
+				if (!text || !*text || !std::strcmp(text, "0"))
+				{
+					return 0u;
+				}
+
+				if (!std::strcmp(text, "stage"))
+				{
+					return 1u;
+				}
+
+				if (!std::strcmp(text, "io") || !std::strcmp(text, "all"))
+				{
+					return 2u;
+				}
+
+				return 0u;
+			}();
+
+			return value;
+		}
+
+		// The first few stores of each writer are logged regardless of shape, so
+		// a run can prove a layer's hook is live.  Without it a narrow shape
+		// filter is indistinguishable from a hook that is never called.  Taken
+		// before the guard on purpose: the count is approximate, and a collision
+		// only costs a repeated line.
+		static bool probe_allow(const char* writer)
+		{
+			struct entry
+			{
+				std::atomic<const char*> writer{nullptr};
+				std::atomic<u32> lines{0};
+			};
+
+			static entry table[64] = {};
+
+			for (entry& e : table)
+			{
+				const char* current = e.writer.load(std::memory_order_relaxed);
+
+				if (!current || current == writer)
+				{
+					e.writer.store(writer, std::memory_order_relaxed);
+
+					if (e.lines.load(std::memory_order_relaxed) >= 8)
+					{
+						return false;
+					}
+
+					e.lines.fetch_add(1, std::memory_order_relaxed);
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		// The defect sits in a 16-byte quad whose other words decode correctly
+		// (2.0, 1.0).  Requiring two plausible siblings keeps the corrector off
+		// ring data that merely happens to contain a byte-reversed float.  The
+		// base is 16-byte aligned, so the read never crosses a host page.
+		static bool quad_sibling_plausible(u32 addr)
+		{
+			if (!addr)
+			{
+				return false;
+			}
+
+			const u32 base = addr & ~15u;
+
+			if (!vm::check_addr(base, vm::page_readable, 16))
+			{
+				return false;
+			}
+
+			const u8* mem = static_cast<const u8*>(vm::base(base));
+			u32 found = 0;
+
+			for (u32 off = 0; off < 16; off += 4)
+			{
+				if (base + off == addr)
+				{
+					continue;
+				}
+
+				u32 word = 0;
+				std::memcpy(&word, mem + off, 4);
+
+				if (plausible(de_transpose(word)) || plausible(de_transpose(std::byteswap(word))))
+				{
+					++found;
+				}
+			}
+
+			return found >= 2;
+		}
+
+		// A fixed execed direct-mapped dedupe table.  The key is unique per
+		// (caller site, address, word); a collision only costs a repeated line,
+		// never a missed one.
+		static u64* dedupe()
+		{
+			static u64 value[dedupe_slots] = {};
+			return value;
+		}
+
+		// Direct-mapped index.  The tables are powers of two and only `dedupe()`
+		// is 65536 entries, so the high bits of the mixed key cannot be used
+		// directly: a 64-bit key shifted by 48 reaches 65535 and would run past
+		// `shadows()`.  Mix first, then mask with the table size.
+		static u32 hash_slot(u64 key, u32 count)
+		{
+			return static_cast<u32>((key * 0x9e3779b97f4a7c15ull) >> 32) & (count - 1);
+		}
+
+		static bool dedupe_insert(u64 key)
+		{
+			key |= 1ull;
+			u64& slot = dedupe()[hash_slot(key, dedupe_slots)];
+
+			if (slot == key)
+			{
+				return false;
+			}
+
+			slot = key;
+			return true;
+		}
+
+		struct site_entry
+		{
+			u32 key = 0;
+			u32 lines = 0;
+		};
+
+		static site_entry* sites()
+		{
+			static site_entry value[256] = {};
+			return value;
+		}
+
+		static bool site_allow(u32 key)
+		{
+			for (u32 i = 0; i < 256; ++i)
+			{
+				site_entry& entry = sites()[i];
+
+				if (entry.key == key || !entry.lines)
+				{
+					entry.key = key;
+
+					if (entry.lines >= max_lines_per_site)
+					{
+						return false;
+					}
+
+					++entry.lines;
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		struct shadow_entry
+		{
+			u64 key = 0;
+			u32 word = 0;
+			bool valid = false;
+		};
+
+		static shadow_entry* shadows()
+		{
+			static shadow_entry value[shadow_slots] = {};
+			return value;
+		}
+
+		// The previous word this site wrote at this address.  For an alternating
+		// lane this is the other state, which is what makes a flip readable.
+		static bool shadow_peek(u64 key, u32& word)
+		{
+			const shadow_entry& entry = shadows()[hash_slot(key, shadow_slots)];
+
+			if (entry.valid && entry.key == key)
+			{
+				word = entry.word;
+				return true;
+			}
+
+			return false;
+		}
+
+		static void shadow_store(u64 key, u32 word)
+		{
+			shadow_entry& entry = shadows()[hash_slot(key, shadow_slots)];
+			entry.key = key;
+			entry.word = word;
+			entry.valid = true;
+		}
+
+		static void log_word(u32 waddr, u32 word, u32 slot, u32 alt, bool suspect, bool needle_hit,
+			bool stage, bool ring, bool steer, const char* writer, u32 pc, const char* thread, const char* detail)
+		{
+			const u64 site_key = (static_cast<u64>(pc) << 32) ^ (static_cast<u64>(reinterpret_cast<uptr>(writer)) >> 4);
+			const u64 dedupe_key = site_key ^ (static_cast<u64>(waddr) << 20) ^ (static_cast<u64>(word) << 1) ^ (stage ? 2ull : 0ull);
+			const u64 shadow_key = site_key ^ (static_cast<u64>(waddr) << 20);
+
+			// The cap is checked before the mutex, so a saturated run does not
+			// serialise every store behind a lock that will discard it anyway.
+			if (line_count().load(std::memory_order_relaxed) >= max_lines)
+			{
+				if (!limit_reported().exchange(true))
+				{
+					std::lock_guard lock(guard());
+					emit("stage-limit lines=%u\n", max_lines);
+				}
+
+				return;
+			}
+
+			std::lock_guard lock(guard());
+
+			if (!site_allow(static_cast<u32>(site_key ^ (site_key >> 32))))
+			{
+				return;
+			}
+
+			if (!dedupe_insert(dedupe_key))
+			{
+				return;
+			}
+
+			if (line_count() >= max_lines)
+			{
+				return;
+			}
+
+			++line_count();
+
+			u32 old = 0;
+			const bool has_old = shadow_peek(shadow_key, old);
+			shadow_store(shadow_key, word);
+
+			char old_text[16] = "--------";
+
+			if (has_old)
+			{
+				std::snprintf(old_text, sizeof(old_text), "%08x", old);
+			}
+
+			emit("stage-store writer=%s addr=%08x new=%08x old=%s slot=%08x alt=%08x suspect=%d needle=%d stage=%d ring=%d fix=%d pc=%08x thread=%s detail=%s\n",
+				writer, waddr, word, old_text, slot, alt,
+				suspect ? 1 : 0, needle_hit ? 1 : 0, stage ? 1 : 0, ring ? 1 : 0,
+				steer ? 1 : 0, pc, thread ? thread : "-", detail ? detail : "-");
+		}
+
+		static void log_partial(u32 addr, u32 size, const u8* bytes, u32 n, const char* writer, u32 pc, const char* thread, const char* detail)
+		{
+			u32 packed = 0;
+			std::memcpy(&packed, bytes, std::min<u32>(n, 4));
+
+			const u64 site_key = (static_cast<u64>(pc) << 32) ^ (static_cast<u64>(reinterpret_cast<uptr>(writer)) >> 4);
+			const u64 dedupe_key = site_key ^ (static_cast<u64>(addr) << 20) ^ (static_cast<u64>(packed) << 3) ^ 0x5ull;
+
+			std::lock_guard lock(guard());
+
+			if (!site_allow(static_cast<u32>(site_key ^ (site_key >> 32))) || !dedupe_insert(dedupe_key))
+			{
+				return;
+			}
+
+			if (line_count() >= max_lines)
+			{
+				return;
+			}
+
+			++line_count();
+
+			emit("stage-partial writer=%s addr=%08x size=%u bytes=%08x pc=%08x thread=%s detail=%s\n",
+				writer, addr, size, packed, pc, thread ? thread : "-", detail ? detail : "-");
+		}
+
+		static std::atomic<u32>& line_count()
+		{
+			static std::atomic<u32> value{0};
+			return value;
+		}
+
+		static std::atomic<bool>& limit_reported()
+		{
+			static std::atomic<bool> value{false};
+			return value;
+		}
+
+		// The caller holds the guard.
+		static void emit(const char* format, ...)
+		{
+			static std::FILE* file = nullptr;
+
+			if (!file)
+			{
+				const char* name = path();
+
+				if (!name || !*name)
+				{
+					return;
+				}
+
+				file = std::fopen(name, "w");
+			}
+
+			if (!file)
+			{
+				return;
+			}
+
+			va_list args;
+			va_start(args, format);
+			std::vfprintf(file, format, args);
+			va_end(args);
+			std::fflush(file);
+		}
+	};
+}
+// EXCISE-END fp-stage-store-watch

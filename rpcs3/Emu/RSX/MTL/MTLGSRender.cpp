@@ -2933,6 +2933,83 @@ namespace mtl
 				black, dark, slot.width * slot.height);
 		}
 
+		// EXCISE-BEGIN tape-detail
+		// TODO(excise): level 5; per-region detail energy for every taped slot, so
+		// the residual blur (H8) is attributed by comparing the world colour target
+		// with the present of the same frame.  Energy is the mean absolute luma
+		// gradient (horizontal plus vertical), reported for the left/right and
+		// top/bottom halves of the slot.  A sharp world target with a low-energy
+		// present means the blur is added between them; both low means the world
+		// draw itself is soft.  CPU-only on bytes already made visible by the wait
+		// above, so no GPU work and no extra copy.
+		for (const diagnostic_tape_slot& slot : diagnostic_tape)
+		{
+			if (!slot.valid || !slot.buffer || slot.width < 2 || slot.height < 2)
+			{
+				continue;
+			}
+
+			const u8* bytes = slot_bytes(slot);
+
+			if (!bytes)
+			{
+				continue;
+			}
+
+			const auto energy = [&](u32 xa, u32 xb, u32 ya, u32 yb) -> f64
+			{
+				if (xb <= xa + 1 || yb <= ya)
+				{
+					return 0.0;
+				}
+
+				u64 sum = 0;
+				u64 count = 0;
+
+				for (u32 y = ya; y < yb; ++y)
+				{
+					const u8* row = bytes + static_cast<u64>(y) * slot.row_pitch;
+
+					for (u32 x = xa; x + 1 < xb; ++x)
+					{
+						const u8* p = row + x * 4u;
+						const u8* q = row + (x + 1) * 4u;
+						sum += static_cast<u64>(std::abs((q[0] + q[1] + q[2]) - (p[0] + p[1] + p[2])));
+						++count;
+					}
+				}
+
+				for (u32 y = ya; y + 1 < yb; ++y)
+				{
+					const u8* row = bytes + static_cast<u64>(y) * slot.row_pitch;
+					const u8* next = row + slot.row_pitch;
+
+					for (u32 x = xa; x < xb; ++x)
+					{
+						const u8* p = row + x * 4u;
+						const u8* q = next + x * 4u;
+						sum += static_cast<u64>(std::abs((q[0] + q[1] + q[2]) - (p[0] + p[1] + p[2])));
+						++count;
+					}
+				}
+
+				return count ? static_cast<f64>(sum) / count : 0.0;
+			};
+
+			const u32 mid_x = slot.width / 2;
+			const u32 mid_y = slot.height / 2;
+			const f64 left = energy(0, mid_x, 0, slot.height);
+			const f64 right = energy(mid_x, slot.width, 0, slot.height);
+			const f64 top = energy(0, slot.width, 0, mid_y);
+			const f64 bottom = energy(0, slot.width, mid_y, slot.height);
+
+			MTL_NOTE_WITNESS(5, "Metal 4: tape detail frame %llu draw %u unit %u addr 0x%x %ux%u kind %s %s left %.3f right %.3f top %.3f bottom %.3f",
+				static_cast<unsigned long long>(slot.frame), slot.draw, slot.unit, slot.address,
+				slot.width, slot.height, slot.present ? "present" : "sample",
+				slot.copy ? "copy" : "live", left, right, top, bottom);
+		}
+		// EXCISE-END tape-detail
+
 		// The present stream in frame order.  A newly-black pixel is the defect's
 		// own signature: it is pure #000000 now and was not pure black in the
 		// previous presented frame.  The count, the bounding box and the busiest
@@ -2954,6 +3031,71 @@ namespace mtl
 			{
 				return a->frame < b->frame;
 			});
+
+			// EXCISE-BEGIN tape-class
+			// TODO(excise): level 5; per-present class verdict.  The strobe's
+			// three states are separable on the presented bytes alone (exact
+			// black, exact white, transitional) and the class sequence is what
+			// scores a run: the oracle succeeds when every present is
+			// `mixed`/lit and no `black`/`white` remains.  Sampling is bounded
+			// to 4096 pixels per present and the pixels are already CPU-visible
+			// after the wait above, so this adds no GPU work.
+			for (const diagnostic_tape_slot* slot : presents)
+			{
+				const u8* bytes = slot_bytes(*slot);
+
+				if (!bytes)
+				{
+					continue;
+				}
+
+				const u64 total = static_cast<u64>(slot->width) * slot->height;
+				const u32 stride = static_cast<u32>(std::max<u64>(1, total / 4096));
+				u64 sum = 0;
+				u32 peak = 0;
+				u32 pure_black = 0;
+				u32 pure_white = 0;
+				u32 dark = 0;
+				u32 sampled = 0;
+
+				for (u64 index = 0; index < total; index += stride)
+				{
+					const u32 x = static_cast<u32>(index % slot->width);
+					const u32 y = static_cast<u32>(index / slot->width);
+					const u8* pixel = bytes + static_cast<u64>(y) * slot->row_pitch + x * 4u;
+					const u32 r = pixel[0];
+					const u32 g = pixel[1];
+					const u32 b = pixel[2];
+					const u32 hi = std::max({ r, g, b });
+
+					sum += r + g + b;
+					peak = std::max(peak, hi);
+					pure_black += (r | g | b) == 0 ? 1u : 0u;
+					pure_white += (r & g & b) == 255 ? 1u : 0u;
+					dark += hi <= 16 ? 1u : 0u;
+					++sampled;
+				}
+
+				if (!sampled)
+				{
+					continue;
+				}
+
+				const f64 mean = static_cast<f64>(sum) / (sampled * 3.0);
+				const f64 black_frac = static_cast<f64>(pure_black) / sampled;
+				const f64 white_frac = static_cast<f64>(pure_white) / sampled;
+				const f64 dark_frac = static_cast<f64>(dark) / sampled;
+				const char* class_name = (black_frac >= 0.90) ? "black"
+					: (white_frac >= 0.90) ? "white"
+					: (dark_frac >= 0.90) ? "dark"
+					: "mixed";
+
+				MTL_NOTE_WITNESS(5, "Metal 4: tape class frame %llu addr 0x%x %ux%u path %s %s mean %.1f peak %u black %.3f white %.3f dark %.3f sampled %u",
+					static_cast<unsigned long long>(slot->frame), slot->address, slot->width, slot->height,
+					slot->copy ? "copy" : "live", class_name, mean, peak,
+					black_frac, white_frac, dark_frac, sampled);
+			}
+			// EXCISE-END tape-class
 
 			for (usz index = 1; index < presents.size(); ++index)
 			{
@@ -3190,6 +3332,420 @@ namespace mtl
 			address = 0;
 		}
 	}
+
+	// EXCISE-BEGIN literal-provenance
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=literal-provenance.  The fill and the
+	// draw are two different moments, and the dark-world work could not say which
+	// of them moved.  One record per compiled fragment id is taken at the fill and
+	// compared at every draw, so a frame is classified instead of guessed:
+	//
+	//   stable          the ring block and the live image are the fill's own bytes
+	//   image-patched   the guest rewrote the ucode between the fill and the draw
+	//   ring-rewritten  something wrote the ring block after the fill (same buffer)
+	//   ring-replaced   the ring grew and the fill's buffer is no longer the bound one
+	//   offset-mismatch the draw reads a block the fill did not write
+	//   no-fill         no fill has been seen for this program
+	//
+	// `authored` is an eight-bit mask over the last two quads: bit i is set when
+	// that 4-byte lane still equals the image captured at compile time
+	// (program_pipeline.h, diagnostic_ucode_tail).  It is what separates the bytes
+	// the guest patched from the bytes the program was compiled with, per lane,
+	// without decoding either.  Bounded: 64 ids, 4096 lines.
+	struct literal_provenance_record
+	{
+		u32 id = 0;
+		u32 count = 0;
+		u32 fill_index = 0;
+		MTL::GPUAddress fill_ring = 0;
+		u64 fill_time = 0;
+		u64 image_hash = 0;
+		u32 image_length = 0;
+		u32 tail[8] = {};
+		u32 authored = 0;
+		u32 fills = 0;
+		u32 last_class = ~0u;
+		u64 last_draw = 0;
+	};
+
+	literal_provenance_record* literal_provenance_record_for(u32 id)
+	{
+		static literal_provenance_record s_records[64] = {};
+		static u32 s_count = 0;
+
+		for (u32 i = 0; i < s_count; ++i)
+		{
+			if (s_records[i].id == id)
+			{
+				return &s_records[i];
+			}
+		}
+
+		if (s_count >= 64)
+		{
+			return nullptr;
+		}
+
+		literal_provenance_record* record = &s_records[s_count++];
+		record->id = id;
+		return record;
+	}
+
+	bool literal_provenance_armed()
+	{
+		static const bool armed = probe::variant("literal-provenance");
+		return armed;
+	}
+
+	void literal_provenance_fill(u32 id, u32 count, u32 fill_index, MTL::GPUAddress ring,
+		const vec4_block* blocks, const u8* image, u32 length, const u32* compiled_tail, u32 compiled_words)
+	{
+		literal_provenance_record* record = literal_provenance_record_for(id);
+
+		if (!record)
+		{
+			return;
+		}
+
+		record->count = count;
+		record->fill_index = fill_index;
+		record->fill_ring = ring;
+		record->fill_time = probe::now_ns();
+		record->image_length = length;
+		record->image_hash = image ? probe::fnv1a(image, length) : 0;
+		++record->fills;
+		record->last_class = ~0u;
+
+		for (u32 i = 0; i < 8; ++i)
+		{
+			record->tail[i] = (blocks && count >= 2) ? std::bit_cast<u32>(blocks[count - 2 + (i / 4)].v[i % 4]) : 0u;
+		}
+
+		// The last eight words of the live image, right-aligned in the same eight
+		// slots, so a program that is shorter than eight words compares at the end.
+		u32 live_tail[8] = {};
+		const u32 live_words = (image && length >= 4) ? std::min<u32>(length / 4, 8) : 0u;
+
+		for (u32 i = 0; i < live_words; ++i)
+		{
+			std::memcpy(&live_tail[8 - live_words + i], image + length - (live_words - i) * 4, 4);
+		}
+
+		record->authored = 0;
+
+		if (live_words && compiled_words == live_words && compiled_tail)
+		{
+			for (u32 i = 0; i < live_words; ++i)
+			{
+				if (record->tail[8 - live_words + i] == compiled_tail[i])
+				{
+					record->authored |= (1u << (8 - live_words + i));
+				}
+			}
+		}
+	}
+
+	void literal_provenance_draw(u32 id, u32 count, u32 offset, MTL::GPUAddress ring,
+		const vec4_block* ring_base, const u8* live, u32 live_length, u64 draw_id, u32 frame)
+	{
+		literal_provenance_record* record = literal_provenance_record_for(id);
+
+		if (!record)
+		{
+			return;
+		}
+
+		enum : u32 { class_no_fill, class_offset, class_replaced, class_rewritten, class_patched, class_stable };
+
+		u32 code = class_no_fill;
+		u32 words[8] = {};
+
+		if (!record->fills)
+		{
+			code = class_no_fill;
+		}
+		else if (offset != record->fill_index || count != record->count)
+		{
+			code = class_offset;
+		}
+		else if (ring != record->fill_ring || !ring_base)
+		{
+			code = class_replaced;
+		}
+		else
+		{
+			for (u32 i = 0; i < 8; ++i)
+			{
+				words[i] = std::bit_cast<u32>(ring_base[offset + record->count - 2 + (i / 4)].v[i % 4]);
+			}
+
+			bool rewritten = false;
+
+			for (u32 i = 0; i < 8; ++i)
+			{
+				rewritten |= (words[i] != record->tail[i]);
+			}
+
+			if (rewritten)
+			{
+				code = class_rewritten;
+			}
+			else if (live && probe::fnv1a(live, live_length) != record->image_hash)
+			{
+				code = class_patched;
+			}
+			else
+			{
+				code = class_stable;
+			}
+		}
+
+		// One line per class change, and a refresh every 600 draws so a stable
+		// program still appears in the timeline.  A per-draw line would drown the
+		// very transition it is there to show.
+		if (code == record->last_class && draw_id - record->last_draw < 600)
+		{
+			return;
+		}
+
+		record->last_class = code;
+		record->last_draw = draw_id;
+
+		static u64 s_lines = 0;
+
+		if (s_lines++ >= 4096)
+		{
+			return;
+		}
+
+		static const char* const names[] = { "no-fill", "offset-mismatch", "ring-replaced", "ring-rewritten", "image-patched", "stable" };
+
+		MTL_NOTE(5, "Metal 4: literal provenance fp %u draw %llu frame %u class %s fills %u fill %u off %u count %u ring 0x%llx/0x%llx age-us %llu authored %02x ring %08x %08x %08x %08x %08x %08x %08x %08x",
+			id, static_cast<unsigned long long>(draw_id), frame,
+			(code < std::size(names)) ? names[code] : "?",
+			record->fills, record->fill_index, offset, record->count,
+			static_cast<unsigned long long>(record->fill_ring), static_cast<unsigned long long>(ring),
+			static_cast<unsigned long long>((probe::now_ns() - record->fill_time) / 1000),
+			record->authored,
+			words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+	}
+	// EXCISE-END literal-provenance
+
+	// EXCISE-BEGIN freeze-fc
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-fc.  The first fill of a
+	// compiled program is kept and replayed into every later fill of the same id,
+	// so the guest's per-frame patch of the ucode tail cannot reach the shader.
+	// If the strobe stops with this arm, the fill/source side is the defect; if it
+	// survives, the bytes the shader reads are not what changes.  Bounded: 64
+	// programs, 256 quads each (a program with more constants is replayed partly
+	// and says so).
+	struct frozen_fragment_constants
+	{
+		u32 id = 0;
+		u32 count = 0;
+		u32 replays = 0;
+		vec4_block blocks[256] = {};
+	};
+
+	frozen_fragment_constants* frozen_fragment_constants_for(u32 id)
+	{
+		static frozen_fragment_constants s_frozen[64] = {};
+		static u32 s_count = 0;
+
+		for (u32 i = 0; i < s_count; ++i)
+		{
+			if (s_frozen[i].id == id)
+			{
+				return &s_frozen[i];
+			}
+		}
+
+		if (s_count >= 64)
+		{
+			return nullptr;
+		}
+
+		frozen_fragment_constants* frozen = &s_frozen[s_count++];
+		frozen->id = id;
+		return frozen;
+	}
+
+	bool freeze_fc_armed()
+	{
+		static const bool armed = probe::variant("freeze-fc");
+		return armed;
+	}
+
+	void freeze_fragment_constants(u32 id, u32 count, vec4_block* blocks)
+	{
+		if (!blocks || !count)
+		{
+			return;
+		}
+
+		frozen_fragment_constants* frozen = frozen_fragment_constants_for(id);
+
+		if (!frozen)
+		{
+			return;
+		}
+
+		if (!frozen->count)
+		{
+			frozen->count = std::min<u32>(count, 256);
+			std::memcpy(frozen->blocks, blocks, frozen->count * sizeof(vec4_block));
+			MTL_NOTE(5, "Metal 4: freeze fc fp %u, latched %u of %u quads, tail %08x %08x %08x %08x",
+				id, frozen->count, count,
+				std::bit_cast<u32>(frozen->blocks[frozen->count - 1].v[0]),
+				std::bit_cast<u32>(frozen->blocks[frozen->count - 1].v[1]),
+				std::bit_cast<u32>(frozen->blocks[frozen->count - 1].v[2]),
+				std::bit_cast<u32>(frozen->blocks[frozen->count - 1].v[3]));
+			return;
+		}
+
+		const u32 replay = std::min<u32>(count, frozen->count);
+		std::memcpy(blocks, frozen->blocks, replay * sizeof(vec4_block));
+
+		if (!frozen->replays++)
+		{
+			MTL_NOTE(5, "Metal 4: freeze fc fp %u, replayed %u of %u quads, count %u", id, replay, frozen->count, count);
+		}
+	}
+	// EXCISE-END freeze-fc
+
+	// EXCISE-BEGIN freeze-fs-offset
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-fs-offset[=<n>].  Every draw
+	// reads the fragment-constant block at the same index instead of the one its
+	// fill selected.  If the strobe stops, the offset the draw reads is the defect
+	// (a stale or racing index); if it survives, the bytes at both blocks agree
+	// and the defect is elsewhere.  Default index 0.
+	bool freeze_fs_offset_armed()
+	{
+		static const bool armed = probe::variant("freeze-fs-offset") || !probe::variant_arg("freeze-fs-offset").empty();
+		return armed;
+	}
+
+	u32 freeze_fs_offset_value()
+	{
+		static const u32 value = [] {
+			const std::string arg = probe::variant_arg("freeze-fs-offset");
+			return arg.empty() ? 0u : static_cast<u32>(std::strtoul(arg.c_str(), nullptr, 10));
+		}();
+
+		return value;
+	}
+	// EXCISE-END freeze-fs-offset
+
+	// EXCISE-BEGIN freeze-present
+	// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-present[=<frames>].  A capture
+	// window latches the present source into a private texture and the compose and
+	// upscaler then draw that copy for the next <frames> presents (default 120, two
+	// seconds at 60 Hz).  The world keeps rendering; only what reaches the screen is
+	// held.  If the screen still alternates while the source is constant, the
+	// defect is in the output chain (H6); if it becomes a steady image, the world
+	// source is what alternates.  The automatic present/upscaled dumps are skipped
+	// while the arm is on, because they would show the live source and contradict
+	// the screen the run is judging.
+	bool freeze_present_armed()
+	{
+		static const bool armed = probe::variant("freeze-present") || !probe::variant_arg("freeze-present").empty();
+		return armed;
+	}
+
+	u32 freeze_present_hold_frames()
+	{
+		static const u32 value = [] {
+			const std::string arg = probe::variant_arg("freeze-present");
+			const u32 parsed = arg.empty() ? 0u : static_cast<u32>(std::strtoul(arg.c_str(), nullptr, 10));
+			return parsed ? parsed : 120u;
+		}();
+
+		return value;
+	}
+
+	present_source freeze_present_source(resource_manager& resources, command_recorder& recorder,
+		const present_source& source, bool capture_opened)
+	{
+		static MTL::Texture* s_held = nullptr;
+		static u32 s_width = 0;
+		static u32 s_height = 0;
+		static MTL::PixelFormat s_format = MTL::PixelFormat::PixelFormatInvalid;
+		static u32 s_remaining = 0;
+		static u64 s_latches = 0;
+
+		if (!source.image || !source.width || !source.height)
+		{
+			return source;
+		}
+
+		if (!s_remaining && !capture_opened)
+		{
+			return source;
+		}
+
+		if (!s_held || s_width != source.width || s_height != source.height ||
+			s_format != source.image->pixelFormat())
+		{
+			if (s_held)
+			{
+				resources.defer_release(s_held);
+				s_held = nullptr;
+			}
+
+			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+			descriptor->setTextureType(MTL::TextureType2D);
+			descriptor->setPixelFormat(source.image->pixelFormat());
+			descriptor->setWidth(source.width);
+			descriptor->setHeight(source.height);
+			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageRenderTarget);
+			s_held = resources.new_texture(descriptor, MTL::StorageModePrivate);
+			descriptor->release();
+
+			if (!s_held)
+			{
+				s_remaining = 0;
+				return source;
+			}
+
+			resources.make_persistent(s_held);
+			s_width = source.width;
+			s_height = source.height;
+			s_format = source.image->pixelFormat();
+		}
+
+		if (!s_remaining)
+		{
+			// Latch this frame's source; the hold begins with the identical copy.
+			MTL4::ComputeCommandEncoder* encoder = recorder.open_compute();
+
+			if (!encoder)
+			{
+				return source;
+			}
+
+			emit_queue_barrier(encoder, barrier_spec{ MTL::StageAll, MTL::StageBlit, MTL4::VisibilityOptionDevice, true });
+			encoder->copyFromTexture(source.image, 0, 0, MTL::Origin::Make(0, 0, 0),
+				MTL::Size::Make(source.width, source.height, 1),
+				s_held, 0, 0, MTL::Origin::Make(0, 0, 0));
+			recorder.close_encoder();
+
+			s_remaining = freeze_present_hold_frames();
+			++s_latches;
+
+			MTL_NOTE(5, "Metal 4: freeze present latch %llu, frame %llu, %ux%u fmt 0x%x, holding %u presents",
+				static_cast<unsigned long long>(s_latches),
+				static_cast<unsigned long long>(diagnostic_frame_index),
+				source.width, source.height, static_cast<u32>(s_format), s_remaining);
+		}
+		else
+		{
+			--s_remaining;
+		}
+
+		present_source held = source;
+		held.image = s_held;
+		return held;
+	}
+	// EXCISE-END freeze-present
 
 	// TODO(excise): level 3; the census counts at teardown, the busiest row first.
 	void diagnostic_census_report()
@@ -5720,23 +6276,26 @@ namespace mtl
 
 #if MTL_DEBUG_LOGS
 			// EXCISE-BEGIN fp-literal-watch
-			// TODO(excise): level 5; the two trailing quads the shader will read, at
+			// TODO(excise): level 5; every constant quad the shader will read, at
 			// every draw, for the programs whose literal is not uniform (the family
-			// that renders the world).  One line per change, plus the first sample,
-			// so the run answers three questions at once: does the value change
-			// inside a frame (writer granularity), what is the ring's value next to
-			// the guest's bytes (fill vs source), and was the word ever the uniform
-			// value the sibling programs carry.  Bounded by line count and ids.
+			// that renders the world).  `bswap32-all` proved the trailing pair is
+			// family-wide (F24); this asks whether a *non-trailing* constant quad
+			// carries the same byte reversal, which the oracle never visits.  One
+			// line per changed lane, plus a per-program baseline, so a white->black
+			// transition names the exact quad/lane that flipped, and the ring value
+			// is reported next to its byte reversal and the guest image word.
+			// Bounded by per-change, per-id and total line caps.
 			if (fragment_constant_count >= 2 && fragment_constant_count <= 256 && diagnostic_capture_active())
 			{
 				struct literal_watcher
 				{
 					u32 id;
-					u32 words[8];
+					u32 count;
+					u32 words[256 * 4];
 					u32 samples;
 				};
 
-				static literal_watcher s_watchers[64] = {};
+				static literal_watcher s_watchers[32] = {};
 				static u32 s_watcher_count = 0;
 				static u64 s_watch_lines = 0;
 				static u64 s_watch_draws = 0;
@@ -5745,71 +6304,89 @@ namespace mtl
 				const u32 id = frame.compiled_fragment->id;
 				const u8* image = static_cast<const u8*>(m_ctx->program.fragment_program.get_data());
 				const u32 length = m_ctx->program.fragment_program.ucode_length;
-				u32 words[8] = {};
+				const u32 count = static_cast<u32>(fragment_constant_count);
 
-				for (u32 q = 0; q < 2; ++q)
+				literal_watcher* watcher = nullptr;
+
+				for (u32 i = 0; i < s_watcher_count; ++i)
 				{
-					const u32 index = static_cast<u32>(fragment_constant_count) - 2 + q;
-					const u32 offset = frame.compiled_fragment->constant_offsets[index];
-
-					if (image && offset + 16 <= length)
+					if (s_watchers[i].id == id)
 					{
-						std::memcpy(&words[q * 4], image + offset, 16);
+						watcher = &s_watchers[i];
+						break;
 					}
 				}
 
-				// A uniform quad is the healthy shape ("2 2 2 1"); the family under
-				// investigation carries the same stray word in .x and .z.
-				if (words[0] != words[1] || words[2] != words[3])
+				if (!watcher && s_watcher_count < 32)
 				{
-					literal_watcher* watcher = nullptr;
+					watcher = &s_watchers[s_watcher_count++];
+					watcher->id = id;
+					watcher->count = 0;
+					watcher->samples = 0;
+				}
 
-					for (u32 i = 0; i < s_watcher_count; ++i)
+				if (watcher)
+				{
+					// A count change means the program's constant layout changed;
+					// the stored baseline no longer lines up.
+					if (watcher->count != count)
 					{
-						if (s_watchers[i].id == id)
+						watcher->count = count;
+						watcher->samples = 0;
+						std::memset(watcher->words, 0, sizeof(watcher->words));
+					}
+
+					const bool first = (watcher->samples == 0);
+					u32 changed = 0;
+
+					for (u32 q = 0; q < count; ++q)
+					{
+						const u32 offset = q < frame.compiled_fragment->constant_offsets.size()
+							? frame.compiled_fragment->constant_offsets[q] : 0;
+
+						for (u32 lane = 0; lane < 4; ++lane)
 						{
-							watcher = &s_watchers[i];
-							break;
+							const u32 index = q * 4 + lane;
+							const u32 cur = std::bit_cast<u32>(constants[q].v[lane]);
+							const u32 old = watcher->words[index];
+
+							if (cur != old)
+							{
+								if (!first && changed < 8 && s_watch_lines < 4096)
+								{
+									u32 guest = 0;
+
+									if (image && offset + 16 <= length)
+									{
+										std::memcpy(&guest, image + offset + lane * 4, 4);
+									}
+
+									const u32 alt = std::byteswap(cur);
+									MTL_NOTE(5, "Metal 4: literal scan fp %u draw %llu base %u count %u sample %u quad %u lane %u guest %08x ring %08x %.6g alt %08x %.6g",
+										id, static_cast<unsigned long long>(s_watch_draws),
+										frame.constants.fragment_constants_index(), count,
+										watcher->samples, q, lane, guest, cur,
+										static_cast<f64>(constants[q].v[lane]), alt,
+										static_cast<f64>(std::bit_cast<f32>(alt)));
+									++s_watch_lines;
+								}
+
+								watcher->words[index] = cur;
+								++changed;
+							}
 						}
 					}
 
-					if (!watcher && s_watcher_count < 64)
+					if (first && s_watch_lines++ < 4096)
 					{
-						watcher = &s_watchers[s_watcher_count++];
-						watcher->id = id;
+						MTL_NOTE(5, "Metal 4: literal scan fp %u draw %llu base %u count %u first nonuniform %u ptr %p off %u",
+							id, static_cast<unsigned long long>(s_watch_draws),
+							frame.constants.fragment_constants_index(), count, changed,
+							static_cast<const void*>(image),
+							m_ctx->program.fragment_program.offset);
 					}
 
-					if (watcher)
-					{
-						bool changed = (watcher->samples == 0);
-
-						for (u32 i = 0; i < 8; ++i)
-						{
-							changed |= (watcher->words[i] != words[i]);
-						}
-
-						if (changed && s_watch_lines++ < 4096)
-						{
-							std::memcpy(watcher->words, words, sizeof(words));
-							++watcher->samples;
-
-							MTL_NOTE(5, "Metal 4: literal watch fp %u draw %llu base %u count %u guest %08x %08x %08x %08x / %08x %08x %08x %08x ring %.6g %.6g %.6g %.6g / %.6g %.6g %.6g %.6g sample %u ptr %p off %u",
-								id, static_cast<unsigned long long>(s_watch_draws),
-								frame.constants.fragment_constants_index(),
-								static_cast<u32>(fragment_constant_count),
-								words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7],
-								static_cast<f64>(constants[fragment_constant_count - 2].v[0]),
-								static_cast<f64>(constants[fragment_constant_count - 2].v[1]),
-								static_cast<f64>(constants[fragment_constant_count - 2].v[2]),
-								static_cast<f64>(constants[fragment_constant_count - 2].v[3]),
-								static_cast<f64>(constants[fragment_constant_count - 1].v[0]),
-								static_cast<f64>(constants[fragment_constant_count - 1].v[1]),
-								static_cast<f64>(constants[fragment_constant_count - 1].v[2]),
-								static_cast<f64>(constants[fragment_constant_count - 1].v[3]),
-								watcher->samples, static_cast<const void*>(image),
-								m_ctx->program.fragment_program.offset);
-						}
-					}
+					++watcher->samples;
 				}
 			}
 			// EXCISE-END fp-literal-watch
@@ -6161,9 +6738,86 @@ namespace mtl
 				}
 			}
 #endif // MTL_DEBUG_LOGS
+
+#if MTL_DEBUG_LOGS
+		// EXCISE-BEGIN freeze-fc-variant
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-fc.  Replay the first fill
+		// of this program over the one just written, so the guest's per-frame patch
+		// cannot reach the shader.  The fill has already logged the live bytes, so
+		// the two sides are both in the archive.
+		if (frame.compiled_fragment && freeze_fc_armed())
+		{
+			freeze_fragment_constants(frame.compiled_fragment->id,
+				static_cast<u32>(fragment_constant_count), constants);
+		}
+		// EXCISE-END freeze-fc-variant
+
+		// EXCISE-BEGIN literal-provenance-fill
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=literal-provenance.  Snapshot the
+		// block the shader will read, its ring identity and the image it came from.
+		// The draw compares against this record.
+		if (frame.compiled_fragment && literal_provenance_armed())
+		{
+			literal_provenance_fill(frame.compiled_fragment->id,
+				static_cast<u32>(fragment_constant_count),
+				frame.fragment_constants_index,
+				frame.constants.fragment_constants_address(),
+				constants,
+				static_cast<const u8*>(m_ctx->program.fragment_program.get_data()),
+				m_ctx->program.fragment_program.ucode_length,
+				frame.compiled_fragment->diagnostic_ucode_tail,
+				std::min<u32>(frame.compiled_fragment->diagnostic_ucode_length / 4, 16));
+		}
+		// EXCISE-END literal-provenance-fill
+#endif // MTL_DEBUG_LOGS
 		}
 
 		params->fs_constants_offset = frame.fragment_constants_index;
+
+#if MTL_DEBUG_LOGS
+		// EXCISE-BEGIN freeze-fs-offset-variant
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-fs-offset[=<n>].  Force the
+		// index every draw reads, so the strobe can be split into "wrong offset" and
+		// "right offset, wrong bytes" with one run.
+		if (freeze_fs_offset_armed())
+		{
+			const u32 forced = freeze_fs_offset_value();
+
+			if (params->fs_constants_offset != forced)
+			{
+				static u64 s_lines = 0;
+
+				if (s_lines++ < 256)
+				{
+					MTL_NOTE(5, "Metal 4: freeze fs offset frame %u fp %u fill %u -> %u",
+						static_cast<u32>(diagnostic_frame_index),
+						frame.compiled_fragment ? frame.compiled_fragment->id : 0u,
+						params->fs_constants_offset, forced);
+				}
+
+				params->fs_constants_offset = forced;
+			}
+		}
+		// EXCISE-END freeze-fs-offset-variant
+
+		// EXCISE-BEGIN literal-provenance-draw
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=literal-provenance.  Classify what
+		// this draw reads against the fill.  The id is the next global draw id, which
+		// the per-draw record below then takes, so the two lines join.
+		if (frame.compiled_fragment && literal_provenance_armed())
+		{
+			literal_provenance_draw(frame.compiled_fragment->id,
+				static_cast<u32>(frame.compiled_fragment->constant_offsets.size()),
+				params->fs_constants_offset,
+				frame.constants.fragment_constants_address(),
+				frame.constants.fragment_constants_data(),
+				static_cast<const u8*>(m_ctx->program.fragment_program.get_data()),
+				m_ctx->program.fragment_program.ucode_length,
+				static_cast<u64>(diagnostic_global_draw_id) + 1u,
+				static_cast<u32>(diagnostic_frame_index));
+		}
+		// EXCISE-END literal-provenance-draw
+#endif // MTL_DEBUG_LOGS
 
 		RSX(m_ctx)->GRAPH_frontend().fill_vertex_layout_state(
 			frame.vertex_layout,
@@ -6305,12 +6959,18 @@ namespace mtl
 				? static_cast<u32>(probe::fnv1a(static_cast<const u8*>(index_data) + input.index_offset, input.index_length)) : 0;
 
 			const vec4_block* xform = frame.constants.transform_constants_data();
-			record.hash_xform = (xform && params->xform_constants_offset)
+			// Block index 0 is a valid block, so it is not a validity test (the
+			// same mistake the fragment-constant sites below had).
+			record.hash_xform = xform
 				? static_cast<u32>(probe::fnv1a(xform + params->xform_constants_offset, 4 * sizeof(vec4_block))) : 0;
 
 			const usz fragment_constant_count = frame.compiled_fragment ? frame.compiled_fragment->constant_offsets.size() : 0;
 			const vec4_block* fragment_constants = frame.constants.fragment_constants_data();
-			record.hash_fragment_constants = (fragment_constants && params->fs_constants_offset && fragment_constant_count)
+			// `fs_constants_offset`, like every ring index, is 0 for the first block
+			// of a slot.  It is not a presence bit: a program whose constants are the
+			// first allocation of the frame has offset 0 and is exactly the program
+			// that has to be described.  The count is the presence test.
+			record.hash_fragment_constants = (fragment_constants && fragment_constant_count)
 				? static_cast<u32>(probe::fnv1a(fragment_constants + params->fs_constants_offset, fragment_constant_count * sizeof(vec4_block))) : 0;
 
 			record.hash_sampler = static_cast<u32>(probe::fnv1a(sampler, sampler_info_count * sizeof(sampler_info)));
@@ -6357,7 +7017,9 @@ namespace mtl
 
 				u32 tail[8] = {};
 
-				if (fragment_constants && fragment_constant_count >= 2 && params->fs_constants_offset)
+				// `fs_constants_offset` is an index, not a presence bit: offset 0 is
+				// the first block of the slot and is a legitimate world program.
+				if (fragment_constants && fragment_constant_count >= 2)
 				{
 					const vec4_block* block = fragment_constants + params->fs_constants_offset;
 					std::memcpy(&tail[0], &block[fragment_constant_count - 2], 16);
@@ -6376,6 +7038,22 @@ namespace mtl
 					static_cast<f64>(record.viewport[2]), static_cast<f64>(record.viewport[3]),
 					record.scissor[0], record.scissor[1], record.scissor[2], record.scissor[3],
 					record.blend_hash, record.depth_hash, record.raster_hash);
+
+				// TODO(excise): level 5; the same tail as numbers.  The words are
+				// the f32 the shader fetches (the buffer is post-fill), so `f` is
+				// what the epilogue multiplies by; `want` is the 32-bit reversal of
+				// that word, which is the value the guest animates.  Printing both
+				// keeps the class of this draw readable without an offline decode.
+				MTL_NOTE(5, "Metal 4: world tail %u f %.6g %.6g %.6g %.6g / %.6g %.6g %.6g %.6g want %.6g %.6g %.6g %.6g / %.6g %.6g %.6g %.6g",
+					record.global_id,
+					static_cast<f64>(std::bit_cast<f32>(tail[0])), static_cast<f64>(std::bit_cast<f32>(tail[1])),
+					static_cast<f64>(std::bit_cast<f32>(tail[2])), static_cast<f64>(std::bit_cast<f32>(tail[3])),
+					static_cast<f64>(std::bit_cast<f32>(tail[4])), static_cast<f64>(std::bit_cast<f32>(tail[5])),
+					static_cast<f64>(std::bit_cast<f32>(tail[6])), static_cast<f64>(std::bit_cast<f32>(tail[7])),
+					static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[0]))), static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[1]))),
+					static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[2]))), static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[3]))),
+					static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[4]))), static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[5]))),
+					static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[6]))), static_cast<f64>(std::bit_cast<f32>(std::byteswap(tail[7]))));
 
 				char textures[640];
 				usz used = std::snprintf(textures, sizeof(textures), "Metal 4: world draw %u textures", record.global_id);
@@ -6400,7 +7078,7 @@ namespace mtl
 				// light vector here is the other, and the two produce the same dark
 				// world.  Raw words, so the reader compares them with fill.log
 				// without a float round-trip.
-				if (fragment_constants && params->fs_constants_offset && fragment_constant_count)
+				if (fragment_constants && fragment_constant_count)
 				{
 					const vec4_block* block = fragment_constants + params->fs_constants_offset;
 					u32 head[16] = {};
@@ -7692,7 +8370,8 @@ namespace mtl
 				// image is what makes the dump a timeline instead of a single still.
 				const bool window_present = diagnostic_capture_active();
 
-				if (image && window_present && diagnostic_present_dumps < diagnostic_present_dump_budget)
+				if (image && window_present && diagnostic_present_dumps < diagnostic_present_dump_budget &&
+					!freeze_present_armed())
 				{
 					dump_host_image(resources.recorder, resources.resources, image, "present", diagnostic_present_index, address);
 					++diagnostic_present_dumps;
@@ -7765,6 +8444,19 @@ namespace mtl
 		}
 
 		present_source source{ image, image2, buffer_width, buffer_height };
+
+#if MTL_DEBUG_LOGS
+		// TODO(excise): level 5; MTL_PROBE_VARIANT=freeze-present[=<frames>].  A
+		// capture window latches the current source and the output chain then draws
+		// that copy for <frames> presents.  The live source keeps rendering; only
+		// what reaches the screen is held.  The `screenshot` dump above and the
+		// `present` dump are skipped while the arm is on so the archive does not
+		// show a live frame the user was not looking at.
+		if (freeze_present_armed())
+		{
+			source = freeze_present_source(resources.resources, resources.recorder, source, diagnostic_capture_active());
+		}
+#endif
 
 		// The capture reads the source before the output path scales it
 		// (VKPresent.cpp:684).  Only a capture the user asked for happens in a
@@ -7870,7 +8562,8 @@ namespace mtl
 			// lit in the source but dark here convicts the upscaler, one that is dark
 			// in both is the world shading, and one that is lit here but dark on
 			// screen convicts the compose.
-			if (diagnostic_capture_active() && output_source.image && output_source.image != source.image)
+			if (diagnostic_capture_active() && output_source.image && output_source.image != source.image &&
+				!freeze_present_armed())
 			{
 				dump_host_image(resources.recorder, resources.resources, output_source.image,
 					"upscaled", diagnostic_present_index, 0);

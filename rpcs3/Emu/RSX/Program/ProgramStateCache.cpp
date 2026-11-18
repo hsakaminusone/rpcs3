@@ -721,22 +721,114 @@ namespace rsx
 		{
 			const bool reverse = std::strcmp(mode, "bswap32") == 0;
 			const bool halves = std::strcmp(mode, "halves") == 0;
+			// TODO(excise): level 5; the unconditional form, for the strobe
+			// oracle.  The gated form above only replaces a lane whose delivered
+			// value is not a plausible float, and `|v| > 1e6` misses the tiny
+			// values (sub-1e-6) that produce most black presents.  This form
+			// corrects the two animated lanes (0 and 2) of the trailing pair
+			// whatever their magnitude, and leaves the authored lanes (1 and 3)
+			// alone, so a lit world cannot come from damaging a correct lane.
+			const bool forced_all = std::strcmp(mode, "bswap32-all") == 0;
+			// TODO(excise): level 5; `bswap32-any` is the same functional oracle
+			// with the trailing-pair restriction removed.  A lane is reversed
+			// when it is not plausible but its byte reversal is, and its quad
+			// carries at least one plausible lane (proof the quad otherwise
+			// arrived in the fill's own `T` convention).  This reaches a stray
+			// word in a non-trailing quad - the candidate for the residual
+			// ground flicker (H7) that `bswap32-all` cannot see.
+			const bool forced_any = std::strcmp(mode, "bswap32-any") == 0;
+			const bool forced_reverse = forced_all || forced_any;
 
-			if ((reverse || halves) && offsets_cache.size() >= 2 && rsx_prog.ucode_length >= 3000)
+			const auto plausible_lane = [](f32 v) -> bool
 			{
-				for (usz i = offsets_cache.size() - 2; i < offsets_cache.size(); ++i)
+				return std::isfinite(v) && (v == 0.0f || (std::abs(v) >= 1.0e-6f && std::abs(v) <= 1.0e6f));
+			};
+
+			if ((reverse || halves || forced_reverse) && offsets_cache.size() >= 2)
+			{
+				// `bswap32-all` only visits the trailing pair; `bswap32-any`
+				// visits every constant quad.
+				const usz first = forced_any ? 0 : offsets_cache.size() - 2;
+
+				for (usz i = first; i < offsets_cache.size(); ++i)
 				{
+					// TODO(excise): level 5; the world-shape guard.  The two
+					// trailing quads of every image in this family are
+					// `[W, 2.0, W, 1.0]`; the authored lanes 1 and 3 are the
+					// signature, so a program that merely happens to be long
+					// is never rewritten.  Read from the image and decode with
+					// the fill's own convention, so this does not depend on a
+					// non-temporal store being visible through a later load.
+					if (forced_all)
+					{
+						const u8* guard_data = static_cast<const u8*>(rsx_prog.get_data());
+
+						if (!guard_data || offsets_cache[i] + 16 > rsx_prog.ucode_length)
+						{
+							continue;
+						}
+
+						u32 guard_words[4] = {};
+						std::memcpy(guard_words, guard_data + offsets_cache[i], 16);
+
+						const auto as_t = [](u32 w) -> f32
+						{
+							return std::bit_cast<f32>(((w & 0x00ff00ffu) << 8) | ((w & 0xff00ff00u) >> 8));
+						};
+
+						if (as_t(guard_words[1]) != 2.0f || as_t(guard_words[3]) != 1.0f)
+						{
+							continue;
+						}
+					}
+
+					// TODO(excise): level 5; the `bswap32-any` quad guard.
+					// Reverse nothing in a quad whose lanes are all implausible
+					// under `T`: with no plausible lane there is no evidence the
+					// quad arrived in `T` at all, and a fully half-swapped quad
+					// (the census's `c2`) is a different defect.  Counting on the
+					// buffer, not the image, keeps the test independent of the
+					// patcher's store visibility.
+					u32 quad_plausible = 0;
+
+					if (forced_any)
+					{
+						for (unsigned lane = 0; lane < 4; ++lane)
+						{
+							quad_plausible += plausible_lane(buffer[i * 4 + lane]) ? 1u : 0u;
+						}
+
+						if (quad_plausible == 0)
+						{
+							continue;
+						}
+					}
+
 					for (unsigned lane = 0; lane < 4; ++lane)
 					{
+						if (forced_all && lane != 0 && lane != 2)
+						{
+							continue;
+						}
+
 						f32& slot = buffer[i * 4 + lane];
 						const u32 raw = std::bit_cast<u32>(slot);
-						const u32 alt = reverse ? std::byteswap(raw) : ((raw << 16) | (raw >> 16));
+						const u32 alt = (halves && !forced_reverse)
+							? ((raw << 16) | (raw >> 16))
+							: std::byteswap(raw);
 						const f32 candidate = std::bit_cast<f32>(alt);
 
-						const bool broken = !std::isfinite(slot) || std::abs(slot) > 1.0e6f;
-						const bool sane = std::isfinite(candidate) && std::abs(candidate) <= 1.0e6f;
+						// TODO(excise): level 5; the plausibility gate.  `broken`
+						// now covers both failure classes seen on the strobe:
+						// positive/negative huge (>1e6) and tiny (<1e-6, the
+						// majority of black presents).  A value already inside
+						// the gameplay band is left alone, which is why the five
+						// accidental in-band fills are not corrupted.
+						const bool broken = !plausible_lane(slot);
+						const bool sane = plausible_lane(candidate);
+						const bool forced = forced_reverse && alt != raw && sane && broken;
 
-						if (!broken || !sane || alt == raw)
+						if (!forced && (!broken || !sane || alt == raw))
 						{
 							continue;
 						}
@@ -760,6 +852,112 @@ namespace rsx
 		}
 		// EXCISE-END fp-literal-reverse-variant
 
+		// EXCISE-BEGIN fp-literal-stray
+		// TODO(excise): level 5; the per-lane stray census.  `bswap32-all` proved
+		// the trailing-pair literal is family-wide (F24); this asks whether the
+		// *same* byte reversal lurks in any other constant quad, which the oracle
+		// never visits and `literal watch` never reads.  A lane is a candidate
+		// when it is implausible as the fill produced it but plausible under
+		// `bswap32`, and its quad has at least one plausible lane (so the quad
+		// otherwise arrived in the fill's `T` convention) and is not wholly
+		// implausible.  Deduplicated by fp+quad+lane+alt and capped, so a run
+		// logs each distinct stray once.  Independent of RSX_FP_LITERAL_FIX: it
+		// reads the buffer before the oracle (below) would change it.
+		if (const char* path = std::getenv("RSX_FP_STRAY_LOG"))
+		{
+			const auto plausible_lane = [](f32 v) -> bool
+			{
+				return std::isfinite(v) && (v == 0.0f || (std::abs(v) >= 1.0e-6f && std::abs(v) <= 1.0e6f));
+			};
+
+			struct stray_key
+			{
+				u32 fp;
+				u32 quad;
+				u32 lane;
+				u32 alt;
+			};
+
+			static stray_key s_seen[512] = {};
+			static u32 s_seen_count = 0;
+			static u32 s_stray_lines = 0;
+			static u32 s_stray_fills = 0;
+
+			if (rsx::diagnostic_capture_window() && s_stray_lines < 4096 && s_stray_fills++ < 8192)
+			{
+				++s_stray_fills;
+
+				for (usz i = 0; i < offsets_cache.size() && s_stray_lines < 4096; ++i)
+				{
+					f32 lanes[4] = {};
+
+					for (unsigned lane = 0; lane < 4; ++lane)
+					{
+						lanes[lane] = buffer[i * 4 + lane];
+					}
+
+					u32 quad_plausible = 0;
+
+					for (unsigned lane = 0; lane < 4; ++lane)
+					{
+						quad_plausible += plausible_lane(lanes[lane]) ? 1u : 0u;
+					}
+
+					if (quad_plausible == 0 || quad_plausible == 4)
+					{
+						continue;
+					}
+
+					for (unsigned lane = 0; lane < 4 && s_stray_lines < 4096; ++lane)
+					{
+						const f32 value = lanes[lane];
+						const u32 raw = std::bit_cast<u32>(value);
+						const u32 alt = std::byteswap(raw);
+						const f32 candidate = std::bit_cast<f32>(alt);
+
+						if (plausible_lane(value) || !plausible_lane(candidate))
+						{
+							continue;
+						}
+
+						bool seen = false;
+
+						for (u32 k = 0; k < s_seen_count && k < 512; ++k)
+						{
+							if (s_seen[k].fp == rsx_prog.offset && s_seen[k].quad == static_cast<u32>(i) &&
+								s_seen[k].lane == lane && s_seen[k].alt == alt)
+							{
+								seen = true;
+								break;
+							}
+						}
+
+						if (seen)
+						{
+							continue;
+						}
+
+						if (s_seen_count < 512)
+						{
+							s_seen[s_seen_count++] = { rsx_prog.offset, static_cast<u32>(i), lane, alt };
+						}
+
+						if (std::FILE* out = std::fopen(path, "a"))
+						{
+							std::fprintf(out,
+								"stray fp %u quad %u lane %u raw %08x alt %08x t %g b %g qp %u of %u\n",
+								rsx_prog.offset, static_cast<u32>(i), lane, raw, alt,
+								static_cast<f64>(value), static_cast<f64>(candidate),
+								quad_plausible, static_cast<u32>(offsets_cache.size()));
+							std::fclose(out);
+							++s_stray_lines;
+						}
+					}
+				}
+			}
+		}
+		// EXCISE-END fp-literal-stray
+
 		// EXCISE-BEGIN fp-literal-fill
 		// TODO(excise): level 5; the fill itself, backend-agnostic, so the same
 		// draw can be compared across Metal, Vulkan and OpenGL.  It reports where
@@ -782,12 +980,12 @@ namespace rsx
 				hash = (hash ^ image[i]) * 0x100000001b3ull;
 			}
 
-			// TODO(excise): level 5; only the fill of an image whose trailing quad
-			// pair is the epilogue's (x 2 x 1) shape, which is the family under
-			// investigation, and only while a capture window is open, so the
-			// loading screen cannot spend the budget.  Consecutive identical images
+			// TODO(excise): level 5; every program with at least two constant
+			// quads, not only the two largest.  ds22 showed that ~30 more
+			// programs carry the same stray `[W,2,W,1]` word, so the length
+			// gate was hiding most of the family.  Consecutive identical images
 			// are folded so the log is one line per patched frame.
-			const bool world_family = length >= 3000 && offsets_cache.size() >= 2;
+			const bool world_family = offsets_cache.size() >= 2;
 
 			if (world_family && rsx::diagnostic_capture_window() && hash != s_last_hash && s_reports++ < 4096)
 			{
@@ -795,26 +993,34 @@ namespace rsx
 
 				// TODO(excise): level 5; dump the ring of writes that landed in this
 				// image's range, so the write that produced the reversed literal is
-				// attributed even if it predates the program's first prefetch.
-				rsx::program_write_watch::dump_range(image, length, "fill-world");
+				// attributed even if it predates the program's first prefetch.  The
+				// scan is a 16 K-record walk, so it stays on the two large world
+				// images; the shorter variants are covered by `literal watch`.
+				if (length >= 3000)
+				{
+					rsx::program_write_watch::dump_range(image, length, "fill-world");
+				}
 
 				// EXCISE-BEGIN fp-literal-fill-fifo
 				// TODO(excise): level 5; the FIFO cursor at the fill, so the
 				// patch that wrote the image can be ordered against the bind and
 				// matched to the writer line without a FIFO dump.
 				u32 fifo_pos = 0;
+				u64 fifo_put = 0;
 
 				if (auto* rsxthr = rsx::get_current_renderer(); rsxthr && rsxthr->fifo_ctrl)
 				{
 					fifo_pos = rsxthr->fifo_ctrl->get_pos();
+					fifo_put = rsxthr->ctrl->put;
 				}
 				// EXCISE-END fp-literal-fill-fifo
 
 				char line[1024];
-				usz used = std::snprintf(line, sizeof(line), "fill fp off %u len %u hash %016llx count %u sanitize %u fifo %u fix %u",
+				usz used = std::snprintf(line, sizeof(line), "fill fp off %u len %u hash %016llx count %u sanitize %u img %llx fifo %u put %llx fix %u",
 					rsx_prog.offset, length, static_cast<unsigned long long>(hash),
 					static_cast<u32>(offsets_cache.size()), sanitize ? 1u : 0u,
-					fifo_pos, s_reversed);
+					static_cast<unsigned long long>(reinterpret_cast<u64>(image)),
+					fifo_pos, static_cast<unsigned long long>(fifo_put), s_reversed);
 
 				const usz first = offsets_cache.size() > 4 ? offsets_cache.size() - 4 : 0;
 
@@ -833,9 +1039,128 @@ namespace rsx
 						static_cast<f64>(buffer[i * 4 + 2]), static_cast<f64>(buffer[i * 4 + 3]));
 				}
 
+				// TODO(excise): level 5; the convention census.  Every quad of the
+				// image is decoded under both conventions it could have arrived
+				// with: `T` (the fill's, which the static lanes need) and the
+				// 16-bit half swap (which the animated lane needs).  A quad whose
+				// four lanes are plausible only under the half swap is a quad that
+				// arrived in the other convention.  Counted, not dumped, so one
+				// line per fill; up to eight such quads are named.
+				const auto plausible = [](f32 v) -> bool
+				{
+					return std::isfinite(v) && (v == 0.0f || (std::abs(v) >= 1.0e-6f && std::abs(v) <= 1.0e6f));
+				};
+
+				u32 conv_t = 0;
+				u32 conv_half = 0;
+				u32 conv_both = 0;
+				u32 conv_c2 = 0;
+				u32 conv_neither = 0;
+				u32 mixed_quads[8] = {};
+				u32 mixed_count = 0;
+
+				for (usz q = 0; image && q < offsets_cache.size(); ++q)
+				{
+					if (offsets_cache[q] + 16 > length)
+					{
+						continue;
+					}
+
+					u32 words[4] = {};
+					std::memcpy(words, image + offsets_cache[q], 16);
+
+					u32 as_t = 0;
+					u32 as_half = 0;
+
+					for (unsigned lane = 0; lane < 4; ++lane)
+					{
+						const u32 w = words[lane];
+						const u32 t = ((w & 0x00ff00ffu) << 8) | ((w & 0xff00ff00u) >> 8);
+						const u32 h = (w << 16) | (w >> 16);
+
+						as_t += plausible(std::bit_cast<f32>(t)) ? 1u : 0u;
+						as_half += plausible(std::bit_cast<f32>(h)) ? 1u : 0u;
+					}
+
+					conv_t += as_t;
+					conv_half += as_half;
+
+					if (as_t == 4)
+					{
+						++conv_both;
+					}
+					else if (as_half == 4)
+					{
+						++conv_c2;
+						if (mixed_count < 8)
+						{
+							mixed_quads[mixed_count++] = static_cast<u32>(q);
+						}
+					}
+					else
+					{
+						++conv_neither;
+					}
+				}
+
+				// TODO(excise): level 5; the tail's own ring scan.  The whole
+				// image scan is truncated at 64 records and the tail is the last
+				// thing written, so this asks for the two trailing quads
+				// specifically.  Bounded to the large world images, like the
+				// whole-image scan above.
+				if (length >= 3000 && offsets_cache.size() >= 2 && image)
+				{
+					rsx::program_write_watch::dump_range(image + offsets_cache[offsets_cache.size() - 2], 32, "fill-tail");
+				}
+
 				if (std::FILE* out = std::fopen(path, "a"))
 				{
 					std::fprintf(out, "%s\n", line);
+					std::fprintf(out, "conv fp %u quads %u lanesT %u lanesH %u both %u c2 %u neither %u",
+						rsx_prog.offset, static_cast<u32>(offsets_cache.size()),
+						conv_t, conv_half, conv_both, conv_c2, conv_neither);
+
+					for (u32 m = 0; m < mixed_count; ++m)
+					{
+						std::fprintf(out, " c2q%u", mixed_quads[m]);
+					}
+
+					std::fprintf(out, "\n");
+
+					// TODO(excise): level 5; the transposed lanes of the trailing
+					// pair, printed as the number the shader gets, the number the
+					// guest meant, and the guest word, so the next run needs no
+					// offline decode.
+					unsigned xfp_printed = 0;
+
+					for (usz i = offsets_cache.size() - 2; i < offsets_cache.size() && xfp_printed < 8; ++i)
+					{
+						if (!image || offsets_cache[i] + 16 > length)
+						{
+							continue;
+						}
+
+						u32 words[4] = {};
+						std::memcpy(words, image + offsets_cache[i], 16);
+
+						for (unsigned lane = 0; lane < 4 && xfp_printed < 8; ++lane)
+						{
+							const f32 read_value = buffer[i * 4 + lane];
+							const u32 want_bits = (words[lane] << 16) | (words[lane] >> 16);
+							const f32 want_value = std::bit_cast<f32>(want_bits);
+
+							if (plausible(read_value) || !plausible(want_value))
+							{
+								continue;
+							}
+
+							std::fprintf(out, "xfp fp %u quad %u lane %u raw %08x read %.6g want %.6g\n",
+								rsx_prog.offset, static_cast<u32>(i), lane, words[lane],
+								static_cast<f64>(read_value), static_cast<f64>(want_value));
+							++xfp_printed;
+						}
+					}
+
 					std::fclose(out);
 				}
 			}

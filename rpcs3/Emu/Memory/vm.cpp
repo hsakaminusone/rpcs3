@@ -3,6 +3,12 @@
 #include "vm_ptr.h"
 #include "vm_reservation.h"
 
+// EXCISE-BEGIN fp-stage-store-watch
+// TODO(excise): level 5; the staging store watch, so a guest or HLE store can be
+// attributed to the writer that produced a byte-reversed staging word.
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-stage-store-watch
+
 #include "Utilities/Thread.h"
 #include "Utilities/address_range.h"
 #include "Emu/CPU/CPUThread.h"
@@ -2532,6 +2538,41 @@ namespace vm
 		// Non-null terminated but terminated by size limit (so the string may continue)
 		return size == max_size;
 	}
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; the store-hook entry point shared by vm::write and
+	// the JIT's __ppu_stage_watch shim.  The caller name is fixed for the life
+	// of its thread, so it is computed once per thread and reused by every store
+	// the thread makes; the watch itself decides whether the address is
+	// interesting.
+	inline namespace ps3_
+	{
+		void fp_stage_watch_write(u32 addr, u32 size, const char* writer, u32 pc, bool from_jit)
+		{
+			if (!rsx::fp_stage_watch::enabled())
+			{
+				return;
+			}
+
+			if (from_jit ? !rsx::fp_stage_watch::jit_hook() : !rsx::fp_stage_watch::vmw_hook())
+			{
+				return;
+			}
+
+			thread_local std::string name = []() -> std::string
+			{
+				if (cpu_thread* thread = get_current_cpu_thread())
+				{
+					return thread->get_name();
+				}
+
+				return {};
+			}();
+
+			rsx::fp_stage_watch::note_mem(addr, size, writer, pc, name.empty() ? "-" : name.c_str(), nullptr);
+		}
+	}
+	// EXCISE-END fp-stage-store-watch
 }
 
 template <>

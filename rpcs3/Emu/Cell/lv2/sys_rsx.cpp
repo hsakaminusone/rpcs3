@@ -12,6 +12,13 @@
 #include "Emu/RSX/Overlays/overlay_cursor.h"
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/RSXThread.h"
+
+// EXCISE-BEGIN fp-stage-store-watch
+// TODO(excise): level 5; the put update that submits a run of commands, so a
+// staging store can be ordered against the frame that carried it.
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-stage-store-watch
+
 #include "util/asm.hpp"
 #include "sys_event.h"
 #include "sys_vm.h"
@@ -179,6 +186,29 @@ static void _sys_rsx_dmactl(rsx::thread* render, rsx::context* ctx, u64 get_put)
 		// Schedule FIFO interrupt to deal with this immediately
 		render->eng_interrupt_mask |= rsx::dma_control_interrupt;
 	}
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; log the submit boundary with the PPU PC at the call.
+	if (rsx::fp_stage_watch::enabled())
+	{
+		const char* thread = "-";
+
+		if (auto cpu = cpu_thread::get_current())
+		{
+			static thread_local std::string name = cpu->get_name();
+			thread = name.c_str();
+		}
+
+		u32 pc = 0;
+
+		if (auto ppu = get_current_cpu_thread<ppu_thread>())
+		{
+			pc = ppu->cia;
+		}
+
+		rsx::fp_stage_watch::log_submit(get_put, pc, thread);
+	}
+	// EXCISE-END fp-stage-store-watch
 
 	if (auto cpu = cpu_thread::get_current())
 	{

@@ -16,6 +16,10 @@
 #include <unordered_set>
 #include <span>
 
+// EXCISE-BEGIN fp-stage-store-watch-include
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-stage-store-watch-include
+
 #ifdef ARCH_ARM64
 #include "Emu/CPU/Backends/AArch64/AArch64JIT.h"
 #include "Emu/IdManager.h"
@@ -985,6 +989,22 @@ void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align
 
 	// Write
 	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align})->setVolatile(true);
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; every guest store from generated code passes here.
+	// The call is emitted after the store and before the instruction ends, so the
+	// hook reads the bytes the guest actually wrote.  `is_be` is a compile-time
+	// constant at each opcode site, so the line says whether this was a plain
+	// big-endian store (stw/sth/stb/stvx) or a byte-reverse form (stwbrx/...),
+	// and `pc` is the guest instruction that issued it.  Sizes below 4 bytes are
+	// covered for a partially written staging word; 16-byte vector stores are
+	// covered so a quad copied by stvx is not invisible.
+	if (size >= 8 && size <= 128)
+	{
+		Call(GetType<void>(), "__ppu_stage_watch", Trunc(addr), m_ir->getInt32(size / 8),
+			m_ir->getInt32(is_be ? 1u : 0u), Trunc(GetAddr()));
+	}
+	// EXCISE-END fp-stage-store-watch
 }
 
 void PPUTranslator::CompilationError(std::string_view error)
@@ -3728,6 +3748,14 @@ void PPUTranslator::STVLX(ppu_opcode_t op)
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(splat<u16>(0xffff) << trunc<u16>(value<u64>(addr) & 0xf));
 	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; a masked vector store bypasses WriteMemory.  The
+	// whole aligned 16-byte block is reported after the store, so a partially
+	// written staging quad is still attributed to this opcode.
+	Call(GetType<void>(), "__ppu_stage_watch", Trunc(m_ir->CreateAnd(addr, ~0xfull)),
+		m_ir->getInt32(16), m_ir->getInt32(0), Trunc(GetAddr()));
+	// EXCISE-END fp-stage-store-watch
 }
 
 void PPUTranslator::STDBRX(ppu_opcode_t op)
@@ -3756,6 +3784,14 @@ void PPUTranslator::STVRX(ppu_opcode_t op)
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 243, 242, 241, 240) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(trunc<u16>(splat<u64>(0xffff) << (value<u64>(addr) & 0xf) >> 16));
 	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; a masked vector store bypasses WriteMemory.  The
+	// whole aligned 16-byte block is reported after the store, so a partially
+	// written staging quad is still attributed to this opcode.
+	Call(GetType<void>(), "__ppu_stage_watch", Trunc(m_ir->CreateAnd(addr, ~0xfull)),
+		m_ir->getInt32(16), m_ir->getInt32(0), Trunc(GetAddr()));
+	// EXCISE-END fp-stage-store-watch
 }
 
 void PPUTranslator::STFSUX(ppu_opcode_t op)

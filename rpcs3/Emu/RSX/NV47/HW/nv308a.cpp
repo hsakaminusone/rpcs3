@@ -5,6 +5,7 @@
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
 // EXCISE-BEGIN fp-literal-write-watch-include
 #include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+#include <bit>
 // EXCISE-END fp-literal-write-watch-include
 
 #include "context_accessors.define.h"
@@ -94,6 +95,118 @@ namespace rsx
 
 				rsx::reservation_lock<true> rsx_lock(dst_address, data_length);
 
+				// EXCISE-BEGIN fp-stage-watch
+				// TODO(excise): level 5; arm the store watch on the guest bytes
+				// this command consumes, so the next frame's write to the same
+				// staging bytes is attributed to its producer.  The copy itself
+				// is faithful, so the source range is the only place the
+				// transposed word can come from.  watch_range merges, so the
+				// ring collapses to a few intervals.
+				if (const u32 stage_addr = RSX(ctx)->fifo_ctrl->translate_address(src_offset); stage_addr != umax)
+				{
+					rsx::fp_stage_watch::watch_range(stage_addr, data_length);
+				}
+				// EXCISE-END fp-stage-watch
+
+				// EXCISE-BEGIN fp-stage-watch
+				// TODO(excise): level 5; the staging-range watch.  The copy below
+				// is faithful (`src == after`), so the transposed word is already
+				// in the bytes this command reads.  Those bytes come from guest
+				// memory at the FIFO cursor (`src_offset`).  Keep the last 16
+				// bytes of every distinct source address this path has copied
+				// from, re-read them at each later command, and log the first time
+				// each 4-byte lane differs.  A lane that changes between two
+				// commands was written by a layer other than this copy, which is
+				// the layer H9 is looking for; the FIFO put/get and byte delta
+				// order that write against the command stream.  Bounded (32
+				// addresses, 4096 lines) and inert unless RSX_FP_STAGE_LOG is set.
+				if (const char* stage_path = std::getenv("RSX_FP_STAGE_LOG"))
+				{
+					struct stage_slot
+					{
+						u32 addr;
+						u8 bytes[16];
+					};
+
+					static stage_slot s_slots[32] = {};
+					static u32 s_slot_count = 0;
+					static u32 s_stage_lines = 0;
+					static u64 s_stage_seen = 0;
+					static u32 s_next_slot = 0;
+					++s_stage_seen;
+
+					const auto guest_read = [](u32 addr, u8 (&out)[16]) -> bool
+					{
+						std::memcpy(out, vm::_ptr<u8>(addr), 16);
+						return true;
+					};
+
+					// Re-read every address this path has seen; a change since the
+					// last command is a write by some other layer.
+					for (u32 i = 0; i < 32 && s_stage_lines < 4096; ++i)
+					{
+						stage_slot& slot = s_slots[i];
+
+						if (!slot.addr)
+						{
+							continue;
+						}
+
+						u8 now[16] = {};
+						guest_read(slot.addr, now);
+
+						for (unsigned lane = 0; lane < 4 && s_stage_lines < 4096; ++lane)
+						{
+							u32 was = 0;
+							u32 cur = 0;
+							std::memcpy(&was, slot.bytes + lane * 4, 4);
+							std::memcpy(&cur, now + lane * 4, 4);
+
+							if (was == cur)
+							{
+								continue;
+							}
+
+							if (std::FILE* out = std::fopen(stage_path, "a"))
+							{
+								std::fprintf(out,
+									"stage addr %x lane %u was %08x now %08x seq %llu put %llx get %u dst %x:%x count %u\n",
+									slot.addr, lane, was, cur,
+									static_cast<unsigned long long>(s_stage_seen),
+									static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
+									src_offset, dst_dma, dst_offset, count);
+								std::fclose(out);
+							}
+
+							++s_stage_lines;
+						}
+
+						std::memcpy(slot.bytes, now, 16);
+					}
+
+					// Insert the current copy source if it is new.  A full table
+					// recycles the oldest slot round-robin.
+					const u32 guest_addr = RSX(ctx)->fifo_ctrl->translate_address(src_offset);
+
+					if (guest_addr != umax)
+					{
+						bool known = false;
+
+						for (u32 i = 0; i < s_slot_count; ++i)
+						{
+							known |= (s_slots[i].addr == guest_addr);
+						}
+
+						if (!known)
+						{
+							const u32 index = (s_slot_count < 32) ? s_slot_count++ : (s_next_slot++ % 32);
+							s_slots[index].addr = guest_addr;
+							guest_read(guest_addr, s_slots[index].bytes);
+						}
+					}
+				}
+				// EXCISE-END fp-stage-watch
+
 				if (RSX(ctx)->fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) [[unlikely]]
 				{
 					// Move last 32 bits
@@ -107,8 +220,21 @@ namespace rsx
 						src + (count - 1) * 4, 4,
 						[&](char* b, usz n)
 						{
-							std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u", x, y, out_pitch,
-								static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count);
+							// TODO(excise): level 5; the FIFO cursor this
+							// command was decoded at, the FIFO PUT, and the
+							// span's host address, so the producer can be
+							// ordered against the guest's PUT writes and the
+							// source words read in both byte orders.
+							u32 word = 0;
+							std::memcpy(&word, src + (count - 1) * 4, 4);
+
+							std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u fifo=%u put=%llx span=%llx dst=%x:%x mode=noninc srcbe=%08x",
+								x, y, out_pitch,
+								static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count,
+								src_offset,
+								static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
+								static_cast<unsigned long long>(reinterpret_cast<u64>(fifo_span.data())),
+								dst_dma, dst_offset, std::byteswap(word));
 						});
 					// EXCISE-END fp-literal-write-watch
 
@@ -135,8 +261,42 @@ namespace rsx
 				rsx::program_write_watch::note("nv308a", reinterpret_cast<u64>(dst), data_length, src, data_length,
 					[&](char* b, usz n)
 					{
-						std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u", x, y, out_pitch,
-							static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count);
+						// TODO(excise): level 5; the FIFO cursor, PUT, span
+						// address and copy path, plus the first four source
+						// words in both byte orders.  `le` is what the ring
+						// prints; `be` is the guest command-stream reading.
+						u32 words[4] = {};
+						std::memcpy(words, src, std::min<u32>(16, data_length));
+
+						// TODO(excise): level 5; read the same words straight
+						// from guest memory at the FIFO cursor and compare them
+						// with what this command consumed.  `same=1` proves the
+						// transposed bytes are in guest RAM and not produced by
+						// the FIFO cache copy; `same=0` convicts the cache.
+						const u32 guest_addr = RSX(ctx)->fifo_ctrl->translate_address(src_offset);
+						u32 guest_words[4] = {};
+						u32 guest_same = 0;
+
+						if (guest_addr != umax)
+						{
+							const u8* guest_ptr = vm::_ptr<u8>(guest_addr);
+							const u32 cmp = std::min<u32>(16, data_length);
+							std::memcpy(guest_words, guest_ptr, cmp);
+							guest_same = std::memcmp(guest_ptr, src, cmp) == 0 ? 1u : 0u;
+						}
+
+						std::snprintf(b, n, "x=%u y=%u pitch=%u fmt=%u count=%u fifo=%u put=%llx span=%llx dst=%x:%x mode=%s le=%08x,%08x,%08x,%08x be=%08x,%08x,%08x,%08x guest=%x same=%u g=%08x,%08x,%08x,%08x",
+							x, y, out_pitch,
+							static_cast<u32>(*REGS(ctx)->blit_engine_nv3062_color_format()), count,
+							src_offset,
+							static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
+							static_cast<unsigned long long>(reinterpret_cast<u64>(fifo_span.data())),
+							dst_dma, dst_offset, (dst_dma & CELL_GCM_LOCATION_MAIN) ? "memmove" : "memcpy",
+							words[0], words[1], words[2], words[3],
+							std::byteswap(words[0]), std::byteswap(words[1]),
+							std::byteswap(words[2]), std::byteswap(words[3]),
+							guest_addr, guest_same,
+							guest_words[0], guest_words[1], guest_words[2], guest_words[3]);
 					});
 				// EXCISE-END fp-literal-write-watch
 
@@ -159,6 +319,15 @@ namespace rsx
 				}
 
 				rsx::reservation_lock<true> rsx_lock(dst_address, data_length);
+
+				// EXCISE-BEGIN fp-stage-watch
+				// TODO(excise): level 5; the 16-bit form consumes a 32-bit
+				// source word per element, so watch that many source bytes.
+				if (const u32 stage_addr = RSX(ctx)->fifo_ctrl->translate_address(src_offset); stage_addr != umax)
+				{
+					rsx::fp_stage_watch::watch_range(stage_addr, count * 4);
+				}
+				// EXCISE-END fp-stage-watch
 
 				auto convert = [](u32 input) -> u16
 				{
@@ -194,7 +363,16 @@ namespace rsx
 					src, count * 4,
 					[&](char* b, usz n)
 					{
-						std::snprintf(b, n, "x=%u y=%u pitch=%u count=%u", x, y, out_pitch, count);
+						// TODO(excise): level 5; the FIFO cursor and PUT for
+						// the converted form, so a destination block that
+						// reads back as the source word is distinguishable
+						// from one that copied through this path.
+						std::snprintf(b, n, "x=%u y=%u pitch=%u count=%u fifo=%u put=%llx span=%llx dst=%x:%x mode=convert",
+							x, y, out_pitch, count,
+							src_offset,
+							static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
+							static_cast<unsigned long long>(reinterpret_cast<u64>(fifo_span.data())),
+							dst_dma, dst_offset);
 					});
 				// EXCISE-END fp-literal-write-watch
 

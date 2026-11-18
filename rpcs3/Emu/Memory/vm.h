@@ -317,6 +317,15 @@ namespace vm
 			return _ref<u16>(addr);
 		}
 
+		// EXCISE-BEGIN fp-stage-store-watch
+		// TODO(excise): level 5; defined with the staging watch.  Called after a
+		// guest or HLE store so the producer of a byte-reversed staging word can
+		// be named.  Returns immediately unless RSX_FP_STAGE_WATCH is set.
+		// `from_jit` selects the matching per-layer kill switch so a crash can
+		// be bisected to a hook family without a rebuild.
+		void fp_stage_watch_write(u32 addr, u32 size, const char* writer, u32 pc, bool from_jit);
+		// EXCISE-END fp-stage-store-watch
+
 #ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
 		template <typename T, typename U = T>
 		inline void write(u32 addr, U value, ppu_thread* ppu = nullptr)
@@ -331,6 +340,14 @@ namespace vm
 			{
 				*_ptr<dest_t>(addr) = value;
 			}
+
+			// EXCISE-BEGIN fp-stage-store-watch
+			// TODO(excise): level 5; after the store, so the watcher reads the
+			// bytes that were actually written.  HLE and interpreter stores come
+			// through here; the JIT has its own hook.  Bounded and inert unless
+			// RSX_FP_STAGE_WATCH names a file.
+			fp_stage_watch_write(addr, sizeof(dest_t), "vm-write", 0, false);
+			// EXCISE-END fp-stage-store-watch
 
 #ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
 			if (ppu && g_breakpoint_handler.HasBreakpoint(addr, breakpoint_types::bp_write))

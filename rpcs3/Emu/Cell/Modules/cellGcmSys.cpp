@@ -8,6 +8,12 @@
 #include "Emu/Cell/lv2/sys_process.h"
 #include "Emu/RSX/RSXThread.h"
 
+// EXCISE-BEGIN fp-stage-store-watch
+// TODO(excise): level 5; arms the staging watch with the io ring address and
+// attributes the command-buffer writes this module makes itself.
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-stage-store-watch
+
 #include "cellGcmSys.h"
 #include "sysPrxForUser.h"
 
@@ -38,6 +44,13 @@ namespace rsx
 {
 	u32 make_command(vm::bptr<u32>& dst, u32 start_register, std::initializer_list<any32> values)
 	{
+		// EXCISE-BEGIN fp-stage-store-watch
+		// TODO(excise): level 5; the packet this builder writes is part of the
+		// command stream, so a staging word can come from here.  The watch drops
+		// the call unless the destination is in the io ring.
+		const vm::bptr<u32> stage_begin = dst;
+		// EXCISE-END fp-stage-store-watch
+
 		*dst++ = start_register << 2 | static_cast<u32>(values.size()) << 18;
 
 		for (const any32& cmd : values)
@@ -45,12 +58,33 @@ namespace rsx
 			*dst++ = cmd.as<u32>();
 		}
 
+		// EXCISE-BEGIN fp-stage-store-watch
+		// TODO(excise): level 5; the whole packet, after the writes.
+		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1)))
+		{
+			rsx::fp_stage_watch::note_mem(stage_begin.addr(), u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1),
+				"gcm-command", 0, "-", "make_command");
+		}
+		// EXCISE-END fp-stage-store-watch
+
 		return u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1);
 	}
 
 	u32 make_jump(vm::bptr<u32>& dst, u32 offset)
 	{
+		// EXCISE-BEGIN fp-stage-store-watch
+		// TODO(excise): level 5; the jump word is also a command-stream write.
+		const vm::bptr<u32> stage_begin = dst;
+		// EXCISE-END fp-stage-store-watch
+
 		*dst++ = RSX_METHOD_OLD_JUMP_CMD | offset;
+
+		// EXCISE-BEGIN fp-stage-store-watch
+		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), sizeof(u32)))
+		{
+			rsx::fp_stage_watch::note_mem(stage_begin.addr(), sizeof(u32), "gcm-jump", 0, "-", "make_jump");
+		}
+		// EXCISE-END fp-stage-store-watch
 
 		return sizeof(u32);
 	}
@@ -502,6 +536,24 @@ error_code cellGcmInitInternal(ppu_thread& ppu, vm::pptr<CellGcmContextData> con
 
 	gcm_cfg.current_config.ioSize = ioSize;
 	gcm_cfg.current_config.ioAddress = ioAddress;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; the io region is where the guest builds command
+	// buffers, so a store there is watched from the first frame, before any
+	// nv308a has read a range.  The game passes ioAddress 0 and reaches the ring
+	// through the io page table, so the guest base comes from translating io
+	// offset 0; `cmdSize` is the fragment size the callback walks the ring with.
+	if (render->fifo_ctrl)
+	{
+		const u32 stage_base = render->fifo_ctrl->translate_address(0);
+
+		if (stage_base != umax)
+		{
+			rsx::fp_stage_watch::arm_ring(stage_base, ioSize ? ioSize : 0x20'00000, cmdSize);
+		}
+	}
+	// EXCISE-END fp-stage-store-watch
+
 	gcm_cfg.current_config.localSize =  gcm_cfg.local_size;
 	gcm_cfg.current_config.localAddress =  gcm_cfg.local_addr;
 	gcm_cfg.current_config.memoryFrequency = 650000000;
@@ -1582,10 +1634,29 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 	// Flush command buffer (ie allow RSX to read up to context->current)
 	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
 
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; the submit boundary.  The line names the PPU thread
+	// and its guest PC at the call, and the get/put pair of this fragment, so a
+	// staging store can be ordered against the frame it was submitted in.
+	if (rsx::fp_stage_watch::enabled())
+	{
+		rsx::fp_stage_watch::log_submit((u64{ctrl.get.load()} << 32) | ctrl.put.load(), ppu.cia, ppu.get_name().c_str());
+	}
+	// EXCISE-END fp-stage-store-watch
+
 	std::pair<u32, u32> newCommandBuffer = getNextCommandBufferBeginEnd(context->current.addr());
 	u32 offset = getOffsetFromAddress(newCommandBuffer.first);
 	// Write jump instruction
 	*context->current = RSX_METHOD_OLD_JUMP_CMD | offset;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; this write does not pass through vm::write.
+	if (rsx::fp_stage_watch::interesting(context->current.addr(), sizeof(u32)))
+	{
+		rsx::fp_stage_watch::note_mem(context->current.addr(), sizeof(u32), "gcm-jump", ppu.cia,
+			ppu.get_name().c_str(), "cellGcmCallback");
+	}
+	// EXCISE-END fp-stage-store-watch
 	// Update current command buffer
 	context->begin.set(newCommandBuffer.first);
 	context->current.set(newCommandBuffer.first);

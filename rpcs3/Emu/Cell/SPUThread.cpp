@@ -24,6 +24,11 @@
 #include "Emu/Cell/timers.hpp"
 
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+// EXCISE-BEGIN fp-stage-store-watch
+// TODO(excise): level 5; an SPU put writes guest memory, so the staging watch
+// needs its entry point here to name the SPU that produced a staging word.
+#include "Emu/RSX/Core/RSXProgramWriteWatch.h"
+// EXCISE-END fp-stage-store-watch
 
 #include <cmath>
 #include <cfenv>
@@ -2134,6 +2139,37 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 	// Keep src point to const
 	u8* dst = nullptr;
 	const u8* src = nullptr;
+
+	// EXCISE-BEGIN fp-stage-store-watch
+	// TODO(excise): level 5; a put leaves `args.size` bytes at `args.eal`, so
+	// report that region on every exit path of this function (plain, atomic,
+	// MMIO), not only the one that returns normally.  `tag`/`lsa` name the SPU
+	// side of the transfer; the watch drops the call unless the address falls in
+	// the io ring or an nv308a source range.
+	struct stage_guard_t
+	{
+		u32 addr;
+		u32 size;
+		const spu_thread* thread;
+		u32 tag;
+		u32 lsa;
+		bool active;
+
+		~stage_guard_t()
+		{
+			if (!active)
+			{
+				return;
+			}
+
+			char detail[64];
+			std::snprintf(detail, sizeof(detail), "tag=%u lsa=%03x", tag, lsa);
+			rsx::fp_stage_watch::note_mem(addr, size, "spu-put", 0,
+				thread ? thread->get_name().c_str() : "-", detail);
+		}
+	} stage_guard{args.eal, args.size, _this, args.tag, args.lsa,
+		!is_get && rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(args.eal, args.size)};
+	// EXCISE-END fp-stage-store-watch
 
 	std::tie(dst, src) = [&]() -> std::pair<u8*, const u8*>
 	{

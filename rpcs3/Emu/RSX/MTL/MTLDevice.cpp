@@ -352,15 +352,14 @@ namespace mtl
 	void device::import_guest_window()
 	{
 		// HLD-02 §2.1.  Import the unprotected mirror, not the guest view: the no-copy
-		// import requires every page of the range writable (Metal returns nil otherwise)
-		// and the guest view carries protection::no pages.  The mirror aliases the same
-		// guest RAM (vm.cpp:846) and is how the renderers reach guest memory
-		// (vm::get_super_ptr).  The emulator owns the region, so the deallocator must
-		// not free it.
-		// macOS/ARM reserves guest memory PROT_NONE (upstream 8d6b42e78), but a
-		// no-copy Metal buffer over the unprotected mirror requires every page
-		// writable or newBuffer returns nil. Commit the mirror first.
-		utils::memory_commit(vm::g_sudo_addr, guest_address_space, utils::protection::rw);
+		// import requires every page of the range writable (Metal returns nil otherwise),
+		// and the guest view carries protection::no pages — macOS/ARM reserves guest
+		// memory PROT_NONE (upstream 8d6b42e78).  The mirror aliases the same guest RAM
+		// (vm.cpp:846) and is how the renderers reach guest memory (vm::get_super_ptr).
+		// The emulator owns the region, so the deallocator must not free it.  Make the
+		// mirror read-write first; memory_protect is the mprotect alone, where
+		// memory_commit would also prefault all 4 GiB with MADV_WILLNEED.
+		utils::memory_protect(vm::g_sudo_addr, guest_address_space, utils::protection::rw);
 		m_window.buffer = m_device->newBuffer(vm::g_sudo_addr, guest_address_space, MTL::ResourceStorageModeShared, nullptr);
 		if (!m_window.buffer)
 		{
