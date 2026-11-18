@@ -736,7 +736,11 @@ namespace rsx
 				const u32 alt = std::byteswap(slot);
 				const bool suspect = !plausible(slot) && plausible(alt);
 				const bool needle = word == needle_word() || std::byteswap(word) == needle_word();
-				const bool band = world_quad_shape(addr + off) && !authored_word(slot) && authored_word(alt);
+				// VERY GENEROUS: the patcher may write the animated word before
+				// its static siblings exist in memory, so no quad context is
+				// required.  A word whose T-decode is out of the authored band
+				// but whose byte-reversed T-decode is in it is enough.
+				const bool band = !authored_word(slot) && authored_word(alt);
 				const bool stage = in_stage;
 
 				// A shape hit is as rare as an exact needle hit and names the
