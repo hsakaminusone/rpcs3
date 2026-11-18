@@ -906,16 +906,14 @@ namespace rsx
 			u32 words[4] = {};
 			std::memcpy(words, mem, sizeof(words));
 
-			const f32 v0 = std::bit_cast<f32>(de_transpose(words[0]));
 			const f32 v1 = std::bit_cast<f32>(de_transpose(words[1]));
-			const f32 v2 = std::bit_cast<f32>(de_transpose(words[2]));
 			const f32 v3 = std::bit_cast<f32>(de_transpose(words[3]));
 
-			return words[0] == words[2]
-				&& std::abs(v1 - 2.0f) < 1.0e-3f
-				&& std::abs(v3 - 1.0f) < 1.0e-3f
-				&& !authored_word(de_transpose(words[0]))
-				&& authored_word(std::byteswap(de_transpose(words[0])));
+			// The patcher writes the two animated lanes one at a time, so at
+			// the moment of a store the other animated lane may still hold the
+			// authored value.  Only the static 2.0/1.0 siblings are required.
+			return std::abs(v1 - 2.0f) < 1.0e-3f
+				&& std::abs(v3 - 1.0f) < 1.0e-3f;
 		}
 
 		static u32 needle_word()
