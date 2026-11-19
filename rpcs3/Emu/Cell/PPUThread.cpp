@@ -5829,8 +5829,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			if (g_cfg.core.ppu_set_vest)
 				settings += ppu_settings::accurate_vest;
 
-			// Write version, hash, CPU, settings
-			fmt::append(obj_name, "v9-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
+			// Write version, hash, CPU, settings.  The hash covers the guest
+			// module bytes, not the translator, so this literal must be bumped
+			// whenever PPUTranslator's emitted code changes -- otherwise the old
+			// object is loaded from cache and the change never runs.  v10 is the
+			// stage-store-watch hook; without it every cached object predates the
+			// hook and no PPU store is ever reported.
+			fmt::append(obj_name, "v10-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
 		}
 
 		if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())

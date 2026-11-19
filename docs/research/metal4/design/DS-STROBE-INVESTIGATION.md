@@ -72,11 +72,23 @@ duplicate: this file is the *why*, that one is the *how*).
   ranges to the whole armed ring (`RSXProgramWriteWatch.h`) so a split 1/2-byte
   producer is visible. Built green and scrub-clean. The run that used them
   (`run-20261119-095732-ds24b`) logged zero hits on all three.
-* **Basically no store hook has ever seen the defect word.** Across four
-  `ds24b` runs the watch logged 4000–5750 stores per run (`spu-put`,
-  `spu-putllc`, `vm-write`; zero `ppu-stw`, zero `spu-list-put`), and **none**
-  of them carried any of the 288 distinct defect words the fills actually
-  delivered. The ring *is* armed now and ring stores are logged. A fixed
+* **The PPU store hook never ran — the cache was never invalidated (F43).**
+  `PPUThread.cpp` names the PPU object cache `v9-kusa-<module-hash>-…`, and the
+  hash covers the guest module bytes, **not** the translator. `cb7b3c811` added
+  the `__ppu_stage_watch` calls to `PPUTranslator` without bumping that literal,
+  so every run loaded the objects compiled on **2026-11-12**, six days before
+  the hook existed: all 233 cached EBOOT objects contain zero references to
+  `__ppu_stage_watch`, and no `.obj.gz` anywhere in the cache is newer than
+  2026-11-14. Zero `ppu-stw` lines is therefore **expected**, not evidence. The
+  literal is now `v10-kusa`; the rebuilt binary carries `v10-kusa` and no
+  `v9-kusa`. Every PPU-layer negative from the four `ds24b` runs is void until
+  one run recompiles the cache.
+* **What the store watch actually proved (before F43).** Across four `ds24b`
+  runs the watch logged 4000–5750 stores per run (`spu-put`, `spu-putllc`,
+  `vm-write`; zero `ppu-stw`, zero `spu-list-put`), and **none** of them
+  carried any of the 288 distinct defect words the fills actually delivered.
+  `spu-safe-v1-tane.dat` was rewritten on 2026-11-18, so the SPU hook did run;
+  `vm::write` is host-side and ran; only the PPU JIT layer is void (F43). The ring *is* armed now and ring stores are logged. A fixed
   needle (`9d263fbd`) was present one run and absent the next: the word
   animates, so a literal needle is a moving target and shape matching is the
   only stable filter. The accurate-SPU-DMA configuration changed nothing, which
@@ -171,13 +183,15 @@ duplicate: this file is the *why*, that one is the *how*).
   **Strobe:** one capture (`ds24c`) with the `73d1e6ad4` hooks (`nv3089-host` /
   `nv0039-host`, `stage-partial` over the whole armed ring) plus the proven
   `bswap32-all` oracle, pressing F12 at a ground white flash, the grey flicker,
-  and the half-sharp seam. Score with `build/probe/summarize-stage.py`; the
-  question is whether a 1/2-byte store now composes a defect word, or whether a
-  blit engine is the writer. Then `ds25` (`RSX_FP_STAGE_FIX=stage`, oracle
-  **off**) remains the producer-side hypothesis test, unchanged: the ground
-  stops flashing iff the producer store is the whole story. Per-layer kill
-  switches (`RSX_FP_STAGE_NO_JIT`, `_NO_SPU`, `_NO_VMW`) are wired for
-  bisection.
+  and the half-sharp seam. **Before any store is compared, prove the PPU cache
+  recompiled (F43):** a `v10-kusa-*.obj.gz` exists for `EBOOT.BIN` and contains
+  `__ppu_stage_watch`, and `stage.log` has `ppu-stw`/`ppu-stwbrx` lines at all.
+  Score with `build/probe/summarize-stage.py`; the question is whether a
+  1/2-byte store now composes a defect word, or whether a blit engine is the
+  writer. Then `ds25` (`RSX_FP_STAGE_FIX=stage`, oracle **off**) remains the
+  producer-side hypothesis test, unchanged: the ground stops flashing iff the
+  producer store is the whole story. Per-layer kill switches
+  (`RSX_FP_STAGE_NO_JIT`, `_NO_SPU`, `_NO_VMW`) are wired for bisection.
 * **The producer-side experiment (default off, ~50 % prior).** If the animated
   lane is a plain big-endian store of the word the fill will `T`, then the
   bytes are one endianness away from correct *at the producer*, and
@@ -285,6 +299,7 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | F40 | **The seam is intermittent per frame and the statistics are content-dependent.** One metric (mean absolute green-channel step per 2 px, y stride 4; band ratio = left/right within each 120-px y band) over the ten `host-sample-*-addrc07a0000` files: 6638/6640 black-frame signature (L/R mean 3.74/0.80); 6639 black (0.03/0.00); 6642 L/R mean 10.09/15.37, HF 1.19/2.10, band ratios 0.74/0.54/0.45/0.58/0.55/0.47; **6643 19.19/25.10, HF 2.24/4.20, bands 0.59/0.21/0.09/0.16/0.85/1.38 (strong seam)**; 6731 17.66/22.47, HF 2.18/1.67, bands 0.79/0.41/0.23/0.47/2.14/2.17; 6732 8.89/13.56, HF 1.05/1.85, bands 0.74/0.54/0.45/0.59/0.56/0.47; 6733 58.58/65.67, HF 2.96/2.43, bands 0.94/0.76/0.49/0.78/2.10/1.79; 6734 8.68/13.24, HF 1.02/1.80, same 0.74/0.54/0.44/0.59/0.56/0.47; 6735 16.99/20.85, HF 2.15/1.82, bands 0.81/0.61/0.31/0.48/1.95/2.23. 6642/6732/6734 are the same scene at three exposures (ratios agree to two decimals); 6733 is the brightest sample and has no seam, so the seam does not simply track brightness. The conclusive evidence of a blur is the visual crop (the character's head crossed at `x = 640`); the ratios are a locator, not a proof. | The ten samples, measured with the stated metric; `seam-6643-5x.png`. |
 | F41 | **The existing capture cannot bracket one frame's post chain.** The capture dumps a bound texture image at the draw that binds it, once per host image per capture frame (dedupe key is the `MTL::Texture*`, serial `frame*100 + unit`). Which stage that is depends on where the capture window opens: `0xc07a0000` is first bound at `fp 141` (pre-effects) in frame 6642, but at the present compose (`fp 95`) in frames 6638/6643. A frame therefore carries **one** of the two stages, never both. The separate `world-target` dump is gated to 8 per capture and `ucode_length >= 3000`, which fires on the first world draws only (target still the uniform `0x202020` clear); `host-census` is a 5-second periodic present dump (24/29/34 s …). The level-5 `capture frame … unit …` site also reaches its 4096-line cap around frame 6648 in a 120-frame window, so the later pressed windows have image files but no stage labels in the log. | `dumps/` inventory; `mtl-probe.log` `host image sample` / `world target draw` / `host image census`; `MTLGSRender.cpp:659-700, 4780-4880, 5814-5841`. |
 | F42 | **What the seam evidence leaves open.** The seam is in the present source (F39). The only *lit* pre-effects sample (6642, at `fp 141`) is clean and the only *lit* present-source sample (6643, at `fp 95`) is seamed; the other labelled samples (6638 present-source, 6639 pre-effects) are black-class, and no single frame has both stages. Candidates, all before the HUD: the 115 world draws, `fp 141` (no textures, cannot resample), the exact copy (F38), the 25 effects + `fp 57` sampling `0xc5870000` + depth, the bloom chain, `fp 88`, `fp 14`. The next capture must produce the pre-effects and present-source samples of the same frame. | F36–F41; §10 Phase 2.6. |
+| F43 | **The PPU JIT hook has never executed: the object cache was never invalidated.** The cache file name is `v9-kusa-<base57(module-hash)>-<base57(settings)>-<cpu>.obj` (`PPUThread.cpp:5833`); the hash covers the guest module bytes and settings, not `PPUTranslator`'s output. `cb7b3c811` (2026-11-18 12:29) added the `__ppu_stage_watch` calls to `WriteMemory`/`STVLX`/`STVRX` and did **not** bump the literal, so `jit_compiler::load_object` returned the old objects and nothing recompiled. Measured: all **233** `v9-kusa-*.obj.gz` under `~/Library/Caches/rpcs3/cache/BLUS30443/ppu-…-EBOOT.BIN/` are dated 2026-11-12 20:36 and `gzcat … \| grep -c __ppu_stage_watch` is **0** for every one; across the whole cache, **0 of 372** `.obj.gz` are newer than 2026-11-14; `spu-safe-v1-tane.dat` was rewritten 2026-11-18 13:57, so the SPU cache did recompile. Fixed by bumping the literal to `v10-kusa` (§11, 2026-11-19 cache entry); the rebuilt `rpcs3` contains `v10-kusa` and no `v9-kusa`, `rpcs3_test` 687/687. Consequence: the zero `ppu-stw`/`ppu-stwbrx` result in every run before this fix says nothing about PPU stores, and the PPU layer is the most likely producer. | `PPUThread.cpp:5832`; `Utilities/JITLLVM.cpp:963`; cache inventory; F34. |
 
 ---
 
@@ -327,7 +342,7 @@ buffer holds the half-swapped word*. Ordered by what the next run can kill.
 | H2 | ~~**The oracle changes the image but the strobe survives → the epilogue re-reads the lane elsewhere.**~~ **Answered by `ds23` (F24):** with every `[W,2,·,1]` family member corrected, the full-screen strobe is gone. The epilogue's trailing pair was the whole full-screen mechanism. | Closed. |
 | H7 | **The residual ground/upper-half flicker is a stray lane outside the trailing pair.** The oracle corrects only the two trailing quads and `literal watch` only reads those, so a `[W,2,W,1]`-shaped stray in, say, the lighting or ambient quad of the ground shader would survive and would saturate/zero the lit term without touching the epilogue. F29 bounds it: no whole-quad transposition exists in 4096 fills, but `neither` quads do (max 14), so a two-lane stray in a non-trailing quad is still possible. | Whole-image per-lane census (every constant quad, not the tail), an extended `literal watch` that names the quad/lane that changed, and `bswap32-any` (see §10) as the functional test. |
 | H8 | **The blur is introduced after the world draw but before the HUD.** The HUD is always sharp, so the present compose is excluded (F39); the world target is blurred while the HUD drawn into the same target is not. Candidates: a half-resolution intermediate sampled by a pre-HUD post pass, a per-half UV/derivative defect, or a stale/ghosted copy. The copy is excluded (F38); the bloom chain is the only blurred source (F38); the remaining passes are the 25 effects + `fp 57` + `fp 88`. | Dump the world colour target both pre-effects (`fp 141`) and at the present compose (`fp 95`) **in the same frame**; if the pre-effects image is already blurred the world draws add it, if only the present source is blurred a pre-HUD pass adds it. Then bracket the ~28-draw pre-HUD chain. |
-| H9 | **The producer is the per-frame ucode patcher writing through an emulated store that loses a 32-bit byte reversal.** F26 says the word is `T(W)` with the endianness of a plain `stw`; the correct slot needs the `stwbrx` order. Candidates, in order: (a) the guest patcher's own store path is fine and the bytes are written through an RPCS3 helper that swaps at 16-bit granularity; (b) the game's inline FIFO packet is produced by an SPU MFC transfer whose element size is 2 instead of 4; (c) the packet builder applies `T` to a BE value and never reverses. **Update 2026-11-19: (b) is refuted (accurate-SPU-DMA run identical), and no store hook has seen the word in 4 runs / 288 distinct words.** | **Implemented (F34):** the `stage-store` line names the writer (`writer=`, `pc=`, `thread=`, or SPU `tag`/`lsa`) for the exact 16-byte source quad an `nv308a` later copies. **Separate test (F35):** `RSX_FP_STAGE_FIX=stage` with the oracle off; the ground stops alternating iff the producer store is the whole story. |
+| H9 | **The producer is the per-frame ucode patcher writing through an emulated store that loses a 32-bit byte reversal.** F26 says the word is `T(W)` with the endianness of a plain `stw`; the correct slot needs the `stwbrx` order. Candidates, in order: (a) the guest patcher's own store path is fine and the bytes are written through an RPCS3 helper that swaps at 16-bit granularity; (b) the game's inline FIFO packet is produced by an SPU MFC transfer whose element size is 2 instead of 4; (c) the packet builder applies `T` to a BE value and never reverses. **Update 2026-11-19: (b) is refuted (accurate-SPU-DMA run identical), and no store hook that actually ran has seen the word in 4 runs / 288 distinct words — but F43 shows the PPU hook never ran, so that negative covers only the SPU, `vm::write` and RSX-blit layers.** | **Implemented (F34):** the `stage-store` line names the writer (`writer=`, `pc=`, `thread=`, or SPU `tag`/`lsa`) for the exact 16-byte source quad an `nv308a` later copies. **Separate test (F35):** `RSX_FP_STAGE_FIX=stage` with the oracle off; the ground stops alternating iff the producer store is the whole story. |
 | H10 | **The whole-image grey flicker is the same reversed constant in a fullscreen pass.** A ground lane cannot dim the HUD or the whole frame; a 2D post/tonemap/exposure program whose constant arrives out of band can. | List, from `fill.log`/`fix.log` of a `ds24b` run, every constant of every 2D program whose delivered value is out of the authored band at draw time; a program whose value tracks the grey phase is the candidate. Functional check: correct only that program's lane and see whether the grey goes. |
 | H11 | **The sharpness split is a tiled/regional pass that covers exactly one half.** The boundary is exactly `x = 640` (half of 1280) and only the right half is sharp, while the HUD is sharp; the seam is in the present-source image. A half-width scissor/viewport is excluded (E12), and so is the copy (E13) and any blit (E14). Remaining forms: a pre-HUD pass that samples a half-width region or a low-resolution source on one side, or the world draws themselves. | F42's one-frame pre-effects/present comparison first; then the manifest draw list names every pre-HUD candidate and its sampled addresses. |
 | H12 | **The world draws themselves generate the left half at a lower effective resolution.** If the pre-effects sample (`fp 141`) is already blurred, then the 115 world draws / their texture sampling produce it — e.g. a mip/LOD or texture-cache selection that changes at `x = 640`, or an attribute interpolation split (F7(b) flat-varying rule) that only affects one half. | Same one-frame comparison. If confirmed, diff the per-half sampled mip/LOD and the interpolated UVs of the world programs; dump one world texture pair at 1:1 and at the mip the left half selects. |
@@ -706,6 +721,47 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
+
+### 2026-11-19 (later) — code: the PPU store hook had never run; the object cache was stale
+
+One line changed, and it invalidates a headline negative from the previous four
+runs.
+
+**What was found.** `PPUThread.cpp` names each cached PPU object
+`v9-kusa-<base57(module-hash)>-<base57(settings)>-<cpu>.obj`. The hash covers
+the guest module bytes and the settings, **not** the translator, so the literal
+`v9-kusa` is the only thing that invalidates the cache when generated code
+changes. `cb7b3c811` added the `__ppu_stage_watch` calls to `WriteMemory`,
+`STVLX` and `STVRX` on 2026-11-18 12:29 and left the literal alone.
+
+Measured, with no emulator running:
+
+- every `v9-kusa-*.obj.gz` for `EBOOT.BIN` (233 files) is dated
+  **2026-11-12 20:36**;
+- `gzcat <obj> | grep -c __ppu_stage_watch` is **0** for all 233;
+- across the whole cache, **0 of 372** `.obj.gz` are newer than 2026-11-14,
+  while `spu-safe-v1-tane.dat` was rewritten on 2026-11-18 13:57 — so the SPU
+  cache did rebuild and the SPU hook did run.
+
+`jit_compiler::load_object` validates only the object-file format
+(`Utilities/JITLLVM.cpp:963`), so the stale objects were accepted and linked.
+The PPU JIT layer — the most likely writer of a per-frame ucode patch — was
+therefore **not watched in any run so far**, and "zero `ppu-stw`" is expected
+output, not a negative result.
+
+**Fix.** The literal in `PPUThread.cpp:5833` is now `v10-kusa`, with a comment
+stating the rule. Rebuilt `rpcs3` (the first `ninja rpcs3_test` only relinked
+the test binary; the app needed its own target): `strings` finds `v10-kusa` and
+`__ppu_stage_watch`, and no `v9-kusa`. `rpcs3_test` 687/687 (2 disabled).
+Scrub still clean (the literal is not `EXCISE` code; a one-time recompile in
+the scrubbed release is harmless and correct for a changed build).
+
+**What it changes.** §1's "no store hook has seen the word" is narrowed to the
+layers that ran (SPU, `vm::write`, RSX blit/partial); §4 gains F43; H9's
+2026-11-19 update is corrected. The next `ds24c` must first prove the cache
+recompiled (`v10-kusa-*.obj.gz` exists and contains the symbol) and that
+`stage.log` now has `ppu-stw`/`ppu-stwbrx` lines at all, before any store is
+compared to the defect words.
 
 ### 2026-11-19 (day) — offline: the seam lives in the present-source world target, and every half-width explanation is excluded
 
