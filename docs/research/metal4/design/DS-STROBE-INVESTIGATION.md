@@ -11,33 +11,59 @@ duplicate: this file is the *why*, that one is the *how*).
 
 ---
 
-## 1. Position as of 2026-11-18 (night)
+## 1. Position as of 2026-11-19
 
-* **Symptom now.** The full-screen black↔white strobe is **gone** (`ds23`:
-  51 of 96 sampled presents are `mixed`, and the world renders). What remains
-  is a smaller defect of the same family: the lit ground alternates white↔black
-  every frame (t4194 vs t4195), the upper half has grey/dark flicker, and the
-  world is blurred while the HUD is sharp (left half blurred / right half sharp
-  in p4465; whole world blurred in t4195). The user reports the environment is
-  visible and the run is "a LOT better". The blur/grey residual is **not yet
-  attributed**; the next run's instrumentation targets it (§10, Phase 3).
+* **Symptom now.** With the family-wide oracle on, the full-screen black↔white
+  strobe stays **gone** and the world renders: the last four `ds24b` runs all
+  reached the world (frames 4000–6800) and the user confirms the environment is
+  visible. Three things remain, and **two of them are not explained yet**:
+  1. **Ground white flashes** (and the white↔black ground alternation). This is
+     the oracle's own gate, not a second defect: a lane is corrected only when
+     the `T`-decoded value is implausible *and* its byte swap is plausible, so
+     of 1260 world draws, 154 (12.2 %) deliver finite *out-of-band* values
+     (−0.0397, 51.9, 3533.9) inside the `[1e-6, 1e6]` plausibility window and
+     are left as delivered, against the authored band `[0.315, 2.222]`.
+  2. **The whole image flickers grey.** This is *not* the ground lane: a global
+     dimming means the same reversed constant is also consumed by a full-screen
+     pass (post/tonemap/exposure family). Open (H10), measurable from the same
+     `fix.log`/`fill.log` by listing every delivered constant of every
+     2D/fullscreen program whose value is out of band at draw time.
+  3. **The sharpness split is exact: only the right half is sharp.** The world
+     is blurred on the left and sharp on the right, with the boundary at
+     `x = 640` (half of 1280), while the HUD is sharp. The seam is already in
+     the world colour target before the present copy, so it is produced by the
+     world draws, not the present. Open (H11); the tape's per-region `detail`
+     energy is the offline measurement, and a capture with the seam visible is
+     the next evidence.
+  The user's own words on 2026-11-19: "the white flashes are still there on the
+  ground ... the whole image also flickers grey ... exact right half is only
+  sharp".
 * **Original symptom (ds21/ds22).** The 3D world alternated between black and
   white, with the correct image visible for milliseconds at a time. Geometry
   and depth were present and stable. The HUD's visibility is *not* a reliable
   class marker (F20). The user reports it as a Metal 4 backend defect.
-* **Tree.** `metal4-dev` = `9c8bb94d2` (39 ahead / 0 behind `upstream/master`
+* **Tree.** `metal4-dev` = `033f2fb8f` (46 ahead / 0 behind `upstream/master`
   `fb6737b1c`). The RSX FIFO parser is upstream's, byte-for-byte; the branch
-  parser plus its 9 tests are gone (`9c8bb94d2`).
-* **Built binary.** `build-tests/bin/rpcs3.app` and `rpcs3_test` rebuilt
-  2026-11-18 10:33 from the working tree (HEAD + the uncommitted items below),
-  carrying the Phase-2 arms and the family-wide literal oracle. `rpcs3_test`
-  687/687, 2 disabled. Release scrub clean (213 files deleted, 615 units
-  excised, 0 review / 0 residual / 0 orphan).
-* **Uncommitted.** (a) `MTLDevice.cpp` `import_guest_window()` uses
-  `utils::memory_protect(rw)` instead of `memory_commit` (drops the 4 GiB
-  `MADV_WILLNEED`); (b) the four arms in `MTLGSRender.cpp` /
-  `MTLInstrumentation.h` (F16); (c) the diagnostic truthiness fix (F17).
-  Rebuild + gates pass; (a) can be committed alone, (b)/(c) are `EXCISE`.
+  parser plus its 9 tests are gone (`9c8bb94d2`). `master` is pushed;
+  `release/metal4` is one squashed commit, never force-pushed. Yesterday's seven
+  commits are the RCA and instrumentation work listed in §11
+  (`cb7b3c811` … `033f2fb8f`), including two shipping fixes that are
+  independent of the strobe: the writable-mirror import (`cb7b3c811`) and the
+  readback `buffer_open` guard (`12b786b25`).
+* **Uncommitted at time of writing.** Three files, all `EXCISE`: the RSX blit
+  writers (`nv3089-host`, `nv0039-host`) in `nv3089.cpp`/`nv0039.cpp`, and
+  `stage-partial` logging extended from staging ranges to the whole armed ring
+  (`RSXProgramWriteWatch.h`) so a split 1/2-byte producer is visible. Built
+  green and scrub-clean; committed as `73d1e6ad4`.
+* **Basically no store hook has ever seen the defect word.** Across four
+  `ds24b` runs the watch logged 4000–5750 stores per run (`spu-put`,
+  `spu-putllc`, `vm-write`; zero `ppu-stw`, zero `spu-list-put`), and **none**
+  of them carried any of the 288 distinct defect words the fills actually
+  delivered. The ring *is* armed now and ring stores are logged. A fixed
+  needle (`9d263fbd`) was present one run and absent the next: the word
+  animates, so a literal needle is a moving target and shape matching is the
+  only stable filter. The accurate-SPU-DMA configuration changed nothing, which
+  refutes the SPU inline-PUT variant of H9.
 * **The strobe is now measured and its mechanism is identified.** `ds21` ran
   164 s with six F12 presses (frames 3008/3512/3834/3983/4038/4191) and produced
   the first pixel tape that contains the defect. The chain, all measured:
@@ -119,22 +145,16 @@ duplicate: this file is the *why*, that one is the *how*).
   pair** — the likely shape is the same stray-word producer in a non-trailing
   constant quad, which neither the oracle nor `literal watch` covers. That is
   a hypothesis, not yet evidence (H7 in §6).
-* **Next single action:** two runs. (1) `ds24b` — the Phase 3 producer census
-  (`RSX_FP_STAGE_WATCH`), with the proven `bswap32-all` oracle still on so the
-  picture is stable: it names the layer that stores the byte-reversed staging
-  word. `ds24` crashed before the world because the watch's own shadow table
-  was written out of bounds (fixed; see the §11 entry), and because the ring was
-  armed with `ioAddress == 0` and so was never armed at all (now translated
-  through the io page table). (2) `ds25` — the same watch armed as a *corrector*
-  (`RSX_FP_STAGE_FIX=stage`) with the oracle **off**: the producer-side
-  hypothesis test. Phase 3 is implemented as of this revision: one hook in
-  `PPUTranslator::WriteMemory` (plus the two masked vector stores and the
-  interpreter/HLE `vm::write`), one each in the SPU's `do_dma_transfer` and the
-  HLE command builders, all feeding a shape-filtered `fp_stage_watch` whose
-  range is armed from `cellGcmInit` and extended by every `nv308a` source
-  range. The shape predicate (F31) is what keeps the log small; the exact quad
-  is logged unconditionally so a partial or split producer cannot hide (§10,
-  §11 entries F34/F35). Per-layer kill switches (`RSX_FP_STAGE_NO_JIT`,
+* **Next single action:** finish the pending three-file commit, then one capture
+  (`ds24c`) with the new hooks (RSX blit writers `nv3089-host`/`nv0039-host`,
+  and `stage-partial` extended to the whole armed ring) plus the proven
+  `bswap32-all` oracle, pressing F12 at three states: a ground white flash, the
+  grey flicker, and the half-sharp seam. Score with
+  `build/probe/summarize-stage.py`; the question is whether a 1/2-byte store now
+  composes a defect word, or whether a blit engine is the writer. Then `ds25`
+  (`RSX_FP_STAGE_FIX=stage`, oracle **off**) remains the producer-side
+  hypothesis test, unchanged: the ground stops flashing iff the producer store
+  is the whole story. Per-layer kill switches (`RSX_FP_STAGE_NO_JIT`,
   `_NO_SPU`, `_NO_VMW`) are wired for bisection.
 * **The producer-side experiment (default off, ~50 % prior).** If the animated
   lane is a plain big-endian store of the word the fill will `T`, then the
@@ -275,7 +295,9 @@ buffer holds the half-swapped word*. Ordered by what the next run can kill.
 | H2 | ~~**The oracle changes the image but the strobe survives → the epilogue re-reads the lane elsewhere.**~~ **Answered by `ds23` (F24):** with every `[W,2,·,1]` family member corrected, the full-screen strobe is gone. The epilogue's trailing pair was the whole full-screen mechanism. | Closed. |
 | H7 | **The residual ground/upper-half flicker is a stray lane outside the trailing pair.** The oracle corrects only the two trailing quads and `literal watch` only reads those, so a `[W,2,W,1]`-shaped stray in, say, the lighting or ambient quad of the ground shader would survive and would saturate/zero the lit term without touching the epilogue. F29 bounds it: no whole-quad transposition exists in 4096 fills, but `neither` quads do (max 14), so a two-lane stray in a non-trailing quad is still possible. | Whole-image per-lane census (every constant quad, not the tail), an extended `literal watch` that names the quad/lane that changed, and `bswap32-any` (see §10) as the functional test. |
 | H8 | **The blur is introduced after the world draw.** The HUD is always sharp, so it is not the present path's scaling as a whole; the world image is blurred while the HUD overlay is not. Candidates: a half-resolution intermediate sampled by a post pass, a per-half UV/derivative defect, or a stale/ghosted copy. | Dump the world colour target and the present source of the *same* frame (both already exist separately); compare them by region. If the world target is sharp, the post/present pass adds the blur. |
-| H9 | **The producer is the per-frame ucode patcher writing through an emulated store that loses a 32-bit byte reversal.** F26 says the word is `T(W)` with the endianness of a plain `stw`; the correct slot needs the `stwbrx` order. Candidates, in order: (a) the guest patcher's own store path is fine and the bytes are written through an RPCS3 helper that swaps at 16-bit granularity; (b) the game's inline FIFO packet is produced by an SPU MFC transfer whose element size is 2 instead of 4; (c) the packet builder applies `T` to a BE value and never reverses. | **Implemented (F34):** the `stage-store` line names the writer (`writer=`, `pc=`, `thread=`, or SPU `tag`/`lsa`) for the exact 16-byte source quad an `nv308a` later copies. **Separate test (F35):** `RSX_FP_STAGE_FIX=stage` with the oracle off; the ground stops alternating iff the producer store is the whole story. |
+| H9 | **The producer is the per-frame ucode patcher writing through an emulated store that loses a 32-bit byte reversal.** F26 says the word is `T(W)` with the endianness of a plain `stw`; the correct slot needs the `stwbrx` order. Candidates, in order: (a) the guest patcher's own store path is fine and the bytes are written through an RPCS3 helper that swaps at 16-bit granularity; (b) the game's inline FIFO packet is produced by an SPU MFC transfer whose element size is 2 instead of 4; (c) the packet builder applies `T` to a BE value and never reverses. **Update 2026-11-19: (b) is refuted (accurate-SPU-DMA run identical), and no store hook has seen the word in 4 runs / 288 distinct words.** | **Implemented (F34):** the `stage-store` line names the writer (`writer=`, `pc=`, `thread=`, or SPU `tag`/`lsa`) for the exact 16-byte source quad an `nv308a` later copies. **Separate test (F35):** `RSX_FP_STAGE_FIX=stage` with the oracle off; the ground stops alternating iff the producer store is the whole story. |
+| H10 | **The whole-image grey flicker is the same reversed constant in a fullscreen pass.** A ground lane cannot dim the HUD or the whole frame; a 2D post/tonemap/exposure program whose constant arrives out of band can. | List, from `fill.log`/`fix.log` of a `ds24b` run, every constant of every 2D program whose delivered value is out of the authored band at draw time; a program whose value tracks the grey phase is the candidate. Functional check: correct only that program's lane and see whether the grey goes. |
+| H11 | **The sharpness split is a tiled/regional pass that covers exactly one half.** The boundary is exactly `x = 640` (half of 1280) and only the right half is sharp, while the HUD is sharp; the seam is in the world colour target before the present. | Compare the tape/present of the seam frame by region (left/right half gradient energy). If the left half has the energy of an upscaled or blurred source, identify the pass that produced it from the draw list of that frame; if both halves have the same source resolution, the blur is a post pass with a half-width extent. |
 
 Hypotheses H3 (two pipelines), H5 (FTZ) and H6 (output-chain amplification)
 from the previous revision are in §5. The slot/offset race is not required by
@@ -288,10 +310,12 @@ that would test it.
 
 | Path | What is in it |
 |---|---|
-| `build/probe/run-20261118-103456-ds23/` | **The run that removes the strobe (family-wide oracle).** Five F12 presses at frames 3384/3927/4209/4389/4465. `fix.log`: 221 834 corrected lanes across 40 distinct fp offsets; `mtl-probe.log`: 61-program `literal watch`, `world tail` in-band (`1.69832 2 1.69832 1`), `tape class` 32 black / 11 dark / 51 mixed / 2 white; `fill.log`/`watch.log` present. `png/` holds decoded present frames (`p4461` HUD-only white, `p4465` lit world, `t4194`/`t4195` white↔black ground). |
-| `build/probe/run-20261118-102603-ds22/` | **The first oracle run.** Four F12 presses (frames 4260/4688/4765/4915). `fix.log`: 4031 corrected lanes across the two large world programs; `mtl-probe.log` carries the 49-program `literal watch` census (F23) and the `tape class` timeline (still 140 black / 88 white / 81 dark / 11 mixed); `fill.log`/`watch.log` as in ds21. Present images, `fp-*`, manifests and fragment constants kept; the per-texture dumps were pruned for space. |
-| `build/probe/run-20261118-095414-ds21/` | **The run that measured the strobe.** Six F12 presses at frames 3008/3512/3834/3983/4038/4191; 80 present-stream images (F20), `fill.log` with 1331 fill records (1085 of them the two world programs, F19/F22), `watch.log` with the 308 nv308a chunk records, `mtl-probe.log` (world draws, feedback witness, tape timeline), `dumps/` (`fp-70`/`fp-63` ucode+glsl+const, tape slots, ring snapshots). The per-texture dumps were pruned; logs and timeline kept. |
-| `build/probe/run-20261117-183052-ds20/` | Last full DS capture: `dumps/` (host images, tape slots, ring snapshots), `fill.log` (fragment-constant fills, F10), `mtl-probe.log` (level-5 text), `watch.log` (guest ucode patches, F12). |
+| `build/probe/run-20261118-132833-ds24b/` … `-135546-ds24b/` | **The four producer-census runs** (oracle `bswap32-all`). All reached the world (frames 4000–6800). `stage.log` 4000–5750 stores per run, all `spu-put`/`spu-putllc`/`vm-write`, none carrying a defect word; `fix.log` 4–17 MB; `stage-nv308a.log` in the last two. `dumps/` holds `fp-*` (metal/glsl/const/ucode) for ~200 programs. The first run kept 2.5 GB of dumps; the rest were pruned harder. |
+| `build/probe/run-20261119-095732-ds24b/` | The `ds24b` run with RSX-blit and partial-store hooks (`73d1e6ad4`), oracle on: 4096 `spu-put`, 1480 `vm-write`, 8 `spu-putllc`, **zero** `nv3089-host`/`nv0039-host`/`stage-partial` and zero stores of any of the 156 defect words. Reached frame 7449; shutdown was the known MCJIT teardown. |
+| `build/probe/run-20261118-103456-ds23/` (removed) | **The run that removed the strobe (family-wide oracle).** Five F12 presses at frames 3384/3927/4209/4389/4465. `fix.log`: 221 834 corrected lanes across 40 distinct fp offsets; `mtl-probe.log`: 61-program `literal watch`, `world tail` in-band (`1.69832 2 1.69832 1`), `tape class` 32 black / 11 dark / 51 mixed / 2 white. The directory was pruned in the 2026-11-18 cleanup; the measurements above are what it reported. |
+| `build/probe/run-20261118-102603-ds22/` (removed) | **The first oracle run.** Four F12 presses (frames 4260/4688/4765/4915). `fix.log`: 4031 corrected lanes across the two large world programs; 49-program `literal watch` census (F23); still 140 black / 88 white / 81 dark / 11 mixed. |
+| `build/probe/run-20261118-095414-ds21/` (removed) | **The run that measured the strobe.** Six F12 presses at frames 3008/3512/3834/3983/4038/4191; 80 present-stream images (F20), 1331 fill records (1085 of them the two world programs, F19/F22), 308 nv308a chunk records. |
+| `build/probe/run-20261117-183052-ds20/` (removed) | Last full DS capture before ds21: fragment-constant fills (F10), level-5 text, guest ucode patches (F12). |
 | `docs/research/metal4/design/DS-SUMMARY-VERIFICATION-2026-11-17.md` | The decode of F10/F11 and the verification of the earlier summary claims. |
 | `docs/research/metal4/design/METAL4-SEMANTICS-MEASURED-2026-11-17.md` | Harness #1/#2: heap OOB, flat varying (F7). |
 | `docs/research/metal4/design/BEHAVIOR-PARITY-AUDIT-2026-11-17.md` | The Metal-vs-Vulkan audit; F4/F5 rest on it. |
@@ -617,7 +641,63 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
 
-### 2026-11-18 — `ds24`: crashed before the world; the crash was the watch's own shadow table
+### 2026-11-18 (afternoon–evening) — `ds24b` ×4 and the seven commits: the producer watch is live, and it is silent
+
+What was done (all committed, in order):
+
+1. `cb7b3c811` — the Phase-2.6/3 instrumentation and the producer watch; also
+   `MTLDevice::import_guest_window()` now imports with
+   `utils::memory_protect(rw)` instead of `memory_commit`, dropping a pointless
+   4 GiB `MADV_WILLNEED`. **Shipping fix, independent of the strobe.**
+2. `12b786b25` — `MTLCommandRecorder::flush_for_readback()` checks
+   `slot.buffer_open` before `endCommandBuffer()`; ring-arm dedupe and a
+   fallback. **Shipping crash fix**: reachable since ZCULL sync landed
+   (2026-11-05), reproduced 2026-11-18 with Apple's
+   `_commandAllocator && _storage` assertion.
+3. `7d17787e9` — watch the SPU writes that bypass `do_dma_transfer`
+   (inline list PUT, PUTLLC, PUTLLUC).
+4. `1746f0d03` — arm at `gcmMapEaIoAddress` with unioned ranges; shape-based hit.
+5. `ffb39986a` — accept a single animated lane in the shape.
+6. `6fb67f31e` — generous detector: any store whose half swap lands in the
+   authored band, logged anywhere.
+7. `033f2fb8f` — watch `ppu_write_mmio_aware_u32` raw stores (MMIO-classified
+   PPU stores bypassed `WriteMemory`'s hook).
+
+Runs: four `ds24b` (13:28, 13:36, 13:43, 13:55), all with the proven
+`bswap32-all` oracle, all reaching the world (frames 4000–6800). Every shutdown
+crash was the known, unrelated LLVM `MCJIT` teardown.
+
+Measured:
+- **The producer watch is silent on the defect.** 4000–5750 stores per run
+  (`spu-put`, `spu-putllc`, `vm-write`; zero `ppu-stw`, zero `spu-list-put`),
+  and **not one of them carried any of the 288 distinct defect words** the fills
+  delivered. The ring is armed (`stage-arm ring=38000000 len=02000000`), and
+  ring stores are logged, so this is a real negative for every hooked layer.
+- A fixed needle (`9d263fbd`) was present in one run and absent the next: the
+  word animates, so a literal needle is a moving target; only the shape filter
+  is stable.
+- The accurate-SPU-DMA configuration changed nothing → the SPU inline-PUT
+  variant of H9 is refuted.
+- The generous detector produced 4486 hits, all noise (e.g. `0x3f003f00` from
+  Havok); cross-referenced against the 52 real words, none matched.
+- **Residual quantified, and it is the oracle's gate.** 154 of 1260 world draws
+  (12.2 %) deliver finite but out-of-band transposed values (−0.0397, 51.9,
+  3533.9). They pass the `[1e-6, 1e6]` plausibility window, so `bswap32-all`
+  leaves them alone, while the authored band is `[0.315, 2.222]`. This is why
+  the ground still flashes even with the oracle on.
+- **The half-screen seam was localized** to the world colour target *before*
+  the present copy. The only quadrant-split passes are the shadow-map ones
+  (2048², four 1024² scissors); the colour passes are not split. Not
+  root-caused. The user's later observation sharpens it: plotted at `x = 640`,
+  exactly half of 1280, **only the right half is sharp**.
+
+What it changes: §4 gains the negative result (no store hook has ever seen the
+word); §6 gains H10 (whole-image grey flicker = the same reversed constant in a
+fullscreen pass) and H11 (the exact-half sharpness split). The next step is not
+another store hook — it is (a) the partial-store extension, (b) the RSX blit
+writers, both already written, and (c) reading the tape's per-region energy for
+the seam.
+
 
 What ran: the phase-3 census with the (untested) `bswap32-any` oracle, the full
 stray census, and `RSX_FP_STAGE_WATCH` on. Run dir
