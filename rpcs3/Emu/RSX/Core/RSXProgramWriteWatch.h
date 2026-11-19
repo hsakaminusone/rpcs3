@@ -785,7 +785,7 @@ namespace rsx
 			// A 1- or 2-byte store cannot complete an image word by itself, but
 			// inside a known staging range its bytes are part of one.  Log it so a
 			// split producer is visible; the address and byte value compose later.
-			if (in_stage && n < 4)
+			if ((in_stage || in_ring) && n < 4)
 			{
 				log_partial(addr, size, mem, n, writer, pc, thread, detail);
 			}

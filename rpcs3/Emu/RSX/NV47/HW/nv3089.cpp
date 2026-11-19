@@ -287,6 +287,15 @@ namespace rsx
 			u8* pixels_src = vm::_ptr<u8>(src_address + in_offset);
 			u8* pixels_dst = vm::_ptr<u8>(dst_address + out_offset);
 
+			// EXCISE-BEGIN fp-stage-store-watch
+			// TODO(excise): level 5; the CPU blit writes guest RAM through raw
+			// pointers, outside every CPU/SPU store hook.  Report the real
+			// destination span so a staging word delivered by this engine is
+			// attributed to it.  The GPU route returns earlier and never writes
+			// guest RAM.
+			rsx::fp_stage_watch::note_mem(dst_address + out_offset, dst_write_length, "nv3089-host", 0, "-", nullptr);
+			// EXCISE-END fp-stage-store-watch
+
 			if (dst_color_format != rsx::blit_engine::transfer_destination_format::r5g6b5 &&
 				dst_color_format != rsx::blit_engine::transfer_destination_format::a8r8g8b8)
 			{

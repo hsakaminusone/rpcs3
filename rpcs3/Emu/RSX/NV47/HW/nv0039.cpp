@@ -136,6 +136,14 @@ namespace rsx
 			// pointer so the span is the one the copy used.
 			utils::deferred_op watch([&]()
 			{
+				// EXCISE-BEGIN fp-stage-store-watch
+				// TODO(excise): level 5; the 2D copy writes guest RAM through raw
+				// pointers, outside every CPU/SPU store hook.  Report the real
+				// destination span after the copy so a staging word delivered by
+				// this engine is attributed to it.
+				rsx::fp_stage_watch::note_mem(write_address, write_length, "nv0039-host", 0, "-", nullptr);
+				// EXCISE-END fp-stage-store-watch
+
 				rsx::program_write_watch::note("nv0039", reinterpret_cast<u64>(dst), write_length, src, read_length,
 					[&](char* b, usz n)
 					{
