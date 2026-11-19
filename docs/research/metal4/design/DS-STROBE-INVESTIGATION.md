@@ -31,30 +31,47 @@ duplicate: this file is the *why*, that one is the *how*).
   3. **The sharpness split is exact: only the right half is sharp.** The world
      is blurred on the left and sharp on the right, with the boundary at
      `x = 640` (half of 1280), while the HUD is sharp. The seam is already in
-     the world colour target before the present copy, so it is produced by the
-     world draws, not the present. Open (H11); the tape's per-region `detail`
-     energy is the offline measurement, and a capture with the seam visible is
-     the next evidence.
+     the final world colour target that the present compose samples (F39), and
+     the HUD is drawn into that same target *before* the present (F39), so the
+     present compose cannot be the blur; which earlier stage adds it is not yet
+     bracketed (F42). Open (H11); the visual crop is the evidence, the
+     per-region statistics are content-dependent (F40).
   The user's own words on 2026-11-19: "the white flashes are still there on the
   ground ... the whole image also flickers grey ... exact right half is only
   sharp".
+* **Seam status (2026-11-19 daytime, offline pass).** A complete draw manifest
+  of a real frame (F36) plus the per-frame world-target samples settle several
+  candidates: every one of the 222 draws into the world target uses the full
+  `0,0,1280,720` scissor (F37, E12), the world feedback copy is byte-identical
+  to its source (F38, E13), no RSX blit runs in the instrumented run (E14), and
+  the bloom chain is the only blurred source in the frame (F38). The remaining
+  candidates are the world draws themselves and the pre-HUD passes that sample
+  the copy (F42). The seam is intermittent per frame: strong at 6643, mild at
+  6731/6735, and at the content-dependent baseline at 6642/6732/6734 (F40),
+  so it does not simply track frame brightness (6733 is the brightest sample
+  and has no seam). The single next measurement is one frame carrying both the
+  pre-effects sample (already taken at `fp 141`) and the present-source sample
+  of the same target (`fp 95`); the capture dedupes by host image, so one frame
+  carries only the first-bound stage, pre-effects or present, never both (F41).
 * **Original symptom (ds21/ds22).** The 3D world alternated between black and
   white, with the correct image visible for milliseconds at a time. Geometry
   and depth were present and stable. The HUD's visibility is *not* a reliable
   class marker (F20). The user reports it as a Metal 4 backend defect.
-* **Tree.** `metal4-dev` = `033f2fb8f` (46 ahead / 0 behind `upstream/master`
-  `fb6737b1c`). The RSX FIFO parser is upstream's, byte-for-byte; the branch
-  parser plus its 9 tests are gone (`9c8bb94d2`). `master` is pushed;
-  `release/metal4` is one squashed commit, never force-pushed. Yesterday's seven
-  commits are the RCA and instrumentation work listed in §11
-  (`cb7b3c811` … `033f2fb8f`), including two shipping fixes that are
-  independent of the strobe: the writable-mirror import (`cb7b3c811`) and the
-  readback `buffer_open` guard (`12b786b25`).
-* **Uncommitted at time of writing.** Three files, all `EXCISE`: the RSX blit
-  writers (`nv3089-host`, `nv0039-host`) in `nv3089.cpp`/`nv0039.cpp`, and
-  `stage-partial` logging extended from staging ranges to the whole armed ring
-  (`RSXProgramWriteWatch.h`) so a split 1/2-byte producer is visible. Built
-  green and scrub-clean; committed as `73d1e6ad4`.
+* **Tree.** `metal4-dev` = `64b79f799` plus the 2026-11-19 seam-doc commit
+  (49 ahead / 0 behind `upstream/master` `fb6737b1c`). The RSX FIFO parser is
+  upstream's, byte-for-byte; the branch parser plus its 9 tests are gone
+  (`9c8bb94d2`). `master` is pushed; `release/metal4` is one squashed commit,
+  never force-pushed. The RCA and instrumentation commits are `cb7b3c811` …
+  `033f2fb8f`, plus the blit/partial store hooks (`73d1e6ad4`) and this
+  document's two updates (`64b79f799` and the 2026-11-19 seam entry), including
+  two shipping fixes that are independent of the strobe: the writable-mirror
+  import (`cb7b3c811`) and the readback `buffer_open` guard (`12b786b25`).
+* **Blit/partial store hooks are committed** (`73d1e6ad4`). Three files, all
+  `EXCISE`: the RSX blit writers (`nv3089-host`, `nv0039-host`) in
+  `nv3089.cpp`/`nv0039.cpp`, and `stage-partial` logging extended from staging
+  ranges to the whole armed ring (`RSXProgramWriteWatch.h`) so a split 1/2-byte
+  producer is visible. Built green and scrub-clean. The run that used them
+  (`run-20261119-095732-ds24b`) logged zero hits on all three.
 * **Basically no store hook has ever seen the defect word.** Across four
   `ds24b` runs the watch logged 4000–5750 stores per run (`spu-put`,
   `spu-putllc`, `vm-write`; zero `ppu-stw`, zero `spu-list-put`), and **none**
@@ -145,17 +162,22 @@ duplicate: this file is the *why*, that one is the *how*).
   pair** — the likely shape is the same stray-word producer in a non-trailing
   constant quad, which neither the oracle nor `literal watch` covers. That is
   a hypothesis, not yet evidence (H7 in §6).
-* **Next single action:** finish the pending three-file commit, then one capture
-  (`ds24c`) with the new hooks (RSX blit writers `nv3089-host`/`nv0039-host`,
-  and `stage-partial` extended to the whole armed ring) plus the proven
-  `bswap32-all` oracle, pressing F12 at three states: a ground white flash, the
-  grey flicker, and the half-sharp seam. Score with
-  `build/probe/summarize-stage.py`; the question is whether a 1/2-byte store now
-  composes a defect word, or whether a blit engine is the writer. Then `ds25`
-  (`RSX_FP_STAGE_FIX=stage`, oracle **off**) remains the producer-side
-  hypothesis test, unchanged: the ground stops flashing iff the producer store
-  is the whole story. Per-layer kill switches (`RSX_FP_STAGE_NO_JIT`,
-  `_NO_SPU`, `_NO_VMW`) are wired for bisection.
+* **Next single action:** two independent measurements.
+  **Seam:** one capture that dumps `0xc07a0000` both at the existing `fp 141`
+  sample and at the present compose's source (`fp 95`), so the pre/post split
+  is in one frame (§10 Phase 2.6). If the seam is in both, the world draws make
+  it; if only at the present, the pass that adds it is named by bracketing the
+  pre-HUD chain.
+  **Strobe:** one capture (`ds24c`) with the `73d1e6ad4` hooks (`nv3089-host` /
+  `nv0039-host`, `stage-partial` over the whole armed ring) plus the proven
+  `bswap32-all` oracle, pressing F12 at a ground white flash, the grey flicker,
+  and the half-sharp seam. Score with `build/probe/summarize-stage.py`; the
+  question is whether a 1/2-byte store now composes a defect word, or whether a
+  blit engine is the writer. Then `ds25` (`RSX_FP_STAGE_FIX=stage`, oracle
+  **off**) remains the producer-side hypothesis test, unchanged: the ground
+  stops flashing iff the producer store is the whole story. Per-layer kill
+  switches (`RSX_FP_STAGE_NO_JIT`, `_NO_SPU`, `_NO_VMW`) are wired for
+  bisection.
 * **The producer-side experiment (default off, ~50 % prior).** If the animated
   lane is a plain big-endian store of the word the fill will `T`, then the
   bytes are one endianness away from correct *at the producer*, and
@@ -256,6 +278,13 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | F33 | **The JIT already has a supported way to call a C++ hook from generated code.** `s_link_table` (`PPUThread.cpp:5168`) resolves `__write_maybe_mmio32` (5188); a `__ppu_stage_watch` entry plus one `m_ir->CreateCall` in `WriteMemory` uses the same mechanism, so no ABI or symbol work is needed. | `PPUThread.cpp:5168-5195`; `PPUTranslator.h:324-335`. |
 | F34 | **The producer watch is implemented on every chokepoint, default off.** `rsx::fp_stage_watch` (`RSXProgramWriteWatch.h`) holds the `cellGcmInit` io ring plus every `nv308a` source range (merged), and is fed after the store by: `PPUTranslator::WriteMemory` (all guest JIT stores, with `is_be` per opcode and the guest PC), `STVLX`/`STVRX` (masked vector stores that bypass `WriteMemory`), `vm::write` (interpreter `PPU_WRITE` and HLE builders), `spu_thread::do_dma_transfer` (all list element PUTs included; the guard runs on every exit path), `rsx::make_command`/`make_jump` and `cellGcmCallback`'s raw jump store, and the two `nv308a` copy forms (`watch_range`). `set_rsx_dmactl` logs every submit with the PPU PC; `cellGcmCallback` logs get/put. A 4-byte word is logged if it is inside an `nv308a` source range, or it matches the F31 shape, or it equals `RSX_FP_STAGE_NEEDLE`; 1/2-byte stores inside a staging range are logged as `stage-partial`. Dedupe is per (site, address, word), with a 65536-line cap and 4096 per site. Inert unless `RSX_FP_STAGE_WATCH` names a file. | `RSXProgramWriteWatch.h` (`fp-stage-store-watch`), `PPUTranslator.cpp` (`WriteMemory`, `STVLX`, `STVRX`), `PPUThread.cpp` (`__ppu_stage_watch`), `vm.h`/`vm.cpp` (`fp_stage_watch_write`), `SPUThread.cpp` (`stage_guard_t`), `cellGcmSys.cpp` (arm + builders), `sys_rsx.cpp` (`log_submit`), `nv308a.cpp` (`watch_range`). |
 | F35 | **The producer-side corrector is a separate, falsifiable arm.** `RSX_FP_STAGE_FIX=stage` byte-reverses a suspect word *in guest memory after the store*, when all of: the F31 shape holds, two words of the 16-byte quad are plausible, and the address is inside an `nv308a` source range (`io`/`all` extend it to the whole ring). The log line is written first and carries the original word with `fix=1`, so the run remains self-describing. With the fill oracle off, a strobe-free ground confirms the producer is the whole story; a surviving strobe falsifies it even though the writer is named. | `RSXProgramWriteWatch.h` `fix_level()`/`quad_sibling_plausible()`/`note_mem()`; launch script `build/probe/launch-ds25.sh`. |
+| F36 | **A complete in-order draw list of a real frame is decoded.** `dumps/frame-6637-m9-manifest.txt` (header `present 6628`) holds 293 records, all `frame 6628`, in submission order: 51 shadow-map draws (`fp 103`, no colour target, 2048² depth `0xc4860000`, scissor 1024² quadrants at three corners), then **115 world draws** into `0xc07a0000` (`fp 86, 71, 62, 26, 20, 7, 118, 75, 16, 89, 101, 104, 23, 105, 4, 9, 36, 43, 64, 40`; all `prim 6` triangle lists); `fp 141` (52-vertex strip, no textures, constant colour); **copy 1** `fp 110`; 25 draws (`fp 155` 52-v strip sampling 2D+cube, `fp 142` 36 v, `fp 113` strips, `fp 87` 4 v, `fp 140` 4 v, `fp 134` 5 × `prim 6` 4–526 v) sampling `0xc5870000` + depth; **copy 2** `fp 110`; `fp 57` (2 strips); 16 bloom passes into their own targets; `fp 88` bloom composite into `0xc07a0000`; `fp 14` into `0xc4260000`; 70 × `fp 28` + 7 × `fp 8` + 1 × `fp 31` (HUD sprites/text/overlay, 4 v each) into `0xc07a0000`; `fp 95` present compose into `0xc03d0000`. | Manifest file; log `capture geometry` for the same draws; §11 2026-11-19 entry. |
+| F37 | **The world target has no half-width scissor or viewport.** All **222** draws that write `0xc07a0000` in frame 6628 use `scissor 0,0,1280,720` and the full viewport; zero are narrower. The only sub-full scissors in the frame are the shadow atlas (`1024,0,1024,1024`, `0,1024,1024,1024`, `1024,1024,1024,1024`) and the bloom targets (`640x360`, `320x180`, `160x90`, `64x64`, `16x16`, all at origin `0,0`). | Manifest parsed per record: 222 target-`0xc07a0000` draws, 0 non-full. |
+| F38 | **The world feedback copy is exact, and the bloom chain is the only blurred source.** `fp 110` is a 4-vertex full-screen draw `0xc07a0000 → 0xc5870000` (no depth). In frames 6642/6732/6734 the copied image is byte-identical to its source (`cmp` clean; the same FNV hash and row 0 `00040404`). The bloom chain then downsamples the **full** world target: `fp 56/96` → `0xc4610000` 640x360, `fp 91` → `0xc4710000` 640x360, `fp 10` → `0xc4260000` 1280x720, `fp 102` → `0xc4810000` 320x180, `fp 50` → `0xc41d1fc0`, `fp 66` → `0xc420a400` 320x180, `fp 102/66/47` → `0xc4250980`/`0xc4242840` 160x90, `fp 83` → 64x64, plus 16x16 targets; `fp 88` composites `0xc4260000` + `0xc4242840` back into `0xc07a0000`. | `cmp` on the three sample pairs; manifest texture-unit lines; `host image sample` hashes. |
+| F39 | **The present is a single 4-vertex compose, after the HUD.** `fp 95` is one `prim 8` draw, full scissor, sampling `0xc07a0000` into `0xc03d0000`. The 78 HUD/overlay draws (`fp 28/8/31`) write `0xc07a0000` immediately before it. A spatial filter at the present would therefore blur the HUD too; the HUD is sharp in the seam frames, so the blur is added before the HUD (or by the world draws). | Manifest records 249888–249966; `capture geometry frame 6643 … fp 95` with unit 0 = `0xc07a0000`; seam crops. |
+| F40 | **The seam is intermittent per frame and the statistics are content-dependent.** One metric (mean absolute green-channel step per 2 px, y stride 4; band ratio = left/right within each 120-px y band) over the ten `host-sample-*-addrc07a0000` files: 6638/6640 black-frame signature (L/R mean 3.74/0.80); 6639 black (0.03/0.00); 6642 L/R mean 10.09/15.37, HF 1.19/2.10, band ratios 0.74/0.54/0.45/0.58/0.55/0.47; **6643 19.19/25.10, HF 2.24/4.20, bands 0.59/0.21/0.09/0.16/0.85/1.38 (strong seam)**; 6731 17.66/22.47, HF 2.18/1.67, bands 0.79/0.41/0.23/0.47/2.14/2.17; 6732 8.89/13.56, HF 1.05/1.85, bands 0.74/0.54/0.45/0.59/0.56/0.47; 6733 58.58/65.67, HF 2.96/2.43, bands 0.94/0.76/0.49/0.78/2.10/1.79; 6734 8.68/13.24, HF 1.02/1.80, same 0.74/0.54/0.44/0.59/0.56/0.47; 6735 16.99/20.85, HF 2.15/1.82, bands 0.81/0.61/0.31/0.48/1.95/2.23. 6642/6732/6734 are the same scene at three exposures (ratios agree to two decimals); 6733 is the brightest sample and has no seam, so the seam does not simply track brightness. The conclusive evidence of a blur is the visual crop (the character's head crossed at `x = 640`); the ratios are a locator, not a proof. | The ten samples, measured with the stated metric; `seam-6643-5x.png`. |
+| F41 | **The existing capture cannot bracket one frame's post chain.** The capture dumps a bound texture image at the draw that binds it, once per host image per capture frame (dedupe key is the `MTL::Texture*`, serial `frame*100 + unit`). Which stage that is depends on where the capture window opens: `0xc07a0000` is first bound at `fp 141` (pre-effects) in frame 6642, but at the present compose (`fp 95`) in frames 6638/6643. A frame therefore carries **one** of the two stages, never both. The separate `world-target` dump is gated to 8 per capture and `ucode_length >= 3000`, which fires on the first world draws only (target still the uniform `0x202020` clear); `host-census` is a 5-second periodic present dump (24/29/34 s …). The level-5 `capture frame … unit …` site also reaches its 4096-line cap around frame 6648 in a 120-frame window, so the later pressed windows have image files but no stage labels in the log. | `dumps/` inventory; `mtl-probe.log` `host image sample` / `world target draw` / `host image census`; `MTLGSRender.cpp:659-700, 4780-4880, 5814-5841`. |
+| F42 | **What the seam evidence leaves open.** The seam is in the present source (F39). The only *lit* pre-effects sample (6642, at `fp 141`) is clean and the only *lit* present-source sample (6643, at `fp 95`) is seamed; the other labelled samples (6638 present-source, 6639 pre-effects) are black-class, and no single frame has both stages. Candidates, all before the HUD: the 115 world draws, `fp 141` (no textures, cannot resample), the exact copy (F38), the 25 effects + `fp 57` sampling `0xc5870000` + depth, the bloom chain, `fp 88`, `fp 14`. The next capture must produce the pre-effects and present-source samples of the same frame. | F36–F41; §10 Phase 2.6. |
 
 ---
 
@@ -274,6 +303,9 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | E9 | **H6 — output-chain amplification.** | F21: the tape's present stream carries the flip, the feedback witness is `live 0` everywhere, and the sampled depth image is byte-identical in both classes. Nothing after the world draw changes between black and white. |
 | E10 | **H3 — two compiled pipelines alternate.** | F19/F22: one fp 70 image, one pipeline, one quad layout; only the guest's animated word changes between fills. The class tracks that word, and a second variant is not needed to explain either class. |
 | E11 | **H5 — denormal/FTZ as the *cause*.** | F19: the shader's input is already out of range (measured up to `1e33` in magnitude, or below `1e-6`) before any arithmetic, so neither class requires a flush-to-zero. FTZ may still act on a *corrected* value at `ultra`; it is not the defect. |
+| E12 | **A half-width scissor or viewport on the world target.** | F37: all 222 draws into `0xc07a0000` in a real frame use `scissor 0,0,1280,720`; the only sub-full scissors are the shadow atlas quadrants and the bloom targets. |
+| E13 | **The `fp 110` world feedback copy adds the blur.** | F38: `0xc5870000` is byte-identical to its `0xc07a0000` source at 6642/6732/6734 (`cmp` clean, same hash); it is a plain 1-texture full-screen copy. |
+| E14 | **An RSX blit engine writes the world.** | The `73d1e6ad4` run (`run-20261119-095732-ds24b`) logs **zero** `nv3089-host`, `nv0039-host` and `stage-partial` lines; the world target is written only by draws (F36). |
 
 Two defects are known and **not** the strobe, but must not be confused with it:
 
@@ -294,10 +326,11 @@ buffer holds the half-swapped word*. Ordered by what the next run can kill.
 | H3 | **The fill is one patch stale** (the value it reads predates the guest's latest store). | The fill log's `fifo` cursor vs the patch's FIFO position. Low: the delivered value is not a *delayed* correct value, it is a different byte order, which staleness cannot produce. |
 | H2 | ~~**The oracle changes the image but the strobe survives → the epilogue re-reads the lane elsewhere.**~~ **Answered by `ds23` (F24):** with every `[W,2,·,1]` family member corrected, the full-screen strobe is gone. The epilogue's trailing pair was the whole full-screen mechanism. | Closed. |
 | H7 | **The residual ground/upper-half flicker is a stray lane outside the trailing pair.** The oracle corrects only the two trailing quads and `literal watch` only reads those, so a `[W,2,W,1]`-shaped stray in, say, the lighting or ambient quad of the ground shader would survive and would saturate/zero the lit term without touching the epilogue. F29 bounds it: no whole-quad transposition exists in 4096 fills, but `neither` quads do (max 14), so a two-lane stray in a non-trailing quad is still possible. | Whole-image per-lane census (every constant quad, not the tail), an extended `literal watch` that names the quad/lane that changed, and `bswap32-any` (see §10) as the functional test. |
-| H8 | **The blur is introduced after the world draw.** The HUD is always sharp, so it is not the present path's scaling as a whole; the world image is blurred while the HUD overlay is not. Candidates: a half-resolution intermediate sampled by a post pass, a per-half UV/derivative defect, or a stale/ghosted copy. | Dump the world colour target and the present source of the *same* frame (both already exist separately); compare them by region. If the world target is sharp, the post/present pass adds the blur. |
+| H8 | **The blur is introduced after the world draw but before the HUD.** The HUD is always sharp, so the present compose is excluded (F39); the world target is blurred while the HUD drawn into the same target is not. Candidates: a half-resolution intermediate sampled by a pre-HUD post pass, a per-half UV/derivative defect, or a stale/ghosted copy. The copy is excluded (F38); the bloom chain is the only blurred source (F38); the remaining passes are the 25 effects + `fp 57` + `fp 88`. | Dump the world colour target both pre-effects (`fp 141`) and at the present compose (`fp 95`) **in the same frame**; if the pre-effects image is already blurred the world draws add it, if only the present source is blurred a pre-HUD pass adds it. Then bracket the ~28-draw pre-HUD chain. |
 | H9 | **The producer is the per-frame ucode patcher writing through an emulated store that loses a 32-bit byte reversal.** F26 says the word is `T(W)` with the endianness of a plain `stw`; the correct slot needs the `stwbrx` order. Candidates, in order: (a) the guest patcher's own store path is fine and the bytes are written through an RPCS3 helper that swaps at 16-bit granularity; (b) the game's inline FIFO packet is produced by an SPU MFC transfer whose element size is 2 instead of 4; (c) the packet builder applies `T` to a BE value and never reverses. **Update 2026-11-19: (b) is refuted (accurate-SPU-DMA run identical), and no store hook has seen the word in 4 runs / 288 distinct words.** | **Implemented (F34):** the `stage-store` line names the writer (`writer=`, `pc=`, `thread=`, or SPU `tag`/`lsa`) for the exact 16-byte source quad an `nv308a` later copies. **Separate test (F35):** `RSX_FP_STAGE_FIX=stage` with the oracle off; the ground stops alternating iff the producer store is the whole story. |
 | H10 | **The whole-image grey flicker is the same reversed constant in a fullscreen pass.** A ground lane cannot dim the HUD or the whole frame; a 2D post/tonemap/exposure program whose constant arrives out of band can. | List, from `fill.log`/`fix.log` of a `ds24b` run, every constant of every 2D program whose delivered value is out of the authored band at draw time; a program whose value tracks the grey phase is the candidate. Functional check: correct only that program's lane and see whether the grey goes. |
-| H11 | **The sharpness split is a tiled/regional pass that covers exactly one half.** The boundary is exactly `x = 640` (half of 1280) and only the right half is sharp, while the HUD is sharp; the seam is in the world colour target before the present. | Compare the tape/present of the seam frame by region (left/right half gradient energy). If the left half has the energy of an upscaled or blurred source, identify the pass that produced it from the draw list of that frame; if both halves have the same source resolution, the blur is a post pass with a half-width extent. |
+| H11 | **The sharpness split is a tiled/regional pass that covers exactly one half.** The boundary is exactly `x = 640` (half of 1280) and only the right half is sharp, while the HUD is sharp; the seam is in the present-source image. A half-width scissor/viewport is excluded (E12), and so is the copy (E13) and any blit (E14). Remaining forms: a pre-HUD pass that samples a half-width region or a low-resolution source on one side, or the world draws themselves. | F42's one-frame pre-effects/present comparison first; then the manifest draw list names every pre-HUD candidate and its sampled addresses. |
+| H12 | **The world draws themselves generate the left half at a lower effective resolution.** If the pre-effects sample (`fp 141`) is already blurred, then the 115 world draws / their texture sampling produce it — e.g. a mip/LOD or texture-cache selection that changes at `x = 640`, or an attribute interpolation split (F7(b) flat-varying rule) that only affects one half. | Same one-frame comparison. If confirmed, diff the per-half sampled mip/LOD and the interpolated UVs of the world programs; dump one world texture pair at 1:1 and at the mip the left half selects. |
 
 Hypotheses H3 (two pipelines), H5 (FTZ) and H6 (output-chain amplification)
 from the previous revision are in §5. The slot/offset race is not required by
@@ -310,7 +343,7 @@ that would test it.
 
 | Path | What is in it |
 |---|---|
-| `build/probe/run-20261118-132833-ds24b/` … `-135546-ds24b/` | **The four producer-census runs** (oracle `bswap32-all`). All reached the world (frames 4000–6800). `stage.log` 4000–5750 stores per run, all `spu-put`/`spu-putllc`/`vm-write`, none carrying a defect word; `fix.log` 4–17 MB; `stage-nv308a.log` in the last two. `dumps/` holds `fp-*` (metal/glsl/const/ucode) for ~200 programs. The first run kept 2.5 GB of dumps; the rest were pruned harder. |
+| `build/probe/run-20261118-132833-ds24b/` … `-135546-ds24b/` | **The four producer-census runs** (oracle `bswap32-all`). All reached the world (frames 4000–6800). `stage.log` 4000–5750 stores per run, all `spu-put`/`spu-putllc`/`vm-write`, none carrying a defect word; `fix.log` 4–17 MB; `stage-nv308a.log` in the last two. `dumps/` holds `fp-*` (metal/glsl/const/ucode) for ~200 programs. The first run kept 2.5 GB of dumps; the rest were pruned harder. Its `dumps/frame-6637-m9-manifest.txt` (header `present 6628`) is the **complete 293-draw manifest of one frame** (F36); `host-sample-<frame><unit>-addr…` are the per-frame bound-texture dumps: the ten `c07a0000` ones are the world target at whichever stage first bound it that frame (pre-effects `fp 141` in 6642, present source `fp 95` in 6638/6643, F41), and the `c5870000` ones are the copy destination at `fp 110`. |
 | `build/probe/run-20261119-095732-ds24b/` | The `ds24b` run with RSX-blit and partial-store hooks (`73d1e6ad4`), oracle on: 4096 `spu-put`, 1480 `vm-write`, 8 `spu-putllc`, **zero** `nv3089-host`/`nv0039-host`/`stage-partial` and zero stores of any of the 156 defect words. Reached frame 7449; shutdown was the known MCJIT teardown. |
 | `build/probe/run-20261118-103456-ds23/` (removed) | **The run that removed the strobe (family-wide oracle).** Five F12 presses at frames 3384/3927/4209/4389/4465. `fix.log`: 221 834 corrected lanes across 40 distinct fp offsets; `mtl-probe.log`: 61-program `literal watch`, `world tail` in-band (`1.69832 2 1.69832 1`), `tape class` 32 black / 11 dark / 51 mixed / 2 white. The directory was pruned in the 2026-11-18 cleanup; the measurements above are what it reported. |
 | `build/probe/run-20261118-102603-ds22/` (removed) | **The first oracle run.** Four F12 presses (frames 4260/4688/4765/4915). `fix.log`: 4031 corrected lanes across the two large world programs; 49-program `literal watch` census (F23); still 140 black / 88 white / 81 dark / 11 mixed. |
@@ -493,8 +526,11 @@ presents `mixed`, world visible). **Phase 2.5 is closed as a success.**
    most likely a stray word in a constant quad the oracle never visits (H7).
    F29 bounds it: no quad is uniformly transposed in 4096 fills, so the stray
    would be lane-local in a `neither` quad.
-2. **Blurred world, sharp HUD** (F25). The blur is a spatial/post-pass question,
-   not a constant value (H8).
+2. **Blurred world, sharp HUD** (F25). The blur is a spatial question, not a
+   constant value (H8). The 2026-11-19 manifest already places it inside the
+   present-source world target, i.e. before the HUD and the present compose
+   (F36–F42), so the only split left is the world draws vs the ~28 pre-HUD post
+   draws.
 
 And one open producer question, now with a precise byte-level target (H9):
 the patched lane is the correct ucode word `T(W)` stored big-endian instead
@@ -531,16 +567,46 @@ default-off; built 2026-11-18 late night, `rpcs3_test` 687/687):
   breakpoint. 32 addresses / 4096 lines, inert unless the variable is set.
 - **Blur evidence** (`tape detail`, level 5, uses the existing tape): every
   taped slot, sample and present, is scanned for the mean absolute luma gradient
-  of its left/right and top/bottom halves. The world colour target and the
-  present of the same frame are already both on the tape and at the same
-  resolution, so a sharp `sample` next to a flat `present` attributes the blur
-  to the pass between them; both flat means the world draw itself is soft.
-  CPU-only on bytes the flush already made visible.
+  of its left/right and top/bottom halves. **Correction (2026-11-19):** the tape
+  does not carry the world target and the present of the same frame at the same
+  stage — per frame it keeps only the first-bound world-target image (F41) —
+  so this scan locates the blur but cannot split the pre-HUD chain. The
+  one-frame two-sample dump below is the discriminator.
 
 Run: one F12 press with the ground in view (the white↔black alternation is
 visible to the user before any press), then two more during the grey flicker.
 Score: (`stray`/`bswap32-any`) does the ground stop alternating; (blur dumps)
 which pass first contains the blur.
+
+**Draw-list result (2026-11-19).** The 293-draw manifest of one real frame
+(F36) replaces the guesswork with a list, and four of the old candidates are
+now out: no half-width scissor (F37/E12), an exact feedback copy (F38/E13), no
+RSX blit (E14), and the present compose is applied *after* the sharp HUD
+(F39), so it cannot blur only the world. The seam is in the present-source
+image; the only remaining split is "the 115 world draws did it" (H12) vs
+"one of the ~28 pre-HUD post draws did it" (H8/H11). The bloom chain is the only
+blurred source in the frame, and the effects that sample `0xc5870000` + depth
+are the depth-tested overlays.
+
+**Next measurement (one frame, two samples).** The capture dedupes sampled
+images by host `MTL::Texture*` per frame, so `0xc07a0000` is dumped once per
+frame — at whichever stage first binds it: `fp 141` (pre-effects) in 6642, the
+present compose in 6643 (F41). Add one unconditional dump of the present
+compose's `source.image` (label `present-source`) in the present path, which
+runs after the HUD. The same frame then carries the pre-effects image and the
+present-source image at the same resolution:
+
+- seam in both → the world draws produce it (H12). Next: per-half sampled
+  mip/LOD and UVs of the world programs, and a 1:1 versus mip dump of the
+  world texture the left half selects.
+- seam only in the present source → a pre-HUD pass produces it (H8). Next:
+  dump `0xc07a0000` after each of the 25 effects, `fp 57`, `fp 88` and
+  `fp 14` (a bounded ring of ~30 small dumps per captured frame; each dump
+  costs a commit+wait, so cap the captured frames, not the draws).
+
+Do not add the ring until the one-frame two-sample split is read: it may
+already name the world draws, which no per-pass dump can. Keep the dump
+default-off, `EXCISE`-fenced and bounded like the rest.
 
 ### Phase 3 — producer of the transposed staging word — **one-run plan**
 
@@ -640,6 +706,87 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
+
+### 2026-11-19 (day) — offline: the seam lives in the present-source world target, and every half-width explanation is excluded
+
+No run, no code change: this entry reads the archive left by `ds24b`
+(`run-20261118-132833-ds24b`), decodes the first complete draw manifest of a
+frame that reaches the world, and re-measures the ten world-target samples with
+one metric.
+
+**The manifest.** `dumps/frame-6637-m9-manifest.txt` (header `present 6628`)
+has 293 records, all `frame 6628`, in submission order. Grouped:
+
+| records | draws | into | what |
+|---|---|---|---|
+| 249674–249724 | 51 | depth `0xc4860000` 2048² | shadow map, `fp 103`, 1024² quadrant scissors |
+| 249725–249839 | 115 | `0xc07a0000` | world geometry, `prim 6`, `fp 86/71/62/26/20/7/118/75/16/89/101/104/23/105/4/9/36/43/64/40` |
+| 249840 | 1 | `0xc07a0000` | `fp 141`, 52-v strip, no textures, constant colour (fog/atmosphere) |
+| 249841 | 1 | `0xc5870000` | `fp 110` copy 1 |
+| 249842–249866 | 25 | `0xc07a0000` | `fp 155` (2D+cube), `fp 142`, `fp 113` strips, `fp 87`, `fp 140`, `fp 134`; all sample `0xc5870000` + depth |
+| 249867 | 1 | `0xc5870000` | `fp 110` copy 2 |
+| 249868–249869 | 2 | `0xc07a0000` | `fp 57` strips, sample `0xc5870000` + depth |
+| 249870–249885 | 16 | bloom targets | `fp 56/96` 640x360, `fp 91`, `fp 10` 1280x720, `fp 102` 320x180, `fp 83` 64x64, `fp 50/66` 320x180, `fp 102/66/47` 160x90 |
+| 249886 | 1 | `0xc07a0000` | `fp 88` bloom composite (`0xc4260000` + `0xc4242840`) |
+| 249887 | 1 | `0xc4260000` | `fp 14` |
+| 249888–249965 | 78 | `0xc07a0000` | HUD: 70 × `fp 28`, 7 × `fp 8`, 1 × `fp 31`, all 4-v |
+| 249966 | 1 | `0xc03d0000` | `fp 95` present compose, unit 0 = `0xc07a0000` |
+
+**What the manifest settles.** (a) All **222** draws into `0xc07a0000` use
+`scissor 0,0,1280,720` and the full viewport; the only sub-full scissors in the
+whole frame are the shadow quadrants and the bloom targets. A half-width
+scissor cannot be the seam (F37/E12). (b) The `fp 110` copy is a 4-vertex
+full-screen 1-texture draw, and the destination sampled at the copy draw is
+byte-identical to the source sampled one draw earlier (same hash, row 0
+`00040404`; `cmp` clean at 6642/6732/6734), so the copy adds no blur
+(F38/E13). (c) The present is one 4-vertex `fp 95` draw sampling `0xc07a0000`,
+made *after* the HUD and overlay draws write that same target — so any spatial
+filter at the present would blur the HUD too; the HUD is sharp, so the blur is
+added before the HUD (F39). (d) No RSX blit is logged anywhere in the
+`73d1e6ad4` run (E14). (e) The bloom chain is the only blurred source in the
+frame and it downsamples the full world target; the depth-tested effects sample
+the copy, not the world target.
+
+**The seam, re-measured.** The ten `host-sample-*-addrc07a0000` files, one
+metric (mean |Δgreen| per 2 px, y stride 4; band ratio = left/right inside each
+120-px band):
+
+| sample | stage | mean L/R | HF L/R | band ratios (top→bottom) |
+|---|---|---|---|---|
+| 6638 | present source | 3.74 / 0.80 | 1.59 / 0.55 | 1.04 1.64 0.00 0.00 0.00 5.84 |
+| 6639 | pre-effects `fp 141` | 0.03 / 0.00 | 0.06 / 0.00 | black frame |
+| 6640 | stage line ambiguous | 3.74 / 0.80 | 1.59 / 0.55 | same as 6638 |
+| 6642 | pre-effects `fp 141` | 10.09 / 15.37 | 1.19 / 2.10 | 0.74 0.54 0.45 0.58 0.55 0.47 |
+| 6643 | present source `fp 95` | 19.19 / 25.10 | 2.24 / 4.20 | **0.59 0.21 0.09 0.16 0.85 1.38** |
+| 6731 | stage line capped | 17.66 / 22.47 | 2.18 / 1.67 | 0.79 0.41 0.23 0.47 2.14 2.17 |
+| 6732 | stage line capped | 8.89 / 13.56 | 1.05 / 1.85 | 0.74 0.54 0.45 0.59 0.56 0.47 |
+| 6733 | stage line capped | 58.58 / 65.67 | 2.96 / 2.43 | 0.94 0.76 0.49 0.78 2.10 1.79 |
+| 6734 | stage line capped | 8.68 / 13.24 | 1.02 / 1.80 | 0.74 0.54 0.44 0.59 0.56 0.47 |
+| 6735 | stage line capped | 16.99 / 20.85 | 2.15 / 1.82 | 0.81 0.61 0.31 0.48 1.95 2.23 |
+
+6643 is the strong seam; 6642/6732/6734 are the same scene at three exposures
+(identical ratios to two decimals); 6733 is the brightest and has no seam, so
+the seam does not simply track brightness. The ratios are content-dependent and
+therefore a locator, not a proof; the proof is still the crop that crosses the
+character's head at `x = 640` (F40). The stage column is label-exact only where
+the level-5 capture trace survives (`6638`, `6639`, `6642`, `6643`); the
+`673x` windows lost their stage lines to the per-site cap (F41), and `6640`'s
+bind sits astride the frame boundary.
+
+**Why it is still open.** The capture dumps a bound image once per host
+`MTL::Texture*` per frame, at the first stage that binds it — `fp 141` in
+6642, the present compose in 6643 — so one frame carries only one of the two
+stages. The labelled pre-effects sample (6642, clean) and the labelled present
+source (6643, seamed) are different frames. The stage split needs one frame
+with both (F42).
+
+**Next.** One unconditional, bounded dump of the present compose's
+`source.image` (`present-source`), so the same frame carries the pre-effects
+and post-HUD images. Then: seam in both → world draws (H12, inspect per-half
+mip/LOD/UVs); seam only at present → bracket the ~28 pre-HUD post draws (H8).
+
+§4 gains F36–F42; §5 gains E12–E14; §6 narrows H8/H11 and adds H12; §10
+Phase 2.6 records the one-frame discriminator.
 
 ### 2026-11-18 (afternoon–evening) — `ds24b` ×4 and the seven commits: the producer watch is live, and it is silent
 
