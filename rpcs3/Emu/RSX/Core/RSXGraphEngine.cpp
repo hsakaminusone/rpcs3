@@ -1020,6 +1020,18 @@ namespace rsx
 			m_ctx->program.fragment_program.offset,
 			m_ctx->program.fragment_program.ucode_length,
 			static_cast<const u8*>(m_ctx->program.fragment_program.get_data()));
+
+		// TODO(excise): level 5; arm the store watch on the image itself.  This
+		// is the exact byte range the fragment-constant fill reads, so a store
+		// into any prefetched program is attributed regardless of whether the
+		// address is in the FIFO ring or an nv308a source range.  watch_range
+		// also takes the first-sight sample, which catches a word that was
+		// already wrong before the watch existed.
+		if (const u8* image = static_cast<const u8*>(m_ctx->program.fragment_program.get_data()))
+		{
+			rsx::fp_stage_watch::watch_range(static_cast<u32>(vm::get_addr(image)),
+				m_ctx->program.fragment_program.ucode_length);
+		}
 		// EXCISE-END fp-literal-write-watch
 
 		// Verify current texture state is valid

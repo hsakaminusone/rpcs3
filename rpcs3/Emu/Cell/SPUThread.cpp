@@ -2168,7 +2168,9 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 				thread ? thread->get_name().c_str() : "-", detail);
 		}
 	} stage_guard{args.eal, args.size, _this, args.tag, args.lsa,
-		!is_get && rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(args.eal, args.size)};
+		!is_get && rsx::fp_stage_watch::spu_hook() &&
+			(rsx::fp_stage_watch::interesting(args.eal, args.size) ||
+				rsx::fp_stage_watch::probe_available("spu-put"))};
 	// EXCISE-END fp-stage-store-watch
 
 	std::tie(dst, src) = [&]() -> std::pair<u8*, const u8*>
@@ -3417,7 +3419,9 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 						thread ? thread->get_name().c_str() : "-", detail);
 				}
 			} stage_list_guard{addr, size, this, args.tag, arg_lsa | (addr & 0xf),
-				rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, size)};
+				rsx::fp_stage_watch::spu_hook() &&
+					(rsx::fp_stage_watch::interesting(addr, size) ||
+						rsx::fp_stage_watch::probe_available("spu-list-put"))};
 			// EXCISE-END fp-stage-store-watch
 
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
@@ -3585,7 +3589,9 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 				thread ? thread->get_name().c_str() : "-", detail);
 		}
 	} stage_putllc_guard{addr, this, args.tag, args.lsa,
-		rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, 128)};
+		rsx::fp_stage_watch::spu_hook() &&
+			(rsx::fp_stage_watch::interesting(addr, 128) ||
+				rsx::fp_stage_watch::probe_available("spu-putllc"))};
 	// EXCISE-END fp-stage-store-watch
 
 	if ([&]()
@@ -3938,7 +3944,9 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 				thread ? thread->get_name().c_str() : "-", detail);
 		}
 	} stage_putlluc_guard{addr, this, args.tag, args.lsa,
-		rsx::fp_stage_watch::spu_hook() && rsx::fp_stage_watch::interesting(addr, 128)};
+		rsx::fp_stage_watch::spu_hook() &&
+			(rsx::fp_stage_watch::interesting(addr, 128) ||
+				rsx::fp_stage_watch::probe_available("spu-putlluc"))};
 	// EXCISE-END fp-stage-store-watch
 
 	if (raddr && addr == raddr && g_cfg.core.spu_accurate_reservations)

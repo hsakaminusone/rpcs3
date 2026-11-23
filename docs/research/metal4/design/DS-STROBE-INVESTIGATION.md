@@ -11,7 +11,7 @@ duplicate: this file is the *why*, that one is the *how*).
 
 ---
 
-## 1. Position as of 2026-11-19
+## 1. Position as of 2026-11-22
 
 * **Symptom now.** With the family-wide oracle on, the full-screen black↔white
   strobe stays **gone** and the world renders: the last four `ds24b` runs all
@@ -53,6 +53,61 @@ duplicate: this file is the *why*, that one is the *how*).
   pre-effects sample (already taken at `fp 141`) and the present-source sample
   of the same target (`fp 95`); the capture dedupes by host image, so one frame
   carries only the first-bound stage, pre-effects or present, never both (F41).
+* **Probes rebuilt, proven, and levelled (2026-11-22).** Every probe was
+  re-audited against the "no output is evidence until the probe has a positive
+  control" rule. The important changes:
+  - **The positive control moved into `note_mem`.** Each layer now calls it
+    unconditionally (only the per-layer kill switch gates the call), and
+    `note_mem` takes up to `RSX_FP_STAGE_PROBE` lines per writer *before* the
+    address/shape filters. The old `interesting()` pre-gate made a live SPU/GCM
+    layer and a never-called hook indistinguishable, which is exactly the F43
+    failure. `probe_allow` is now one thread-local cached slot, so the steady
+    state is a single relaxed load.
+  - **The watch is armed on the image itself.** `RSXGraphEngine::
+    prefetch_fragment_program` calls `fp_stage_watch::watch_range(vm::get_addr(
+    image), ucode_length)`, so any store into any prefetched program is
+    `in_stage` regardless of whether its address was a ring or `nv308a` source.
+  - **Fill-side join by address.** `fix.log` now carries the guest EA of each
+    delivered defect quad and the pre-fill guest word (`fix fp … ea … g …`), and
+    `fixsrc fp … ea …` names every program image. A store is matched to a defect
+    by address instead of by a word that animates.
+  - **First-sight baselines.** `stage-prearm` samples a range when it is armed,
+    and `stage-base` samples each `nv308a` source on first sight; both catch a
+    word that was already wrong before any later store.
+  - **Cross-writer flips.** `stage-flip` is an address-keyed history
+    (`RSX_FP_STAGE_HIST`, default 4), so an A/B alternation between *two*
+    writers is visible; the per-site shadow only saw one writer.
+  - **Page bitmap prefilter.** A 4 KiB-page bit map (128 KiB BSS) rejects a
+    store outside every range in O(1) before the exact interval scan, which the
+    now-live PPU hook needed.
+  - **Levels/levers.** `RSX_FP_STAGE_LEVEL` 0–3 (default 1; 2 adds the flip
+    history, 3 disables per-site dedupe for a per-store trace),
+    `RSX_FP_STAGE_PROBE` (8), `RSX_FP_STAGE_HIST` (4), `RSX_FP_STAGE_SCAN` (1),
+    `RSX_FP_STAGE_BASE` (1). All bounded (65536 lines, 4096/site, 2048 ranges,
+    1024 prearm).
+  - `build/probe/launch-ds24c.sh` is the run with every lever set; the oracle is
+    still `bswap32-all` and `RSX_FP_STAGE_FIX` is unset (observe, do not steer).
+* **Code trace of the three defects (2026-11-22).** Read against the tree, not a
+  run; the measured/inferred split is in §11.
+  - **White flash.** The fill is a CPU snapshot (`_mm_stream_si128` is a plain
+    store via `sse2neon.h:6028`), so a late guest patch cannot reach this
+    frame's block; `fs_constants_offset` is `fragment_constants_index()` at
+    `MTLGSRender.cpp:6511/6775` (the `= 0` at `:6251` is a pre-branch default).
+    So the delivered *word* is wrong, and the unconditional `swap16` in the fill
+    turns a lane the guest wrote pre-swapped into a finite out-of-band value;
+    the epilogue `h0 * fc[67].x / 2` then clamps it to white. That explains a
+    bright flash rather than garbage.
+  - **Grey flicker.** The present compose is pure geometry over `aspect`
+    (`MTLPresent.cpp:151+`), so a whole-frame grey is upstream. The capture
+    already splits `present-*` (pre-FSR) from `upscaled-*` (post-FSR) and the
+    screenshot (post-compose); the existing `fp-ucode-image` line
+    (`MTLGSRender.cpp:6488`) discriminates "wrong program bound" from "correct
+    program, wrong bytes".
+  - **Seam.** Present compose is after the sharp HUD, so the compose cannot
+    blur only the world; `pass_scheduler::split_requested()` has no callers, so
+    the seam is not a scheduler split. The remaining split is still the world
+    draws (H12) vs a pre-HUD pass (H8/H11); the bloom chain is the only blurred
+    source.
 * **Original symptom (ds21/ds22).** The 3D world alternated between black and
   white, with the correct image visible for milliseconds at a time. Geometry
   and depth were present and stable. The HUD's visibility is *not* a reliable
@@ -603,13 +658,15 @@ image; the only remaining split is "the 115 world draws did it" (H12) vs
 blurred source in the frame, and the effects that sample `0xc5870000` + depth
 are the depth-tested overlays.
 
-**Next measurement (one frame, two samples).** The capture dedupes sampled
-images by host `MTL::Texture*` per frame, so `0xc07a0000` is dumped once per
-frame — at whichever stage first binds it: `fp 141` (pre-effects) in 6642, the
-present compose in 6643 (F41). Add one unconditional dump of the present
-compose's `source.image` (label `present-source`) in the present path, which
-runs after the HUD. The same frame then carries the pre-effects image and the
-present-source image at the same resolution:
+**Next measurement (one frame, two samples).** *Corrected 2026-11-22:* the
+`present-*` dump already exists (`MTLGSRender.cpp:8376`, taken at the present
+compose from `get_present_source`, i.e. pre-FSR), and `upscaled-*` (`:8568`)
+covers post-FSR, so no new present-source dump is needed. What F41 observed is
+the per-frame sampled-image table (`diagnostic_sampled_image[8]`, `:2392`),
+which dedupes the *world target* by guest address across the draw path; the
+present dump is a separate call and is not deduped there. The open question is
+therefore narrower: for one captured frame, does the seam exist in the
+`world-target` dump (`:5825`) and in `present-*` at the same time?
 
 - seam in both → the world draws produce it (H12). Next: per-half sampled
   mip/LOD and UVs of the world programs, and a 1:1 versus mip dump of the
@@ -619,9 +676,10 @@ present-source image at the same resolution:
   `fp 14` (a bounded ring of ~30 small dumps per captured frame; each dump
   costs a commit+wait, so cap the captured frames, not the draws).
 
-Do not add the ring until the one-frame two-sample split is read: it may
-already name the world draws, which no per-pass dump can. Keep the dump
-default-off, `EXCISE`-fenced and bounded like the rest.
+If the present dump is itself suppressed for a frame because the sampled-image
+table already recorded the address, the fix is a one-line bypass for the
+`present` label, not a new dump. Keep everything default-off, `EXCISE`-fenced
+and bounded.
 
 ### Phase 3 — producer of the transposed staging word — **one-run plan**
 
@@ -721,6 +779,103 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
+
+### 2026-11-22 — code: the probes are rebuilt around a positive control, levelled, and the trace is written
+
+No run yet in this entry; it records the code change, the gates, and the code
+trace that ds24c is meant to falsify.
+
+**What was wrong with the probes.** The F43 lesson generalises: a hook that
+never runs and a hook that runs and sees nothing produce the same log. The old
+`note_mem` was entered only when `interesting(addr, size)` was true, so the
+per-writer positive control could not fire for a layer whose gate never opened;
+`probe_allow` was also called twice per word, once for the log test and once for
+the shape test. Both are fixed:
+
+- every layer calls `note_mem` unconditionally and only the per-layer kill
+  switch (`RSX_FP_STAGE_NO_JIT/_NO_SPU/_NO_VMW`) gates the call;
+- `note_mem` computes `probe = probe_allow(writer)` first, then cheap-returns
+  before the address lookup and word scan when `!in_ring && !in_stage && !probe`;
+- `probe_allow` uses a 256-slot table with a thread-local cached slot, so the
+  steady state is one relaxed load; `probe_available(writer)` exposes the
+  remaining budget without spending it, for call sites that must format a
+  detail string.
+
+**New depth.** `watch_range` is now called from
+`RSXGraphEngine::prefetch_fragment_program` on the program image itself
+(`vm::get_addr(image)`, `ucode_length`), so a store into any prefetched program
+is `in_stage` even if its address was never a ring or `nv308a` source.
+`watch_range` also takes a first-sight sample (`stage-prearm`), merges ranges
+within 64 bytes, and publishes a 4 KiB-page bitmap (128 KiB BSS) that
+`range_hit` checks in O(1) before the exact interval scan. `fix.log` gained the
+guest EA and the pre-fill guest word, and `fixsrc` names each image, so a
+delivered defect joins to a store by address. The `nv308a` re-read hardened
+`guest_read` against unmapped pages and logs a `stage-base` first-sight sample
+with the decoded slots and a band mask. `stage-store` now carries `seq`, `ms`
+and the 16-byte `quad` context; `stage-partial` carries the composed `word`,
+`slot`, `alt` and `band`. `stage-flip` is an address-keyed history so an A/B
+alternation between two writers is visible.
+
+**Levels.** `RSX_FP_STAGE_LEVEL` 0–3 (default 1; 2 adds the flip history, 3
+disables per-site dedupe for a per-store trace); `RSX_FP_STAGE_PROBE` (8),
+`RSX_FP_STAGE_HIST` (4), `RSX_FP_STAGE_SCAN` (1), `RSX_FP_STAGE_BASE` (1). Caps
+unchanged: 65536 lines, 4096/site, 2048 ranges, 1024 prearm, 8192 flip lines.
+`build/probe/summarize-stage.py` now parses key=value (so added fields do not
+break it), prints the positive control first (`LIVE`/`DEAD` per expected
+writer), then the `fixsrc`/`fix.log` address join, `stage-flip`, `stage-prearm`
+and `stage-base`.
+
+**Gates.** `ninja rpcs3` green; the binary carries `stage-prearm` and
+`stage-flip` and still carries `v10-kusa`/`__ppu_stage_watch`; `rpcs3_test`
+687/687 (2 disabled); `.metal4-release-scrub.py check` exit 0 with 0
+needs-review, 0 residuals, 0 orphans.
+
+**Code trace (measured vs inferred).** Read against the tree:
+
+- *White flash — the delivered word is wrong, not the binding.* Measured: the
+  fill is a CPU-side snapshot (`_mm_stream_si128` is a plain store,
+  `sse2neon.h:6028`), so a guest patch after the fill cannot reach this frame's
+  block; `fs_constants_offset` is `fragment_constants_index()`
+  (`MTLGSRender.cpp:6511`, `:6775`), and the `= 0` at `:6251` is overwritten
+  before encode; the buffer base never changes in a frame
+  (`constant_capacity = 65536`), so the ring-identity test at `:6254` cannot
+  misfire; a program change forces a refill (`:5105`). Inferred: the fill's
+  unconditional 16-bit-half swap turns a lane the guest wrote *pre-swapped*
+  into a finite out-of-band value, and `h0 * fc[67].x / 2` then clamps to white
+  — which is why the defect is a bright flash and not garbage.
+- *Grey flicker — upstream of the compose.* Measured: the compose is one
+  full-aspect draw (`MTLPresent.cpp:151+`); `present-*` (pre-FSR),
+  `upscaled-*` (post-FSR) and the screenshot (post-compose) already bracket it;
+  `fp-ucode-image` (`MTLGSRender.cpp:6488`) prints compiled vs live ucode hash
+  and a match bit. Inferred: a whole-frame grey at frame granularity is the
+  wrong fragment program bound for that frame, or a present source that is a
+  cleared/stale surface.
+- *Seam — before the HUD.* Measured: the present compose runs after the sharp
+  HUD, and `pass_scheduler::split_requested()` has no callers. Inferred: a
+  pre-HUD pass that writes the 1280x720 world target from the 640x360 bloom
+  chain with a 640-wide viewport/scissor (H11), or a world draw that samples
+  that chain across the full viewport (H12).
+
+**Run.** `build/probe/launch-ds24c.sh` launched at 22:39
+(`run-20261123-223946-ds24c`) with `LEVEL=2`, `PROBE=8`, `HIST=4`, `SCAN=1`,
+`BASE=1`, oracle `bswap32-all`, and `RSX_FP_STAGE_FIX` unset. F12 only; nothing
+is armed automatically.
+
+**First-run cost: the PPU cache rebuilds (F43, measured).** The `v10-kusa`
+bump forces every PPU object to be recompiled once, so the game holds at the
+"shader compilation" screen while LLVM builds 233 modules. This is expected, not
+a hang: the process sat at ~520 % CPU, the cache directory gained
+`v10-kusa-*.obj.gz` at a steady rate (124 at 22:42, 131 at 22:43, heading for
+233), and `gzcat` of a fresh one contains `__ppu_stage_watch`. The `v9-kusa`
+set (233 files) is still on disk beside it. The `stage.log` positive control
+already fired for `vm-write` (eight `seq=1..8` lines at `ms=0`), so the
+in-process instrument is live before the first frame.
+
+Scoring order: first the `v10-kusa-*.obj.gz` for `EBOOT.BIN` contains
+`__ppu_stage_watch`, and `summarize-stage.py` shows `LIVE` for `ppu-stw` /
+`ppu-stwbrx`; then the `fixsrc`/`fix.log` EA join, `stage-flip`, `stage-prearm`,
+`stage-base`. A `DEAD` writer is a broken instrument and voids its layer for the
+run.
 
 ### 2026-11-19 (later) — code: the PPU store hook had never run; the object cache was stale
 

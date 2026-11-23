@@ -135,8 +135,23 @@ namespace rsx
 					static u32 s_next_slot = 0;
 					++s_stage_seen;
 
+					// RSX_FP_STAGE_BASE=0 disables the first-sight sample.  On by
+					// default: a word already wrong when the range is first seen is
+					// invisible to a change-only re-read, which is the same
+					// "instrument cannot see the defect" failure as F43.
+					static const bool base_enabled = [] {
+						const char* text = std::getenv("RSX_FP_STAGE_BASE");
+						return !text || !*text || std::strcmp(text, "0") != 0;
+					}();
+
 					const auto guest_read = [](u32 addr, u8 (&out)[16]) -> bool
 					{
+						if (!vm::check_addr(addr, vm::page_readable, 16))
+						{
+							std::memset(out, 0, 16);
+							return false;
+						}
+
 						std::memcpy(out, vm::_ptr<u8>(addr), 16);
 						return true;
 					};
@@ -153,7 +168,11 @@ namespace rsx
 						}
 
 						u8 now[16] = {};
-						guest_read(slot.addr, now);
+
+						if (!guest_read(slot.addr, now))
+						{
+							continue;
+						}
 
 						for (unsigned lane = 0; lane < 4 && s_stage_lines < 4096; ++lane)
 						{
@@ -167,11 +186,14 @@ namespace rsx
 								continue;
 							}
 
+							const u32 decoded = rsx::fp_stage_watch::decode_word(cur);
+
 							if (std::FILE* out = std::fopen(stage_path, "a"))
 							{
 								std::fprintf(out,
-									"stage addr %x lane %u was %08x now %08x seq %llu put %llx get %u dst %x:%x count %u\n",
-									slot.addr, lane, was, cur,
+									"stage addr %x lane %u was %08x now %08x slot %08x alt %08x band %u seq %llu put %llx get %u dst %x:%x count %u\n",
+									slot.addr, lane, was, cur, decoded, std::byteswap(decoded),
+									rsx::fp_stage_watch::suspicious_word(cur) ? 1u : 0u,
 									static_cast<unsigned long long>(s_stage_seen),
 									static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
 									src_offset, dst_dma, dst_offset, count);
@@ -201,7 +223,34 @@ namespace rsx
 						{
 							const u32 index = (s_slot_count < 32) ? s_slot_count++ : (s_next_slot++ % 32);
 							s_slots[index].addr = guest_addr;
-							guest_read(guest_addr, s_slots[index].bytes);
+
+							if (guest_read(guest_addr, s_slots[index].bytes) && base_enabled && s_stage_lines < 4096)
+							{
+								const u8* b = s_slots[index].bytes;
+								u32 w[4] = {};
+								u32 s[4] = {};
+								std::memcpy(w, b, 16);
+
+								for (u32 lane = 0; lane < 4; ++lane)
+								{
+									s[lane] = rsx::fp_stage_watch::decode_word(w[lane]);
+								}
+
+								if (std::FILE* out = std::fopen(stage_path, "a"))
+								{
+									std::fprintf(out,
+										"stage-base addr %x bytes %08x,%08x,%08x,%08x mask %x slot %08x,%08x,%08x,%08x seq %llu put %llx get %u dst %x:%x count %u\n",
+										guest_addr, w[0], w[1], w[2], w[3],
+										rsx::fp_stage_watch::band_mask(b, 16),
+										s[0], s[1], s[2], s[3],
+										static_cast<unsigned long long>(s_stage_seen),
+										static_cast<unsigned long long>(RSX(ctx)->ctrl->put),
+										src_offset, dst_dma, dst_offset, count);
+									std::fclose(out);
+								}
+
+								++s_stage_lines;
+							}
 						}
 					}
 				}

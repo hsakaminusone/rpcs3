@@ -60,7 +60,8 @@ namespace rsx
 
 		// EXCISE-BEGIN fp-stage-store-watch
 		// TODO(excise): level 5; the whole packet, after the writes.
-		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1)))
+		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1)) ||
+			rsx::fp_stage_watch::probe_available("gcm-command"))
 		{
 			rsx::fp_stage_watch::note_mem(stage_begin.addr(), u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1),
 				"gcm-command", 0, "-", "make_command");
@@ -80,7 +81,8 @@ namespace rsx
 		*dst++ = RSX_METHOD_OLD_JUMP_CMD | offset;
 
 		// EXCISE-BEGIN fp-stage-store-watch
-		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), sizeof(u32)))
+		if (rsx::fp_stage_watch::interesting(stage_begin.addr(), sizeof(u32)) ||
+			rsx::fp_stage_watch::probe_available("gcm-jump"))
 		{
 			rsx::fp_stage_watch::note_mem(stage_begin.addr(), sizeof(u32), "gcm-jump", 0, "-", "make_jump");
 		}
@@ -1663,7 +1665,8 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 
 	// EXCISE-BEGIN fp-stage-store-watch
 	// TODO(excise): level 5; this write does not pass through vm::write.
-	if (rsx::fp_stage_watch::interesting(context->current.addr(), sizeof(u32)))
+	if (rsx::fp_stage_watch::interesting(context->current.addr(), sizeof(u32)) ||
+		rsx::fp_stage_watch::probe_available("gcm-jump"))
 	{
 		rsx::fp_stage_watch::note_mem(context->current.addr(), sizeof(u32), "gcm-jump", ppu.cia,
 			ppu.get_name().c_str(), "cellGcmCallback");

@@ -708,6 +708,48 @@ namespace rsx
 		write_fragment_constants_to_buffer_fallback(buffer, rsx_prog, offsets_cache, sanitize);
 #endif
 
+		// EXCISE-BEGIN fp-literal-fixsrc
+		// TODO(excise): level 5; the fill-side provenance join.  The fill reads
+		// its literals from the program image in guest memory and get_data() is
+		// a host pointer into that image, so vm::get_addr recovers the exact EA
+		// of every quad.  One line per (program, image address) makes a delivered
+		// word joinable to the store that produced it by address instead of by
+		// matching a value that changes every frame.  Bounded to 512 images.
+		if (const char* src_path = std::getenv("RSX_FP_LITERAL_FIX_LOG"))
+		{
+			struct src_entry
+			{
+				u32 offset;
+				u32 ea;
+			};
+
+			static src_entry s_src_seen[512] = {};
+			static u32 s_src_count = 0;
+
+			const u8* image = static_cast<const u8*>(rsx_prog.get_data());
+			const u32 image_ea = image ? static_cast<u32>(vm::get_addr(image)) : 0;
+			bool known = !image_ea;
+
+			for (u32 i = 0; i < s_src_count && !known; ++i)
+			{
+				known = s_src_seen[i].offset == rsx_prog.offset && s_src_seen[i].ea == image_ea;
+			}
+
+			if (!known && s_src_count < 512)
+			{
+				s_src_seen[s_src_count++] = { rsx_prog.offset, image_ea };
+
+				if (std::FILE* out = std::fopen(src_path, "a"))
+				{
+					std::fprintf(out, "fixsrc fp %u ea %08x len %u quads %u\n",
+						rsx_prog.offset, image_ea, rsx_prog.ucode_length,
+						static_cast<u32>(offsets_cache.size()));
+					std::fclose(out);
+				}
+			}
+		}
+		// EXCISE-END fp-literal-fixsrc
+
 		// EXCISE-BEGIN fp-literal-reverse-variant
 		// TODO(excise): level 5; the functional oracle for the trailing literal
 		// block.  A lane whose value as the fill produced it is not a plausible
@@ -837,8 +879,11 @@ namespace rsx
 						{
 							if (std::FILE* out = std::fopen(path, "a"))
 							{
-								std::fprintf(out, "fix fp off %u quad %u lane %u %08x %08x %g -> %g\n",
-									rsx_prog.offset, static_cast<u32>(i), lane, raw, alt,
+								const u8* image = static_cast<const u8*>(rsx_prog.get_data());
+								const u32 quad_ea = image ? static_cast<u32>(vm::get_addr(image)) + offsets_cache[i] : 0;
+								const u32 guest_word = ((raw & 0x00ff00ffu) << 8) | ((raw & 0xff00ff00u) >> 8);
+								std::fprintf(out, "fix fp off %u ea %08x quad %u lane %u %08x %08x g %08x %g -> %g\n",
+									rsx_prog.offset, quad_ea, static_cast<u32>(i), lane, raw, alt, guest_word,
 									static_cast<f64>(slot), static_cast<f64>(candidate));
 								std::fclose(out);
 							}
