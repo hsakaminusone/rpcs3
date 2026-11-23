@@ -11,7 +11,7 @@ duplicate: this file is the *why*, that one is the *how*).
 
 ---
 
-## 1. Position as of 2026-11-22
+## 1. Position as of 2026-11-23
 
 * **Symptom now.** With the family-wide oracle on, the full-screen black↔white
   strobe stays **gone** and the world renders: the last four `ds24b` runs all
@@ -53,6 +53,22 @@ duplicate: this file is the *why*, that one is the *how*).
   pre-effects sample (already taken at `fp 141`) and the present-source sample
   of the same target (`fp 95`); the capture dedupes by host image, so one frame
   carries only the first-bound stage, pre-effects or present, never both (F41).
+* **`ds24c` scored: the PPU layer is live, and every hooked writer is out
+  (2026-11-23).** The `v10-kusa` rebuild (F43) put the PPU hook into the running
+  code for the first time. The run then recorded 5285 stores from `ppu-stw`,
+  `ppu-stwbrx`, `spu-put`, `spu-putllc`, `spu-list-put` and `vm::write`, and
+  **none** of them lands in a delivered defect quad, in a `fixsrc` program
+  image, or carries a `fix.log` guest word. The positive control proves the
+  layers fired, so this is a measured exclusion (E15), not a silent instrument.
+  **There is still no confirmed root cause for the residual ground/water
+  flash.** The one store path the run could not see is the RSX-side copy
+  destination (`nv308a` bulk/non-increment, `nv3089`, `nv0039`); it is now
+  scored by the same address watch, with the guest source EA in the detail, so
+  the next run joins a copy into a program image to a defect and names the
+  buffer one hop upstream (F45). The probe defects that could have hidden this
+  are fixed (F46): the `watch_range` duplicate churn, the 128-line
+  `stage-watch` cap, the `needle`/`band` conflation, the `suspicious_word`
+  false positives, and the `summarize-stage.py` parser.
 * **Probes rebuilt, proven, and levelled (2026-11-22).** Every probe was
   re-audited against the "no output is evidence until the probe has a positive
   control" rule. The important changes:
@@ -266,10 +282,10 @@ duplicate: this file is the *why*, that one is the *how*).
 | Item | Value |
 |---|---|
 | Branch | `metal4-dev` |
-| HEAD | `9c8bb94d2 metal4: return to upstream's RSX FIFO parser` |
-| Parent chain | `5b3870866` (parity + docs) → `2f3a52558` (FP/ROP port) → `0ed64a761` (writable mirror) → `9c8bb94d2` |
+| HEAD | `metal4-dev` tip; the code commit for the current state is named in the newest §11 entry |
+| Parent chain | `5b3870866` (parity + docs) → `2f3a52558` (FP/ROP port) → `0ed64a761` (writable mirror) → `9c8bb94d2` (FIFO) → … → `180a3056a` (proven, armed watch) → `6108fefcf` |
 | Upstream base | `fb6737b1c` |
-| Ahead / behind | 39 / 0 |
+| Ahead / behind | 52 / 0 |
 | Build | `build-tests` (ninja); `-DMACDEPLOYQT_EXECUTABLE=/usr/bin/true` |
 | Tests | `build-tests/bin/rpcs3_test` — 687 passed, 2 disabled |
 | Scrub | `python3 .metal4-release-scrub.py check` — 0 residuals / 0 orphans / 0 empty bodies |
@@ -355,6 +371,9 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | F41 | **The existing capture cannot bracket one frame's post chain.** The capture dumps a bound texture image at the draw that binds it, once per host image per capture frame (dedupe key is the `MTL::Texture*`, serial `frame*100 + unit`). Which stage that is depends on where the capture window opens: `0xc07a0000` is first bound at `fp 141` (pre-effects) in frame 6642, but at the present compose (`fp 95`) in frames 6638/6643. A frame therefore carries **one** of the two stages, never both. The separate `world-target` dump is gated to 8 per capture and `ucode_length >= 3000`, which fires on the first world draws only (target still the uniform `0x202020` clear); `host-census` is a 5-second periodic present dump (24/29/34 s …). The level-5 `capture frame … unit …` site also reaches its 4096-line cap around frame 6648 in a 120-frame window, so the later pressed windows have image files but no stage labels in the log. | `dumps/` inventory; `mtl-probe.log` `host image sample` / `world target draw` / `host image census`; `MTLGSRender.cpp:659-700, 4780-4880, 5814-5841`. |
 | F42 | **What the seam evidence leaves open.** The seam is in the present source (F39). The only *lit* pre-effects sample (6642, at `fp 141`) is clean and the only *lit* present-source sample (6643, at `fp 95`) is seamed; the other labelled samples (6638 present-source, 6639 pre-effects) are black-class, and no single frame has both stages. Candidates, all before the HUD: the 115 world draws, `fp 141` (no textures, cannot resample), the exact copy (F38), the 25 effects + `fp 57` sampling `0xc5870000` + depth, the bloom chain, `fp 88`, `fp 14`. The next capture must produce the pre-effects and present-source samples of the same frame. | F36–F41; §10 Phase 2.6. |
 | F43 | **The PPU JIT hook has never executed: the object cache was never invalidated.** The cache file name is `v9-kusa-<base57(module-hash)>-<base57(settings)>-<cpu>.obj` (`PPUThread.cpp:5833`); the hash covers the guest module bytes and settings, not `PPUTranslator`'s output. `cb7b3c811` (2026-11-18 12:29) added the `__ppu_stage_watch` calls to `WriteMemory`/`STVLX`/`STVRX` and did **not** bump the literal, so `jit_compiler::load_object` returned the old objects and nothing recompiled. Measured: all **233** `v9-kusa-*.obj.gz` under `~/Library/Caches/rpcs3/cache/BLUS30443/ppu-…-EBOOT.BIN/` are dated 2026-11-12 20:36 and `gzcat … \| grep -c __ppu_stage_watch` is **0** for every one; across the whole cache, **0 of 372** `.obj.gz` are newer than 2026-11-14; `spu-safe-v1-tane.dat` was rewritten 2026-11-18 13:57, so the SPU cache did recompile. Fixed by bumping the literal to `v10-kusa` (§11, 2026-11-19 cache entry); the rebuilt `rpcs3` contains `v10-kusa` and no `v9-kusa`, `rpcs3_test` 687/687. Consequence: the zero `ppu-stw`/`ppu-stwbrx` result in every run before this fix says nothing about PPU stores, and the PPU layer is the most likely producer. | `PPUThread.cpp:5832`; `Utilities/JITLLVM.cpp:963`; cache inventory; F34. |
+| F44 | **`ds24c` is the first run with every store layer proven live, and it excludes them all for the residual ground flash.** Positive control (F43 fixed): `ppu-stw` 1122 stores (991 `ring=1`, 115 `stage=1`), `ppu-stwbrx` 32, `spu-put` 4081 (3933 `ring=1`), `spu-putllc` 37, `spu-list-put` 2, `vm-write` 11. The fill corrected 192 662 lanes across **93 distinct defect quads** and **68 distinct program images** (`fixsrc`), with **677 distinct guest words** behind the defects, all in `c1472e70..c1583e10`. Decisive negatives: **0** stores land inside a defect quad; **0** of the 115 `stage=1` stores land inside any `fixsrc` image; **0** store `new` values equal any `fix.log` guest word; `stage-flip` 0. Local-memory coverage works (5064 stores in `c0000000..c2000000`). The `nv308a` copies are faithful: every sampled line has `dst_bytes == src_bytes` and `same=1`, so the transposed bytes are already in guest RAM when the copy reads them. **The producer is therefore not any hooked CPU store path.** | `run-20261123-223946-ds24c/{stage,fix,watch,stage-nv308a}.log`, `summarize-stage.py`. |
+| F45 | **The residual has no confirmed root cause yet; one class cannot be excluded.** The unhooked path is the RSX-side copy destination itself (`nv308a`/`nv3089`/`nv0039` DMA write) and the guest buffer that feeds it. `nv3089`/`nv0039` never fired in `ds24b`/`ds24c`; the `nv308a` bulk copy is instrumented (`program_write_watch`) but its destination was not scored by the stage watch, so a copy into a program image could not be joined to a defect by address. The `nv308a` *source* is watched (`watch_range`), and no store into a watched source explains the defect. So the remaining candidates, in order: (a) the copy destination, now hooked in the next build; (b) the guest source buffer, written by a path the four hooked layers do not see; (c) a defect that is already present at first sight of the range (`stage-prearm` covers this). | F44; `nv308a.cpp`; §10 Phase 3. |
+| F46 | **Four probe defects were found by scoring `ds24c`, and all four could have hidden the producer.** (1) `watch_range`'s merge loop treated an exact duplicate as a merge: it deleted the matching range and re-appended it, so the common "same image prefetched again" call re-emitted `stage-watch` and churned the array; with the range last in the array it is an **infinite loop** (latent, not observed because a new image is usually appended in between). (2) The 128-line `stage-watch` cap was spent on 128 copies of the same 80-byte range, so the 68 real images were invisible and the watch could not be audited. (3) `stage-store`'s `needle=` field carried `needle OR band`, so 4924 lines read as needle hits and the band signal was indistinguishable. (4) `summarize-stage.py` parsed `fixsrc`/`fix` positionally, so `fp=None`, `ea=None`, `defect quads=0` and the join was not evidence. Also `suspicious_word`'s weak `plausible` shape fired on ~13% of random data words (false positives at `0x3919…`, `0xc14a…`). All five are fixed in the next commit; the array churn preserved the range *set*, so F44's `stage=1` negative stands. | Code read of `watch_range`/`note_mem`/`log_word`; `summarize-stage.py` output. |
 
 ---
 
@@ -376,6 +395,7 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | E12 | **A half-width scissor or viewport on the world target.** | F37: all 222 draws into `0xc07a0000` in a real frame use `scissor 0,0,1280,720`; the only sub-full scissors are the shadow atlas quadrants and the bloom targets. |
 | E13 | **The `fp 110` world feedback copy adds the blur.** | F38: `0xc5870000` is byte-identical to its `0xc07a0000` source at 6642/6732/6734 (`cmp` clean, same hash); it is a plain 1-texture full-screen copy. |
 | E14 | **An RSX blit engine writes the world.** | The `73d1e6ad4` run (`run-20261119-095732-ds24b`) logs **zero** `nv3089-host`, `nv0039-host` and `stage-partial` lines; the world target is written only by draws (F36). |
+| E15 | **A hooked CPU store path (PPU JIT/interpreter, SPU DMA, `vm::write`) produces the residual ground flash.** F44: with the PPU object cache rebuilt (F43), `ds24c` sees 5285 stores across those layers and none lands in a defect quad, in a `fixsrc` image, or carries a `fix.log` guest word. The layer is live, not silent, so this is a measured negative, not a missing instrument. |
 
 Two defects are known and **not** the strobe, but must not be confused with it:
 
@@ -681,6 +701,19 @@ table already recorded the address, the fix is a one-line bypass for the
 `present` label, not a new dump. Keep everything default-off, `EXCISE`-fenced
 and bounded.
 
+**`ds24c` closes the CPU-store half and opens the copy half (2026-11-23).**
+With the PPU hook finally compiled in (F43), every hooked writer is live and
+none of them lands in a defect quad, in a `fixsrc` image, or carries a
+`fix.log` guest word (F44/E15). That is the measured end of the "a CPU store
+wrote the animated lane" branch. The remaining branch is the RSX-side copy
+itself and its guest source (F45): the `nv308a` bulk and non-increment
+destinations now call `fp_stage_watch::note_mem(..., "nv308a-dst", …)` and
+carry `src_ea=`/`dst_ea=` in the detail, so the next run scores a copy into a
+program image with the same address join as a store. If the destination is
+clean and its source is clean, the defect was already present at first sight
+and `stage-prearm` names it. The seam split is unchanged and still needs the
+one-frame `world-target` + `present-*` comparison above.
+
 ### Phase 3 — producer of the transposed staging word — **one-run plan**
 
 The fill and the nv308a chunk are faithful (`src_bytes == dst_bytes`), so the
@@ -779,6 +812,57 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
+
+### 2026-11-23 — `ds24c` scored: the PPU layer is live and every hooked writer is excluded; the probe defects it exposed are fixed
+
+**Run.** `run-20261123-223946-ds24c`, `LEVEL=2`, `PROBE=8`, `HIST=4`, `SCAN=1`,
+`BASE=1`, oracle `bswap32-all`, `RSX_FP_STAGE_FIX` unset, F12-only. The one-time
+`v10-kusa` PPU cache rebuild (233 modules) finished before the world, and a
+fresh object contains `__ppu_stage_watch`, so the instrument is compiled in.
+The emulator exited through the known unrelated LLVM `MCJIT` teardown
+segfault in `Emulator::Quit`; the logs are intact.
+
+**Measured.** 192 662 fill corrections in 93 distinct defect quads across 68
+program images, 677 distinct guest words, EA range `c1472e70..c1583e10`.
+5285 stores: `ppu-stw` 1122, `spu-put` 4081, `ppu-stwbrx` 32, `spu-putllc`
+37, `spu-list-put` 2, `vm-write` 11. `stage-flip` 0. Every `nv308a` sample is a
+faithful copy (`dst_bytes == src_bytes`, `same=1`). **Decisive negatives: 0
+stores inside a defect quad, 0 of the 115 `stage=1` stores inside a `fixsrc`
+image, 0 store values equal to a `fix.log` guest word.** The positive control
+proves those layers are live, so this is an exclusion (E15), not a silent
+instrument — the F43 failure mode is now ruled out.
+
+**Probe defects found while scoring (all fixed in this commit).** The merge
+loop in `watch_range` treated an exact duplicate as a merge, deleting the
+matching range and re-appending it; with the range last in the array that is an
+infinite loop (latent — a new image was usually appended in between). The same
+path re-emitted `stage-watch` on every prefetch and spent the 128-line cap on
+128 copies of one 80-byte range, so the 68 real images were invisible. The
+`needle=` field carried `needle OR band`, conflating 4924 band hits with needle
+hits; it is now two fields (`needle=`, `band=`). `suspicious_word` no longer
+includes the weak `plausible` shape (it fires on ~13 % of random data words and
+produced the `0x3919…`/`0xc14a…` prearm false positives); the band shape
+remains, and the weak shape stays per-store as `suspect=1` for steering only.
+`summarize-stage.py` now parses the space-separated `fixsrc`/`fix` lines, prints
+the positive control first, the per-writer census flags, the quad join, the
+`fixsrc` image join and the `nv308a` destination lines.
+
+**New depth.** The `nv308a` bulk and non-increment destinations are now scored
+with `fp_stage_watch::note_mem(..., "nv308a-dst", …)` and carry the guest
+source EA in the detail, so a copy into a program image joins to a defect by
+address and names the buffer one hop upstream. That closes the one store path
+F44 could not see.
+
+**Answer to "do we have the root cause": no.** The residual ground/water flash
+is not produced by any hooked CPU store path (E15), and the seam and the grey
+flicker are still bracketed but not localized. The remaining class is the
+RSX-side copy destination and its guest source (F45); the next run scores it
+with the same address join.
+
+**Changes to §4/§5/§6.** Added F44 (the `ds24c` positive control and negatives),
+F45 (the remaining class), F46 (the probe defects), and E15. §6 stays open on
+the same three branches, with the producer branch narrowed to (a) copy
+destination, (b) unwatched guest source, (c) already wrong at first sight.
 
 ### 2026-11-22 — code: the probes are rebuilt around a positive control, levelled, and the trace is written
 

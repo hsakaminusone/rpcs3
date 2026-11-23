@@ -672,46 +672,52 @@ namespace rsx
 			{
 				std::lock_guard lock(guard());
 
-				// Merge repeatedly: extending one range can make it touch another.
-				bool merged = true;
+				u32 count = range_count().load(std::memory_order_relaxed);
+				u64 lo = addr;
+				u64 hi = static_cast<u64>(addr) + len;
 
-				while (merged)
+				// The same program image is prefetched many times, so this is the
+				// common case.  Returning here is not just an optimisation: the
+				// merge loop below treats an exact duplicate as a merge and would
+				// delete an unrelated range and re-emit the watch line on every
+				// call (F44: 128 identical `stage-watch` lines hid the 68 real
+				// images and evicted ranges).
+				for (u32 i = 0; i < count; ++i)
 				{
-					merged = false;
-					u32 count = range_count().load(std::memory_order_relaxed);
+					const range& r = ranges()[i];
 
-					for (u32 i = 0; i < count; ++i)
+					if (r.addr <= addr && hi <= static_cast<u64>(r.addr) + r.len)
 					{
-						range& r = ranges()[i];
-						const u64 rlo = r.addr;
-						const u64 rhi = static_cast<u64>(r.addr) + r.len;
-						const u64 alo = addr;
-						const u64 ahi = static_cast<u64>(addr) + len;
-
-						// Overlap, or within 64 bytes (a command packet header
-						// separates two payloads often enough to matter).
-						if (alo <= rhi + 64 && rlo <= ahi + 64)
-						{
-							const u64 lo = std::min<u64>(alo, rlo);
-							const u64 hi = std::max<u64>(ahi, rhi);
-							r.addr = static_cast<u32>(lo);
-							r.len = static_cast<u32>(hi - lo);
-
-							// Remove the last entry into this slot, so the array stays
-							// dense and lock-free membership scans stay short.
-							if (i + 1 != count)
-							{
-								ranges()[i] = ranges()[count - 1];
-							}
-
-							range_count().store(count - 1, std::memory_order_release);
-							merged = true;
-							break;
-						}
+						return;
 					}
 				}
 
-				u32 count = range_count().load(std::memory_order_relaxed);
+				// Fold every touching range into the union, then add the union
+				// once.  A merged slot is replaced by the last entry, so the array
+				// stays dense and the membership scan stays short.
+				for (u32 i = 0; i < count;)
+				{
+					const u64 rlo = ranges()[i].addr;
+					const u64 rhi = static_cast<u64>(ranges()[i].addr) + ranges()[i].len;
+
+					// Overlap, or within 64 bytes (a command packet header
+					// separates two payloads often enough to matter).
+					if (lo <= rhi + 64 && rlo <= hi + 64)
+					{
+						lo = std::min<u64>(lo, rlo);
+						hi = std::max<u64>(hi, rhi);
+						count = range_count().load(std::memory_order_relaxed);
+						ranges()[i] = ranges()[count - 1];
+						range_count().store(count - 1, std::memory_order_release);
+						// The last entry moved into this slot: re-examine it.
+					}
+					else
+					{
+						++i;
+					}
+				}
+
+				count = range_count().load(std::memory_order_relaxed);
 				u32 slot = 0;
 
 				if (count < max_ranges)
@@ -721,25 +727,25 @@ namespace rsx
 					// Fill the slot before publishing the count: a reader that sees
 					// the new count must never observe an entry that is not yet
 					// written.
-					ranges()[slot].addr = addr;
-					ranges()[slot].len = len;
+					ranges()[slot].addr = static_cast<u32>(lo);
+					ranges()[slot].len = static_cast<u32>(hi - lo);
 					range_count().store(count + 1, std::memory_order_release);
 				}
 				else
 				{
 					slot = range_cursor()++ % max_ranges;
-					ranges()[slot].addr = addr;
-					ranges()[slot].len = len;
+					ranges()[slot].addr = static_cast<u32>(lo);
+					ranges()[slot].len = static_cast<u32>(hi - lo);
 				}
 
-				// Record the coverage once per distinct range, so a run can prove
-				// the program image was actually watched.
+				// One line per coverage change, so a run can prove which program
+				// images were watched.  Bounded, but high enough for every image.
 				static u32 s_watch_lines = 0;
 
-				if (s_watch_lines < 128 && level() >= 1)
+				if (s_watch_lines < max_ranges && level() >= 1)
 				{
 					++s_watch_lines;
-					emit("stage-watch addr=%08x len=%u\n", addr, len);
+					emit("stage-watch addr=%08x len=%u\n", static_cast<u32>(lo), static_cast<u32>(hi - lo));
 				}
 			}
 
@@ -804,9 +810,15 @@ namespace rsx
 		{
 			const u32 slot = de_transpose(word);
 			const u32 alt = std::byteswap(slot);
+
+			// The band shape is the one the fill-side join proved: a word whose
+			// T-decode falls outside the authored band while its byte reversal
+			// falls inside it.  The weaker plausible/reversed shape fires on ~13%
+			// of random words and produced false positives at data addresses
+			// (F44), so it is not a first-sight signal; note_mem reports it
+			// per store as `suspect=1` for the steering experiment only.
 			return word == needle_word() || std::byteswap(word) == needle_word()
-				|| (!authored_word(slot) && authored_word(alt))
-				|| (!plausible(slot) && plausible(alt));
+				|| (!authored_word(slot) && authored_word(alt));
 		}
 
 		static u32 band_mask(const u8* bytes, u32 n)
@@ -933,7 +945,7 @@ namespace rsx
 					u32 ctx[4] = {};
 					read_quad(addr + off, ctx);
 					const u64 seq = store_seq().fetch_add(1, std::memory_order_relaxed) + 1;
-					log_word(addr + off, word, slot, alt, suspect, hit, stage, in_ring, steer, writer, pc, thread, detail, ctx, seq);
+					log_word(addr + off, word, slot, alt, suspect, needle, band, stage, in_ring, steer, writer, pc, thread, detail, ctx, seq);
 				}
 
 				// Level 2: a cross-writer, address-keyed history.  The per-site
@@ -1396,7 +1408,7 @@ namespace rsx
 			entry.valid = true;
 		}
 
-		static void log_word(u32 waddr, u32 word, u32 slot, u32 alt, bool suspect, bool needle_hit,
+		static void log_word(u32 waddr, u32 word, u32 slot, u32 alt, bool suspect, bool needle_hit, bool band_hit,
 			bool stage, bool ring, bool steer, const char* writer, u32 pc, const char* thread, const char* detail,
 			const u32 (&ctx)[4], u64 seq)
 		{
@@ -1449,10 +1461,10 @@ namespace rsx
 				std::snprintf(old_text, sizeof(old_text), "%08x", old);
 			}
 
-			emit("stage-store seq=%llu ms=%llu writer=%s addr=%08x new=%08x old=%s slot=%08x alt=%08x suspect=%d needle=%d stage=%d ring=%d fix=%d pc=%08x thread=%s quad=%08x,%08x,%08x,%08x detail=%s\n",
+			emit("stage-store seq=%llu ms=%llu writer=%s addr=%08x new=%08x old=%s slot=%08x alt=%08x suspect=%d needle=%d band=%d stage=%d ring=%d fix=%d pc=%08x thread=%s quad=%08x,%08x,%08x,%08x detail=%s\n",
 				static_cast<unsigned long long>(seq), static_cast<unsigned long long>(now_ms()),
 				writer, waddr, word, old_text, slot, alt,
-				suspect ? 1 : 0, needle_hit ? 1 : 0, stage ? 1 : 0, ring ? 1 : 0,
+				suspect ? 1 : 0, needle_hit ? 1 : 0, band_hit ? 1 : 0, stage ? 1 : 0, ring ? 1 : 0,
 				steer ? 1 : 0, pc, thread ? thread : "-",
 				ctx[0], ctx[1], ctx[2], ctx[3], detail ? detail : "-");
 		}

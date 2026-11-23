@@ -287,6 +287,12 @@ namespace rsx
 						});
 					// EXCISE-END fp-literal-write-watch
 
+					// EXCISE-BEGIN fp-literal-write-watch
+					// TODO(excise): level 5; the single-word form gets the same
+					// address-keyed stage score as the bulk form above.
+					rsx::fp_stage_watch::note_mem(vm::get_addr(dst), 4, "nv308a-noninc-dst", 0, "-", "nv308a noninc");
+					// EXCISE-END fp-literal-write-watch
+
 					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 4, "nv308a");
 					return;
 				}
@@ -347,6 +353,21 @@ namespace rsx
 							guest_addr, guest_same,
 							guest_words[0], guest_words[1], guest_words[2], guest_words[3]);
 					});
+				// EXCISE-END fp-literal-write-watch
+
+				// EXCISE-BEGIN fp-literal-write-watch
+				// TODO(excise): level 5; score the copy destination with the same
+				// address-keyed stage watch as every other writer.  The RSX-side
+				// copy does not go through a CPU store hook, so without this line
+				// a copy into a program image cannot be joined to a fill defect
+				// by address.  The source EA is carried in the detail so the join
+				// also names the guest buffer the bytes came from.
+				if (const u32 src_ea = RSX(ctx)->fifo_ctrl->translate_address(src_offset); src_ea != umax)
+				{
+					char stage_detail[80];
+					std::snprintf(stage_detail, sizeof(stage_detail), "nv308a src_ea=%08x dst_ea=%08x len=%u", src_ea, dst_address, data_length);
+					rsx::fp_stage_watch::note_mem(dst_address, data_length, "nv308a-dst", 0, "-", stage_detail);
+				}
 				// EXCISE-END fp-literal-write-watch
 
 				RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, count * 4, "nv308a");
