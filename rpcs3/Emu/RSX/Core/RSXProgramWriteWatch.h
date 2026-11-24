@@ -706,9 +706,20 @@ namespace rsx
 					{
 						lo = std::min<u64>(lo, rlo);
 						hi = std::max<u64>(hi, rhi);
-						count = range_count().load(std::memory_order_relaxed);
-						ranges()[i] = ranges()[count - 1];
-						range_count().store(count - 1, std::memory_order_release);
+						const u32 now = range_count().load(std::memory_order_relaxed);
+
+						if (now == 0)
+						{
+							break;
+						}
+
+						ranges()[i] = ranges()[now - 1];
+						range_count().store(now - 1, std::memory_order_release);
+
+						// Keep the loop bound in step with the store: the old bound
+						// would re-enter the loop after the last entry was removed,
+						// reload a count of 0 and index `ranges()[0 - 1]` (crash).
+						count = now - 1;
 						// The last entry moved into this slot: re-examine it.
 					}
 					else
