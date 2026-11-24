@@ -373,7 +373,7 @@ Each fact is a measurement or a code citation. Anything inferred is labelled.
 | F43 | **The PPU JIT hook has never executed: the object cache was never invalidated.** The cache file name is `v9-kusa-<base57(module-hash)>-<base57(settings)>-<cpu>.obj` (`PPUThread.cpp:5833`); the hash covers the guest module bytes and settings, not `PPUTranslator`'s output. `cb7b3c811` (2026-11-18 12:29) added the `__ppu_stage_watch` calls to `WriteMemory`/`STVLX`/`STVRX` and did **not** bump the literal, so `jit_compiler::load_object` returned the old objects and nothing recompiled. Measured: all **233** `v9-kusa-*.obj.gz` under `~/Library/Caches/rpcs3/cache/BLUS30443/ppu-…-EBOOT.BIN/` are dated 2026-11-12 20:36 and `gzcat … \| grep -c __ppu_stage_watch` is **0** for every one; across the whole cache, **0 of 372** `.obj.gz` are newer than 2026-11-14; `spu-safe-v1-tane.dat` was rewritten 2026-11-18 13:57, so the SPU cache did recompile. Fixed by bumping the literal to `v10-kusa` (§11, 2026-11-19 cache entry); the rebuilt `rpcs3` contains `v10-kusa` and no `v9-kusa`, `rpcs3_test` 687/687. Consequence: the zero `ppu-stw`/`ppu-stwbrx` result in every run before this fix says nothing about PPU stores, and the PPU layer is the most likely producer. | `PPUThread.cpp:5832`; `Utilities/JITLLVM.cpp:963`; cache inventory; F34. |
 | F44 | **`ds24c` is the first run with every store layer proven live, and it excludes them all for the residual ground flash.** Positive control (F43 fixed): `ppu-stw` 1122 stores (991 `ring=1`, 115 `stage=1`), `ppu-stwbrx` 32, `spu-put` 4081 (3933 `ring=1`), `spu-putllc` 37, `spu-list-put` 2, `vm-write` 11. The fill corrected 192 662 lanes across **93 distinct defect quads** and **68 distinct program images** (`fixsrc`), with **677 distinct guest words** behind the defects, all in `c1472e70..c1583e10`. Decisive negatives: **0** stores land inside a defect quad; **0** of the 115 `stage=1` stores land inside any `fixsrc` image; **0** store `new` values equal any `fix.log` guest word; `stage-flip` 0. Local-memory coverage works (5064 stores in `c0000000..c2000000`). The `nv308a` copies are faithful: every sampled line has `dst_bytes == src_bytes` and `same=1`, so the transposed bytes are already in guest RAM when the copy reads them. **The producer is therefore not any hooked CPU store path.** | `run-20261123-223946-ds24c/{stage,fix,watch,stage-nv308a}.log`, `summarize-stage.py`. |
 | F45 | **The residual has no confirmed root cause yet; one class cannot be excluded.** The unhooked path is the RSX-side copy destination itself (`nv308a`/`nv3089`/`nv0039` DMA write) and the guest buffer that feeds it. `nv3089`/`nv0039` never fired in `ds24b`/`ds24c`; the `nv308a` bulk copy is instrumented (`program_write_watch`) but its destination was not scored by the stage watch, so a copy into a program image could not be joined to a defect by address. The `nv308a` *source* is watched (`watch_range`), and no store into a watched source explains the defect. So the remaining candidates, in order: (a) the copy destination, now hooked in the next build; (b) the guest source buffer, written by a path the four hooked layers do not see; (c) a defect that is already present at first sight of the range (`stage-prearm` covers this). | F44; `nv308a.cpp`; §10 Phase 3. |
-| F46 | **Four probe defects were found by scoring `ds24c`, and all four could have hidden the producer.** (1) `watch_range`'s merge loop treated an exact duplicate as a merge: it deleted the matching range and re-appended it, so the common "same image prefetched again" call re-emitted `stage-watch` and churned the array; with the range last in the array it is an **infinite loop** (latent, not observed because a new image is usually appended in between). (2) The 128-line `stage-watch` cap was spent on 128 copies of the same 80-byte range, so the 68 real images were invisible and the watch could not be audited. (3) `stage-store`'s `needle=` field carried `needle OR band`, so 4924 lines read as needle hits and the band signal was indistinguishable. (4) `summarize-stage.py` parsed `fixsrc`/`fix` positionally, so `fp=None`, `ea=None`, `defect quads=0` and the join was not evidence. Also `suspicious_word`'s weak `plausible` shape fired on ~13% of random data words (false positives at `0x3919…`, `0xc14a…`). All five are fixed in the next commit; the array churn preserved the range *set*, so F44's `stage=1` negative stands. | Code read of `watch_range`/`note_mem`/`log_word`; `summarize-stage.py` output. |
+| F46 | **Four probe defects were found by scoring `ds24c`, and all four could have hidden the producer.** (1) `watch_range`'s merge loop treated an exact duplicate as a merge: it deleted the matching range and re-appended it, so the common "same image prefetched again" call re-emitted `stage-watch` and churned the array; with the range last in the array it is an **infinite loop** (latent, not observed because a new image is usually appended in between). (2) The 128-line `stage-watch` cap was spent on 128 copies of the same 80-byte range, so the 68 real images were invisible and the watch could not be audited. (3) `stage-store`'s `needle=` field carried `needle OR band`, so 4924 lines read as needle hits and the band signal was indistinguishable. (4) `summarize-stage.py` parsed `fixsrc`/`fix` positionally, so `fp=None`, `ea=None`, `defect quads=0` and the join was not evidence. Also `suspicious_word`'s weak `plausible` shape fired on ~13% of random data words (false positives at `0x3919…`, `0xc14a…`). All five are fixed in the next commit; the array churn preserved the range *set*, so F44's `stage=1` negative stands. The first rewrite of the merge loop then kept a stale loop bound and indexed `ranges()[0 - 1]`, a hard crash in `ds24d` at the profile screen (segfault in `watch_range` via `nv308a`); fixed in `e6932cc06` by assigning the new count and guarding `now == 0`. | Code read of `watch_range`/`note_mem`/`log_word`; `summarize-stage.py` output; `run-20261124-132203-ds24d/stdout.log`. |
 
 ---
 
@@ -812,6 +812,31 @@ routing), then re-run `rpcs3_test` + scrub before any commit.
 
 Newest first. One entry per run or code change: what was done, what was measured,
 what it changes in §4/§5/§6.
+
+### 2026-11-24 — code: the copy destination is scored, and the first merge rewrite crashed
+
+The `ds24d` run is the first with `nv308a` bulk/non-increment destinations
+scored by `fp_stage_watch::note_mem` (`allow_ring=false`, `src_ea`/`dst_ea` in
+the detail), so a copy into a program image joins to a fill defect by address
+and names the guest buffer upstream.
+
+The first launch died before the world: the rewritten merge loop in
+`watch_range` stored `count-1` but left the loop bound at the pre-decrement
+value, so after merging the last entry it re-entered, reloaded a count of zero
+and indexed `ranges()[0 - 1]`. Backtrace:
+`fp_stage_watch::watch_range ← nv308a::color4::impl ← thread::run_FIFO`, at the
+profile screen (`run-20261124-132203-ds24d/stdout.log`). Fixed in `e6932cc06`
+by assigning the new count and guarding `now == 0`; `rpcs3_test` 687/687. This
+is exactly why the flags are tested before a run: the crash is in the new
+probe, not in rendering.
+
+Even in that aborted run the destination hook fired, and it fired on a
+program image: three `nv308a-dst` lines wrote 16 bytes at `0xc14b4b30` —
+offset `0x130` inside `0xc14b4a00` len 1680, which is a `fixsrc` image in
+`ds24c` — with source EA `0x392ff2f8`. So the copy path does write inside
+fragment-program images, which is exactly the join `ds24d` must score; `stage=0`
+on those lines only means the image range was not armed yet (prefetch had not
+run at the profile screen).
 
 ### 2026-11-23 — `ds24c` scored: the PPU layer is live and every hooked writer is excluded; the probe defects it exposed are fixed
 
