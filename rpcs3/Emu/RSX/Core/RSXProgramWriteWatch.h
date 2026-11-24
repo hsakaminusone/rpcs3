@@ -842,7 +842,8 @@ namespace rsx
 		// A store has completed at `addr` (size bytes).  Reads the bytes back from
 		// guest memory, so every layer calls the same entry point regardless of
 		// whether it knows the value it wrote.
-		static void note_mem(u32 addr, u32 size, const char* writer, u32 pc, const char* thread, const char* detail)
+		static void note_mem(u32 addr, u32 size, const char* writer, u32 pc, const char* thread, const char* detail,
+			bool allow_ring = true)
 		{
 			if (!enabled() || !size || !addr)
 			{
@@ -853,7 +854,13 @@ namespace rsx
 			const u64 ahi = alo + size;
 			const u32 rb = ring_base().load(std::memory_order_relaxed);
 			const u32 rl = ring_len().load(std::memory_order_relaxed);
-			const bool in_ring = rl && alo < static_cast<u64>(rb) + rl && static_cast<u64>(rb) < ahi;
+
+			// A copy destination is not a command-stream producer, so its caller
+			// turns the ring test off: only a program image (in_stage) or the
+			// positive control can make it log.  Otherwise every nv308a chunk
+			// would scan and log its whole destination as `ring=1` and spend the
+			// line cap on data that cannot be the animated ucode lane.
+			const bool in_ring = allow_ring && rl && alo < static_cast<u64>(rb) + rl && static_cast<u64>(rb) < ahi;
 			const bool in_stage = range_hit(addr, size);
 
 			// Positive control: the first few stores of every writer are logged

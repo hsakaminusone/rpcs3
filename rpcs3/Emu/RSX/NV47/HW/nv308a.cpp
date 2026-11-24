@@ -290,7 +290,7 @@ namespace rsx
 					// EXCISE-BEGIN fp-literal-write-watch
 					// TODO(excise): level 5; the single-word form gets the same
 					// address-keyed stage score as the bulk form above.
-					rsx::fp_stage_watch::note_mem(vm::get_addr(dst), 4, "nv308a-noninc-dst", 0, "-", "nv308a noninc");
+					rsx::fp_stage_watch::note_mem(vm::get_addr(dst), 4, "nv308a-noninc-dst", 0, "-", "nv308a noninc", /*allow_ring=*/false);
 					// EXCISE-END fp-literal-write-watch
 
 					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 4, "nv308a");
@@ -366,7 +366,7 @@ namespace rsx
 				{
 					char stage_detail[80];
 					std::snprintf(stage_detail, sizeof(stage_detail), "nv308a src_ea=%08x dst_ea=%08x len=%u", src_ea, dst_address, data_length);
-					rsx::fp_stage_watch::note_mem(dst_address, data_length, "nv308a-dst", 0, "-", stage_detail);
+					rsx::fp_stage_watch::note_mem(dst_address, data_length, "nv308a-dst", 0, "-", stage_detail, /*allow_ring=*/false);
 				}
 				// EXCISE-END fp-literal-write-watch
 

@@ -850,8 +850,12 @@ the positive control first, the per-writer census flags, the quad join, the
 **New depth.** The `nv308a` bulk and non-increment destinations are now scored
 with `fp_stage_watch::note_mem(..., "nv308a-dst", …)` and carry the guest
 source EA in the detail, so a copy into a program image joins to a defect by
-address and names the buffer one hop upstream. That closes the one store path
-F44 could not see.
+address and names the buffer one hop upstream. The destination call sets
+`allow_ring=false`: a copy destination is not a command-stream producer, so
+only a program image (`in_stage`) or the positive control can log it —
+otherwise every chunk would scan and log its whole destination as `ring=1` and
+spend the line cap on data that cannot be the animated ucode lane. That closes
+the one store path F44 could not see.
 
 **Answer to "do we have the root cause": no.** The residual ground/water flash
 is not produced by any hooked CPU store path (E15), and the seam and the grey
