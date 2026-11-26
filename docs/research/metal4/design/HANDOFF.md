@@ -813,8 +813,9 @@ logic-op and a redirected-depth program and compile the result.
 
 ## 11. How to continue
 
-1. Read `NEXT-AGENT-PROMPT.md` (the full continuation brief), then `METAL4-TODO.md` and this
-   file; the datapoints are in `INVESTIGATION-2026-10-22.md` §10.6–§10.7 and the findings in
+1. Read `DS-STROBE-INVESTIGATION.md` §0 (the Demon's Souls handoff), then
+   `METAL4-TODO.md` and this file; the datapoints are in
+   `INVESTIGATION-2026-10-22.md` §10.6–§10.7 and the findings in
    `LOG-FINDINGS.md` §1.1.
 2. Build the loop: `ninja rpcs3_emu` for the Metal work, `ninja rpcs3` only before a launch.
 3. One approved run with `MTL_PROBE_FORCE_FP=100 MTL_PROBE=5` and the run-2 capture env. Copy

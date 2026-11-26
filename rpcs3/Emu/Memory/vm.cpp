@@ -2549,7 +2549,14 @@ namespace vm
 	{
 		void fp_stage_watch_write(u32 addr, u32 size, const char* writer, u32 pc, bool from_jit)
 		{
-			if (!rsx::fp_stage_watch::enabled())
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; the ledger is independent of the stage
+			// watch, so the store still reaches note_mem when only RSX_FP_LEDGER
+			// is set.  note_mem records it and returns if the watch is off.
+			const bool ledger = rsx::producer_ledger::enabled();
+			// EXCISE-END fp-producer-ledger
+
+			if (!rsx::fp_stage_watch::enabled() && !ledger)
 			{
 				return;
 			}

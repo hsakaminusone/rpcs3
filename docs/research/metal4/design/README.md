@@ -48,6 +48,15 @@ shard under `../inventory/out/dispositions/<cluster>.csv`.
 | [`LLD-nv308a-image.md`](LLD-nv308a-image.md) | `nv308a-image` | 16 |
 | [`LLD-nv3089-image.md`](LLD-nv3089-image.md) | `nv3089-image` | 21 |
 
+## Investigations
+
+Live investigations are logged, and handed off, in a single document. The dated
+artefacts they supersede were removed on 2026-11-24.
+
+| doc | topic |
+|---|---|
+| [`DS-STROBE-INVESTIGATION.md`](DS-STROBE-INVESTIGATION.md) | **The only Demon's Souls (BLUS30443) investigation/handoff document.** Scope is exactly three symptoms: the white flashing floor/water, the whole-image black/grey and white flicker, and the left-half blur with a seam at `x = 640`. §0 is the one-page handoff; §4/§5/§6 are the facts, dead hypotheses and live hypotheses; §10 is the next phase. |
+
 ## Conventions
 
 - Every document ends with exactly `<!-- doc-end -->` (enforced by

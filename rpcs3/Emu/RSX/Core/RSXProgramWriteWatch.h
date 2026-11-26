@@ -2,6 +2,13 @@
 
 #include <util/types.hpp>
 
+// EXCISE-BEGIN fp-producer-ledger
+// TODO(excise): level 5; the store ledger behind the watch.  It owns its own
+// switch (RSX_FP_LEDGER) so a run can record every producer without turning on
+// the address-filtered stage watch.
+#include "Emu/RSX/Core/RSXProducerLedger.h"
+// EXCISE-END fp-producer-ledger
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -659,6 +666,13 @@ namespace rsx
 				len = 0x100000;
 			}
 
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; every range the watch learns is also a
+			// ledger range, so an all-store run attributes writes here without
+			// the stage watch being enabled.
+			producer_ledger::seed_range(addr, len);
+			// EXCISE-END fp-producer-ledger
+
 			// The cellGcmInit arm can be missed (fifo_ctrl not up yet, ioAddress
 			// zero).  A source EA is in the same io region the guest builds
 			// commands in, so arm a 32 MiB window around the first one: the
@@ -856,6 +870,13 @@ namespace rsx
 		static void note_mem(u32 addr, u32 size, const char* writer, u32 pc, const char* thread, const char* detail,
 			bool allow_ring = true)
 		{
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; record before the stage watch's filters so a
+			// run can say who wrote an address the watch never watched.  No-op
+			// unless RSX_FP_LEDGER is set.
+			producer_ledger::record_store(addr, size, writer, pc);
+			// EXCISE-END fp-producer-ledger
+
 			if (!enabled() || !size || !addr)
 			{
 				return;
@@ -930,6 +951,18 @@ namespace rsx
 				// the needle happens to hold this run.  Passed through the
 				// needle field of the log so a grep for needle=1 still finds it.
 				const bool hit = needle || band;
+
+				// EXCISE-BEGIN fp-producer-ledger
+				// TODO(excise): level 5; register the quad as a defect so the
+				// ledger seeds it and the origin report scans for it.  Only an
+				// exact needle hit qualifies: the shape/band predicates fire on
+				// ordinary guest pointers and would spend the defect budget on
+				// noise (F56).
+				if (needle)
+				{
+					producer_ledger::note_defect(addr + off, word, writer);
+				}
+				// EXCISE-END fp-producer-ledger
 
 				if (!in_ring && !in_stage && !hit && !probe)
 				{

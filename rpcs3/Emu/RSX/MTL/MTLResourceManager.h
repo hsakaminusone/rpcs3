@@ -4,6 +4,7 @@
 
 #ifdef RSX_ENABLE_METAL4
 
+#include <array>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -133,6 +134,16 @@ namespace mtl
 		void on_frame_begin(u32 index);
 		void on_commit_complete(u32 index);
 
+		// The serial of the frame that is recording, and the slot it records on.
+		// An invalidated surface is stamped with both, and may be handed to a new
+		// allocation only after that slot has reported the frame complete.  The
+		// Metal 4 command buffer holds no strong reference to the textures it
+		// renders into or samples, so refcounts alone cannot answer this
+		// (VKRenderTargets.h:557-560, VKRenderTargets.cpp:188-204).
+		u64 frame_serial() const { return m_frame_serial; }
+		u32 frame_slot() const { return m_frame_slot; }
+		bool is_frame_complete(u64 serial, u32 slot) const;
+
 		// A slot whose commit never reported its feedback still owns a deferred
 		// list, and the GPU may still read those objects.  Move the list aside and
 		// release it only when the ring is idle, which is the first moment nothing
@@ -183,6 +194,13 @@ namespace mtl
 		std::vector<std::vector<MTL::Allocation*>> m_deferred;
 		std::vector<MTL::Allocation*> m_quarantine;
 		u32 m_frame_slot = 0;
+		// One monotonic serial per recorded frame, and per-slot completion.  The
+		// slot that just went idle completed the frame it was last given, which is
+		// the one whose command buffer could still reference an invalidated
+		// surface.
+		u64 m_frame_serial = 0;
+		std::array<u64, frame_slot_count> m_slot_serial{};
+		std::array<u64, frame_slot_count> m_slot_completed{};
 	};
 
 	// A private placement heap holds GPU-only resources; a shared one holds the

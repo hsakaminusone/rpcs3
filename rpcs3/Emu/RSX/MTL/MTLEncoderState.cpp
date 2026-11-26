@@ -3,10 +3,14 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "Emu/RSX/Core/RSXContext.h"
+#include "Emu/RSX/Utils/rsx_utils.h"
+
+#include <tuple>
 
 namespace mtl
 {
-	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range)
+	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range,
+		const rsx::surface_scaling_config_t* scaling)
 	{
 		// One latch per cluster; the helpers consume it instead of re-reading the
 		// register file.
@@ -49,6 +53,14 @@ namespace mtl
 		state.clip_width = surface.clip_width;
 		state.clip_height = surface.clip_height;
 
+		state.raster_width = surface.clip_width;
+		state.raster_height = surface.clip_height;
+		if (scaling)
+		{
+			std::tie(state.raster_width, state.raster_height) =
+				rsx::apply_resolution_scale<true>(*scaling, surface.clip_width, surface.clip_height);
+		}
+
 		state.depth_stencil = capture_depth_stencil_state(ctx.draw_state.depth_stencil);
 
 		return state;
@@ -85,12 +97,13 @@ namespace mtl
 
 		encoder->setBlendColor(state.blend_color[0], state.blend_color[1], state.blend_color[2], state.blend_color[3]);
 
-		// The viewport rectangle is the surface clip; the RSX viewport transform
-		// lives in the vertex env (LLD-raster §3.1, invariant 1), and the rectangle
-		// carries the one clip-space Y flip (invariant 2).
+		// The viewport rectangle is the surface clip scaled to the attachment
+		// extent; the RSX viewport transform lives in the vertex env
+		// (LLD-raster §3.1, invariant 1), and the rectangle carries the one
+		// clip-space Y flip (invariant 2).
 		const f64 znear = state.has_clip_range ? state.znear : 0.0;
 		const f64 zfar = state.has_clip_range ? state.zfar : 1.0;
-		encoder->setViewport(build_viewport(state.clip_width, state.clip_height, znear, zfar));
+		encoder->setViewport(build_viewport(state.raster_width, state.raster_height, znear, zfar));
 
 		encoder->setScissorRect(scissor);
 	}

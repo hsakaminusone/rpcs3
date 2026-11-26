@@ -49,8 +49,12 @@ namespace mtl
 	bool surface_cache_traits::is_reusable_surface(const surface_type& surface, const surface_type& ref)
 	{
 		// The image shape must match, because the allocation is reused as it is
-		// (surface_store.h:108).
-		return surface->value() && surface->pixel_format() == ref->pixel_format() && surface->samples() == ref->samples();
+		// (surface_store.h:108).  A surface the slot that invalidated it has not
+		// finished with must not be handed to a new allocation: the command
+		// buffer still renders into or samples this image even though the RSX
+		// refcount is zero.
+		return surface->value() && surface->pixel_format() == ref->pixel_format() &&
+			surface->samples() == ref->samples() && surface->is_reusable_now();
 	}
 
 	bool surface_cache_traits::surface_is_pitch_compatible(const surface_storage_type& surface, u32 pitch)
@@ -65,6 +69,15 @@ namespace mtl
 			return false;
 		}
 
+		// The invalidated-resource reuse path (surface_store.h:554-580) asks with
+		// check_refs set.  A refcount of zero is not enough: the Metal 4 command
+		// buffer holds no strong reference, so the frame clock is the only proof
+		// that the slot which invalidated this surface is done with the image.
+		if (check_refs && !surface->is_reusable_now())
+		{
+			return false;
+		}
+
 		return surface->get_surface_color_format() == format &&
 			surface->get_spp() == rsx::get_format_sample_count(antialias) &&
 			surface->matches_dimensions(width, height) &&
@@ -74,6 +87,11 @@ namespace mtl
 	bool surface_cache_traits::surface_matches_properties(const surface_storage_type& surface, rsx::surface_depth_format2 format, u16 width, u16 height, rsx::surface_antialiasing antialias, const rsx::surface_scaling_config_t& scaling, bool check_refs)
 	{
 		if (check_refs && surface->has_refs())
+		{
+			return false;
+		}
+
+		if (check_refs && !surface->is_reusable_now())
 		{
 			return false;
 		}
@@ -126,6 +144,12 @@ namespace mtl
 
 	void surface_cache_traits::notify_surface_invalidated(const surface_storage_type& surface)
 	{
+		// The frame tag is the reuse guard: the shared store may pick this surface
+		// out of invalidated_resources for a new allocation as soon as its refcount
+		// is zero, and only the slot's completion proves the command buffer that
+		// used it is done.
+		surface->stamp_invalidated();
+
 		if (!surface->old_contents.empty())
 		{
 			// The deferred regions were never transferred, so drop their references.

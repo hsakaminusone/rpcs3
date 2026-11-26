@@ -367,6 +367,13 @@ namespace rsx
 					char stage_detail[80];
 					std::snprintf(stage_detail, sizeof(stage_detail), "nv308a src_ea=%08x dst_ea=%08x len=%u", src_ea, dst_address, data_length);
 					rsx::fp_stage_watch::note_mem(dst_address, data_length, "nv308a-dst", 0, "-", stage_detail, /*allow_ring=*/false);
+
+					// EXCISE-BEGIN fp-producer-ledger
+					// TODO(excise): level 5; the copy names both ends, so the
+					// origin report can say the defect quad arrived through this
+					// engine and from this guest address.
+					rsx::producer_ledger::record_copy(dst_address, data_length, "nv308a", src_ea, data_length, false);
+					// EXCISE-END fp-producer-ledger
 				}
 				// EXCISE-END fp-literal-write-watch
 

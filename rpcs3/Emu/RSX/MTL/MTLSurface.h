@@ -81,6 +81,30 @@ namespace mtl
 		// never requested.  Returns null when the surface carries no stencil.
 		texture* stencil_view() override;
 
+		// An invalidated surface is recycled through the shared store's
+		// invalidated_resources list.  A Metal 4 command buffer holds no strong
+		// reference to the textures it renders into or samples, so a refcount of
+		// zero does not mean the GPU is done with the image.  Remember the frame
+		// and slot that invalidated it, and let the store reuse it only after that
+		// slot has completed that frame (VKRenderTargets.h:557-560,
+		// VKRenderTargets.cpp:188-204).
+		void stamp_invalidated()
+		{
+			if (m_resources)
+			{
+				frame_tag = m_resources->frame_serial();
+				frame_slot = m_resources->frame_slot();
+			}
+		}
+
+		bool is_reusable_now() const
+		{
+			return !m_resources || m_resources->is_frame_complete(frame_tag, frame_slot);
+		}
+
+		u64 frame_tag = 0;
+		u32 frame_slot = 0;
+
 	private:
 		void create(u32 address, u16 width, u16 height, u16 pitch, rsx::surface_antialiasing antialias, const rsx::surface_scaling_config_t& scaling, MTL::PixelFormat format, u8 bpp, bool depth);
 

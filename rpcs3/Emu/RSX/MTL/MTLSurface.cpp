@@ -199,6 +199,27 @@ namespace mtl
 
 	void surface::memory_barrier(command_recorder& cmd, rsx::surface_access access_type)
 	{
+		// A surface that is still flagged ready may have had its guest backing
+		// rewritten behind our back (CPU writes, a texture upload, or another
+		// surface aliasing the range).  The shared store can only tell us that
+		// through force_data_load; the read-buffers configuration asks for the
+		// same test for every attachment.  VK/GL fold both into this check
+		// (VKRenderTargets.cpp:960-974, GLRenderTargets.cpp:498-507); without it
+		// the host image keeps serving contents the guest no longer holds.
+		const bool read_buffers_config = is_depth_surface()
+			? !!g_cfg.video.read_depth_buffer
+			: !!g_cfg.video.read_color_buffers;
+		const bool should_read_buffers =
+			(state_flags & rsx::surface_state_flags::force_data_load) || read_buffers_config;
+
+		if (should_read_buffers &&
+			last_use_tag &&
+			state_flags == rsx::surface_state_flags::ready &&
+			!test())
+		{
+			state_flags |= rsx::surface_state_flags::erase_bkgnd;
+		}
+
 		if (old_contents.empty())
 		{
 			if (state_flags & rsx::surface_state_flags::erase_bkgnd)

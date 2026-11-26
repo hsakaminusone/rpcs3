@@ -2790,6 +2790,66 @@ TEST(MTLContract, ScaledScissorUsesTheResolvedRegionAndTheScaleConfig)
 	EXPECT_EQ(identity.y2, region.y2);
 }
 
+TEST(MTLContract, EncoderStateScalesTheRasterExtentNotTheGuestClip)
+{
+	contract_context fixture;
+	rsx::context& ctx = fixture.ctx;
+
+	ctx.fb.layout.width = 1280;
+	ctx.fb.layout.height = 720;
+
+	rsx::surface_scaling_config_t doubled;
+	doubled.scale_percent = 200;
+	doubled.min_scalable_dimension = 0;
+
+	const mtl::encoder_state scaled = mtl::capture_encoder_state(ctx, false, &doubled);
+	EXPECT_EQ(scaled.clip_width, 1280);
+	EXPECT_EQ(scaled.clip_height, 720);
+	EXPECT_EQ(scaled.raster_width, 2560);
+	EXPECT_EQ(scaled.raster_height, 1440);
+
+	// With no scaling config the raster extent is the guest clip, which is what
+	// the contract callers that do not own a renderer use.
+	const mtl::encoder_state identity = mtl::capture_encoder_state(ctx, false, nullptr);
+	EXPECT_EQ(identity.raster_width, 1280);
+	EXPECT_EQ(identity.raster_height, 720);
+}
+
+TEST(MTLContract, InvalidatedSurfaceWaitsForItsSlotToComplete)
+{
+	// A Metal 4 command buffer holds no strong reference to the textures it uses,
+	// so an invalidated surface's refcount can reach zero while its slot is still
+	// in flight.  The frame clock is the reuse guard, and this is its contract.
+	mtl::resource_manager resources;
+
+	resources.on_frame_begin(0);
+	EXPECT_EQ(resources.frame_serial(), 1u);
+	EXPECT_EQ(resources.frame_slot(), 0u);
+
+	// A surface stamped here is not reusable until slot 0 reports completion.
+	EXPECT_FALSE(resources.is_frame_complete(1, 0));
+
+	resources.on_frame_begin(1);
+	resources.on_frame_begin(2);
+
+	// The completion must be observed before the slot's serial advances, so the
+	// recorder calls on_commit_complete first (MTLCommandRecorder.cpp).
+	resources.on_commit_complete(0);
+	resources.on_frame_begin(0);
+
+	EXPECT_TRUE(resources.is_frame_complete(1, 0));
+	EXPECT_FALSE(resources.is_frame_complete(2, 1));
+	EXPECT_FALSE(resources.is_frame_complete(3, 2));
+
+	// A surface invalidated on slot 1 at frame 2 waits for slot 1, not for the
+	// globally newest frame.
+	resources.on_commit_complete(1);
+	EXPECT_TRUE(resources.is_frame_complete(2, 1));
+
+	// A zero tag predates the clock and never blocks a reuse.
+	EXPECT_TRUE(resources.is_frame_complete(0, 2));
+}
+
 TEST(MTLContract, VertexLayoutMustCarryTheBoundContext)
 {
 	// interleaved_range_info::calculate_required_range reads the register file

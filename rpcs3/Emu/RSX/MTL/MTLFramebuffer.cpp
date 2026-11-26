@@ -11,6 +11,9 @@
 // pull `using namespace gcm` can follow (gcm_enums.h:1183).
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Common/TextureUtils.h"
+#include "Emu/RSX/Utils/rsx_utils.h"
+
+#include <tuple>
 
 namespace mtl
 {
@@ -109,9 +112,17 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "framebuffer/store bind");
+		// The pass extent is the attachment extent, and the store creates the
+		// attachments at the scaled size (MTLSurface.cpp:74-80).  VK builds its
+		// framebuffer at the same scaled size (VKGSRender.cpp:2821).
+		const auto [scaled_width, scaled_height] = rsx::apply_resolution_scale<true>(scaling, layout.width, layout.height);
+
 		// The bound set is still current, so the store walk is not repeated.  This is
-		// the per-draw path, so it must not cost a surface lookup.
-		if (m_has_layout && same_framebuffer(m_layout, layout))
+		// the per-draw path, so it must not cost a surface lookup.  The scaled
+		// extent is part of the key: a resolution-scale change keeps the guest
+		// layout but needs a new pass and new attachments.
+		if (m_has_layout && same_framebuffer(m_layout, layout) &&
+			m_width == scaled_width && m_height == scaled_height)
 		{
 			return;
 		}
@@ -131,8 +142,8 @@ namespace mtl
 
 		m_layout = layout;
 		m_has_layout = true;
-		m_width = layout.width;
-		m_height = layout.height;
+		m_width = scaled_width;
+		m_height = scaled_height;
 
 		// The RSX renumbers the enabled targets into draw slots 0..n-1, so the guest
 		// holes are removed: a surface_b draw is draw slot 0 and resolves to guest

@@ -875,6 +875,19 @@ namespace rsx
 							continue;
 						}
 
+						// EXCISE-BEGIN fp-producer-ledger
+						// TODO(excise): level 5; register the lane the fill found
+						// out of band.  `quad_ea` is the guest image address, so
+						// the ledger seeds the quad and the origin report can
+						// search for it.
+						{
+							const u8* image = static_cast<const u8*>(rsx_prog.get_data());
+							const u32 quad_ea = image ? static_cast<u32>(vm::get_addr(image)) + offsets_cache[i] : 0;
+							const u32 guest_word = ((raw & 0x00ff00ffu) << 8) | ((raw & 0xff00ff00u) >> 8);
+							rsx::producer_ledger::note_defect(quad_ea + lane * 4, guest_word, "fill");
+						}
+						// EXCISE-END fp-producer-ledger
+
 						if (const char* path = std::getenv("RSX_FP_LITERAL_FIX_LOG"))
 						{
 							if (std::FILE* out = std::fopen(path, "a"))

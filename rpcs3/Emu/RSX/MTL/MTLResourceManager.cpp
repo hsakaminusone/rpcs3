@@ -489,11 +489,29 @@ namespace mtl
 
 	void resource_manager::on_frame_begin(u32 index)
 	{
-		m_frame_slot = index;
+		m_frame_slot = index % frame_slot_count;
+		m_slot_serial[m_frame_slot] = ++m_frame_serial;
+	}
+
+	bool resource_manager::is_frame_complete(u64 serial, u32 slot) const
+	{
+		if (slot >= frame_slot_count)
+		{
+			return false;
+		}
+
+		// A zero serial means the surface was invalidated before the frame clock
+		// existed (or outside a frame), so there is nothing to wait for.
+		return serial == 0 || m_slot_completed[slot] >= serial;
 	}
 
 	void resource_manager::on_commit_complete(u32 index)
 	{
+		index %= frame_slot_count;
+		// begin_frame calls this before on_frame_begin, so m_slot_serial still
+		// names the frame the slot has just finished.
+		m_slot_completed[index] = m_slot_serial[index];
+
 		if (m_deferred.empty())
 		{
 			return;

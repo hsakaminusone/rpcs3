@@ -51,9 +51,14 @@ namespace mtl
 		std::array<f32, 4> blend_color{};
 
 		// The attachment extent, which sets the viewport rectangle
-		// (LLD-raster §3.1, invariant 1).
+		// (LLD-raster §3.1, invariant 1).  clip_width/height are guest pixels;
+		// raster_width/height are the same extent after resolution scaling, which
+		// is what the attachments and therefore the viewport actually are
+		// (VKGSRender.cpp:1312-1326).
 		u16 clip_width = 0;
 		u16 clip_height = 0;
+		u16 raster_width = 0;
+		u16 raster_height = 0;
 
 		// The depth-stencil latch.  Metal 4 reaches depth state only through
 		// setDepthStencilState, so the latch is the key of a cached object and the
@@ -66,7 +71,8 @@ namespace mtl
 	// composes the latches in MTLRasterState, MTLDepthStencil and MTLBlendState; it
 	// does not re-read the register file.  `emulate_depth_range` is the draw's
 	// RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE, which only the caller holds.
-	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range);
+	encoder_state capture_encoder_state(const rsx::context& ctx, bool emulate_depth_range,
+		const rsx::surface_scaling_config_t* scaling = nullptr);
 
 	// Apply the state to the open encoder.  The scissor is the caller's: it comes
 	// from graph_engine::resolve_scissor, which owns the viewport-rect intersection,

@@ -425,8 +425,9 @@ namespace mtl
 			slot.completion_value = 0;
 		}
 
-		m_resources->on_frame_begin(m_slot);
-
+		// The frame clock must observe the completion before it is advanced to the
+		// new frame: the surface reuse test needs to know which frame the slot has
+		// just finished, not the one it is about to record.
 		if (reported)
 		{
 			// The slot is idle, so the frame that used it is complete: its deferred
@@ -440,6 +441,8 @@ namespace mtl
 			// SY2).
 			m_resources->quarantine(m_slot);
 		}
+
+		m_resources->on_frame_begin(m_slot);
 
 		// The ring is idle, so nothing can reference a deferred object (HLD-02 §4).
 		{

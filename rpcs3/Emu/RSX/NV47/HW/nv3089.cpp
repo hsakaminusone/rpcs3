@@ -294,6 +294,12 @@ namespace rsx
 			// attributed to it.  The GPU route returns earlier and never writes
 			// guest RAM.
 			rsx::fp_stage_watch::note_mem(dst_address + out_offset, dst_write_length, "nv3089-host", 0, "-", nullptr);
+
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; name both ends of the CPU blit.
+			rsx::producer_ledger::record_copy(dst_address + out_offset, dst_write_length, "nv3089-host",
+				src_address + in_offset, std::max(dst_write_length, 1u), false);
+			// EXCISE-END fp-producer-ledger
 			// EXCISE-END fp-stage-store-watch
 
 			if (dst_color_format != rsx::blit_engine::transfer_destination_format::r5g6b5 &&
@@ -651,6 +657,14 @@ namespace rsx
 					});
 				// EXCISE-END fp-literal-write-ring
 
+				// EXCISE-BEGIN fp-producer-ledger
+				// TODO(excise): level 5; the GPU blit is asynchronous, so the
+				// destination bytes are not authoritative yet; the entry only
+				// proves an RSX copy covers this range.
+				rsx::producer_ledger::record_copy(dst.rsx_address, write_length, "nv3089-gpu",
+					src.rsx_address, std::max<u32>(read_length, 1u), true);
+				// EXCISE-END fp-producer-ledger
+
 				// HW-accelerated blit
 				return;
 			}
@@ -753,6 +767,13 @@ namespace rsx
 						static_cast<f64>(dst.scale_x), static_cast<f64>(dst.scale_y), dst.swizzled ? 1u : 0u);
 				});
 			// EXCISE-END fp-literal-write-watch
+
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; the CPU image-transfer path writes the
+			// destination after every copy above, so both ends are known here.
+			rsx::producer_ledger::record_copy(dst.rsx_address, write_length, "nv3089",
+				src.rsx_address, std::max<u32>(read_length, 1u), false);
+			// EXCISE-END fp-producer-ledger
 		}
 	}
 }

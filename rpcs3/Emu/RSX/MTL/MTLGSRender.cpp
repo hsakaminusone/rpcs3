@@ -37,6 +37,7 @@
 #include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Common/io_buffer.h"
 #include "Emu/RSX/Core/RSXDrawCommands.h"
+#include "Emu/RSX/Core/RSXProducerOrigin.h"
 #include "Emu/RSX/Core/RSXRendererFactory.h"
 #include "Emu/RSX/NV47/HW/context_accessors.define.h"
 #include "Emu/RSX/GSFrameBase.h"
@@ -140,6 +141,56 @@ namespace mtl
 			return range;
 		}
 		// EXCISE-END only-draw-probe
+
+		// EXCISE-BEGIN skip-fragment-program
+		// TODO(excise): level 5; MTL_PROBE_SKIP_FP=<id>[,<id>...].  The named
+		// fragment programs are not encoded: every surface after them keeps the
+		// previous pass's output, so the flip still presents a whole image and the
+		// window stays usable while one post pass is subtracted.  The draw is
+		// dropped before the per-draw record, so a manifest of that frame does not
+		// list it.  Default off; the run that sets it is not a shipping frame.
+		bool diagnostic_skip_fragment_program(u32 fp_id)
+		{
+			static const std::vector<u32> ids = [] {
+				std::vector<u32> result;
+				const char* value = std::getenv("MTL_PROBE_SKIP_FP");
+
+				if (!value || !*value)
+				{
+					return result;
+				}
+
+				const char* cursor = value;
+
+				while (*cursor)
+				{
+					char* next = nullptr;
+					const unsigned long id = std::strtoul(cursor, &next, 10);
+
+					if (next == cursor)
+					{
+						break;
+					}
+
+					if (id)
+					{
+						result.push_back(static_cast<u32>(id));
+					}
+
+					cursor = next;
+
+					if (*cursor == ',')
+					{
+						++cursor;
+					}
+				}
+
+				return result;
+			}();
+
+			return std::find(ids.begin(), ids.end(), fp_id) != ids.end();
+		}
+		// EXCISE-END skip-fragment-program
 
 		// TODO(excise): level 5; the monotonic subdraw id the per-draw record and
 		// the draw-parameter block share.  The ABI's draw_id was always zero, so a
@@ -5400,7 +5451,7 @@ namespace mtl
 		MTL::RenderPipelineState* const pipeline = use_interpreter ? interpreted->state : program->state;
 		encoder->setRenderPipelineState(pipeline);
 
-		auto encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE));
+		auto encoder_state = capture_encoder_state(*m_ctx, !!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE), &RSX(m_ctx)->resolution_scaling_config);
 
 		// A framebufferless draw has no depth buffer, so there is nothing to test:
 		// the fragment passes, which is what a backend whose pass has no depth
@@ -5415,8 +5466,21 @@ namespace mtl
 			encoder_state.depth_bounds_max = 1.0f;
 		}
 
-		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.clip_height);
+		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.raster_height);
 		apply_encoder_state(encoder, encoder_state, scissor, frame.depth_cache);
+
+#if MTL_DEBUG_LOGS
+		// EXCISE-BEGIN skip-fragment-program
+		// TODO(excise): level 5; see diagnostic_skip_fragment_program.  Dropped
+		// after the encoder state is applied and before the draw record is built, so
+		// the manifest of the frame describes only the draws that were encoded.
+		if (frame.compiled_fragment && diagnostic_skip_fragment_program(frame.compiled_fragment->id))
+		{
+			MTL_NOTE(5, "Metal 4: skip fragment program %u, draw %u", frame.compiled_fragment->id, diagnostic_current_draw);
+			return true;
+		}
+		// EXCISE-END skip-fragment-program
+#endif // MTL_DEBUG_LOGS
 
 		// Capture what a restart of this pass needs.  The subdraw loop reads guest
 		// memory (the vertex and index copies, the constants, a pipeline-dependency
@@ -5440,7 +5504,7 @@ namespace mtl
 			frame.current_vp_id = frame.compiled_vertex ? frame.compiled_vertex->id : 0;
 			frame.current_fp_id = frame.compiled_fragment ? frame.compiled_fragment->id : 0;
 
-			const MTL::Viewport viewport = build_viewport(encoder_state.clip_width, encoder_state.clip_height,
+			const MTL::Viewport viewport = build_viewport(encoder_state.raster_width, encoder_state.raster_height,
 				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
 				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
 
@@ -5499,7 +5563,7 @@ namespace mtl
 
 		if (diagnostic_viewport_due)
 		{
-			const MTL::Viewport viewport = build_viewport(encoder_state.clip_width, encoder_state.clip_height,
+			const MTL::Viewport viewport = build_viewport(encoder_state.raster_width, encoder_state.raster_height,
 				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
 				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
 
@@ -6889,6 +6953,46 @@ namespace mtl
 			record.depth_format = static_cast<u32>(m_ctx->fb.layout.depth_format);
 			record.width = m_ctx->fb.layout.width;
 			record.height = m_ctx->fb.layout.height;
+
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; an RSX render target whose memory covers a
+			// tracked defect quad is a GPU producer.  Recorded once per distinct
+			// target address per thread, so the cost is a compare per draw.
+			if (rsx::producer_ledger::enabled())
+			{
+				thread_local u32 last_color[4] = {};
+				thread_local u32 last_depth = 0;
+
+				for (u32 index = 0; index < frame.attachments.color_count() && index < 4; ++index)
+				{
+					mtl::surface* color = frame.attachments.color(index);
+
+					if (!color)
+					{
+						continue;
+					}
+
+					const auto range = color->get_memory_range();
+
+					if (range.valid() && range.start != last_color[index])
+					{
+						last_color[index] = range.start;
+						rsx::producer_ledger::record_surface(range.start, range.length(), "render-target");
+					}
+				}
+
+				if (mtl::surface* depth = frame.attachments.depth())
+				{
+					const auto range = depth->get_memory_range();
+
+					if (range.valid() && range.start != last_depth)
+					{
+						last_depth = range.start;
+						rsx::producer_ledger::record_surface(range.start, range.length(), "depth-target");
+					}
+				}
+			}
+			// EXCISE-END fp-producer-ledger
 			record.scissor[0] = scissor_region.x1;
 			record.scissor[1] = scissor_region.y1;
 			record.scissor[2] = scissor_region.width();
@@ -7927,9 +8031,19 @@ namespace mtl
 		const auto overlap_info = resources.cache.get_merged_texture_memory_region(
 			resources.recorder, address, width, height, pitch, format_bpp, rsx::surface_access::transfer_read);
 
-		if (!overlap_info.empty())
+		// The guest can alias a colour range and a depth range.  The overlap list is
+		// ordered by recency, so its last entry may be a depth target that merely
+		// shares the address; presenting it would show depth bits through the
+		// display-format path.  A present reads colour only, so take the newest
+		// section that is not a depth target.  VK takes back() unconditionally
+		// (VKPresent.cpp:329), but its present is known-good on this title, so the
+		// guard stays on the Metal side.
+		const auto section_it = std::find_if(overlap_info.rbegin(), overlap_info.rend(),
+			[](const auto& section) { return section.surface && !section.surface->is_depth_surface(); });
+
+		if (section_it != overlap_info.rend())
 		{
-			const auto& section = overlap_info.back();
+			const auto& section = *section_it;
 			surface* target = section.surface;
 
 			if (section.base_address >= address)
@@ -8476,6 +8590,13 @@ namespace mtl
 		{
 			diagnostic_try_arm_capture("screenshot", true);
 			diagnostic_tape_freeze();
+
+			// EXCISE-BEGIN fp-producer-ledger
+			// TODO(excise): level 5; F12 also harvests the producer ledger for
+			// four seconds and schedules the static-vs-runtime origin report.
+			rsx::producer_ledger::arm(0);
+			rsx::producer_origin::scan_async();
+			// EXCISE-END fp-producer-ledger
 		}
 #else
 		const bool user_asked_for_screenshot = g_user_asked_for_screenshot.exchange(false);
