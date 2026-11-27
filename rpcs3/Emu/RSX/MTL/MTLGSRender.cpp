@@ -8110,6 +8110,35 @@ namespace mtl
 			return;
 		}
 
+		// The CPU read below bypasses the cache, so any section that still holds
+		// the real pixels has to reach guest memory first.  Without this the read
+		// sees the bytes from before the last GPU write, which presents as a
+		// whole-image black or grey frame (C13; VKPresent.cpp:366-388).
+		{
+			const auto read_range = utils::address_range32::start_length(address, pitch * height);
+			constexpr u32 lookup_mask =
+				rsx::texture_upload_context::blit_engine_dst |
+				rsx::texture_upload_context::framebuffer_storage;
+			const auto overlapping = resources.textures.find_texture_from_range<true>(read_range, 0, lookup_mask);
+			bool flushed = false;
+
+			for (auto* section : overlapping)
+			{
+				if (!section->is_synchronized())
+				{
+					section->copy_texture(resources.recorder, true);
+					flushed = true;
+				}
+			}
+
+			if (flushed)
+			{
+				resources.recorder.flush_for_readback();
+			}
+
+			resources.textures.invalidate_range(resources.recorder, read_range, rsx::invalidation_cause::read);
+		}
+
 		const u32 row_bytes = width * pixel_size;
 		const u64 length = static_cast<u64>(row_bytes) * height;
 
