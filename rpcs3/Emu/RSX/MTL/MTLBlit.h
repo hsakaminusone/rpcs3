@@ -41,6 +41,10 @@ namespace mtl
 			MTL::Texture* src, MTL::Texture* dst, const areai& dst_area, bool interpolate,
 			u32 level = 0, u32 slice = 0, u32 depth_plane = 0);
 
+		// The frame's resource manager, so an in-place blit can allocate the
+		// staging image that breaks the read-write hazard (T5).
+		resource_manager* resources() const { return m_resources; }
+
 	private:
 		MTL::RenderPipelineState* pipeline(MTL::PixelFormat color_format);
 		MTL::SamplerState* sampler(bool interpolate);

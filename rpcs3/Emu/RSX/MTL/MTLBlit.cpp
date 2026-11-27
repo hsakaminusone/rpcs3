@@ -12,6 +12,7 @@
 #include "util/logs.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 
 namespace mtl
@@ -519,17 +520,6 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 			return;
 		}
 
-		// A pass cannot sample the image it renders into: Metal treats the texture
-		// as one resource, so a view of it is not a separate attachment.  The shared
-		// code has already committed to this route by the time the blit runs, so the
-		// only safe outcome is to report the case rather than encode an undefined
-		// read-write hazard.
-		if (src->image() == dst->image())
-		{
-			rsx_log.error("Metal 4: blit request declined because the source and destination are the same image");
-			return;
-		}
-
 		// The shared code reports a flip out of band because the guest descriptor
 		// stores a direction, not a rectangle.  Folding it into the rectangle here
 		// makes the extent signed, which is what the shader wants.
@@ -556,6 +546,115 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 		if (!source || !source->value())
 		{
 			rsx_log.error("Metal 4: blit could not create the source channel view");
+			return;
+		}
+
+		// A pass cannot sample the image it renders into: Metal treats the texture
+		// as one resource, so a view of it is not a separate attachment.  In-place
+		// scaling and blur blits are common, so stage the source region in a
+		// private copy and sample that instead (T5; VKTexture.cpp:631).  The copy
+		// keeps the raw guest bits, and the view above the copy applies the same
+		// channel map as the original source.
+		std::unique_ptr<texture> staging;
+
+		if (src->image() == dst->image())
+		{
+			resource_manager* resources = m_pass ? m_pass->resources() : nullptr;
+
+			if (!resources)
+			{
+				rsx_log.error("Metal 4: in-place blit has no resource manager");
+				return;
+			}
+
+			MTL::Texture* src_image = src->value();
+
+			// The pass samples one single-sample 2D image.  The checks in the pass
+			// would reject anything else after the copy had already run, so reject
+			// it here before allocating.
+			if (src_image->sampleCount() != 1 ||
+				src_image->textureType() != MTL::TextureType2D ||
+				src_image->arrayLength() != 1)
+			{
+				rsx_log.error("Metal 4: in-place blit declined a source that is not a single 2D image");
+				return;
+			}
+
+			const s32 sx0 = std::min(src_area.x1, src_area.x2);
+			const s32 sx1 = std::max(src_area.x1, src_area.x2);
+			const s32 sy0 = std::min(src_area.y1, src_area.y2);
+			const s32 sy1 = std::max(src_area.y1, src_area.y2);
+
+			if (sx0 < 0 || sy0 < 0 ||
+				sx1 > static_cast<s32>(src_image->width()) ||
+				sy1 > static_cast<s32>(src_image->height()))
+			{
+				rsx_log.error("Metal 4: in-place blit request does not fit the source image");
+				return;
+			}
+
+			const u32 copy_width = static_cast<u32>(sx1 - sx0);
+			const u32 copy_height = static_cast<u32>(sy1 - sy0);
+
+			if (!copy_width || !copy_height)
+			{
+				rsx_log.error("Metal 4: in-place blit request consists of an empty region descriptor");
+				return;
+			}
+
+			MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::texture2DDescriptor(
+				source->pixel_format(), copy_width, copy_height, false);
+			descriptor->setUsage(MTL::TextureUsageShaderRead);
+
+			MTL::Texture* image = resources->new_texture(descriptor, MTL::StorageModePrivate);
+			descriptor->release();
+
+			if (!image)
+			{
+				rsx_log.error("Metal 4: in-place blit could not allocate a staging texture");
+				return;
+			}
+
+			resources->make_persistent(image);
+
+			staging = std::make_unique<texture>(resources);
+			staging->assign(image);
+			staging->set_native_component_layout(src->image()->get_native_component_layout());
+
+			MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
+
+			if (!encoder)
+			{
+				rsx_log.error("Metal 4: in-place blit could not open a copy encoder");
+				return;
+			}
+
+			// Copy the normalised region, so the rebased rectangle below can keep
+			// the direction of the transfer in its signed extent.
+			encoder->copyFromTexture(src_image, 0, 0,
+				MTL::Origin::Make(sx0, sy0, 0),
+				MTL::Size::Make(copy_width, copy_height, 1),
+				image, 0, 0, MTL::Origin::Make(0, 0, 0));
+
+			texture* staged = staging->get_view(rsx::default_remap_vector);
+
+			if (!staged || !staged->value())
+			{
+				rsx_log.error("Metal 4: in-place blit could not create the staging view");
+				return;
+			}
+
+			const s32 width = static_cast<s32>(copy_width);
+			const s32 height = static_cast<s32>(copy_height);
+			const areai staged_area =
+			{
+				src_area.x1 <= src_area.x2 ? 0 : width,
+				src_area.y1 <= src_area.y2 ? 0 : height,
+				src_area.x1 <= src_area.x2 ? width : 0,
+				src_area.y1 <= src_area.y2 ? height : 0
+			};
+
+			scale_image(cmd, staged->value(), dst->value(), staged_area, dst_area, interpolate);
 			return;
 		}
 
