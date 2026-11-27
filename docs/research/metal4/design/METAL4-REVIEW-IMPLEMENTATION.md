@@ -127,10 +127,19 @@ Each item is small, local, and independently revertable.
     the Vulkan sequence (`VKPresent.cpp:366-388`). The format-cast half of C13
     stays deferred with the T6 typeless copy path.
 
+### Change set 3 (commit `cc7157d43`)
+
+12. **T5** — an in-place scaled/filtered blit copies the normalised source
+    region into a private single-sample 2D staging image, rebases the source
+    rectangle (keeping a flip signed), then runs the existing scaled pass from
+    the staging view. MSAA, 3D/array and out-of-bounds sources are rejected
+    before allocation.
+
 ## 5. Deferred (needs its own change and capture)
 
-- **T5** in-place blit through a temporary (seam candidate; needs a texture
-  allocation path and a two-pass blit).
+The full remaining list, including the large redesigns, is tracked in
+`METAL4-FULL-REMEDIATION-PLAN.md`.
+
 - **T2** surface upload/readback endian swap (kernel + format cast).
 - **T3** MSAA sample mosaic resolve/unresolve.
 - **L5** overlay reallocation instead of `replaceRegion`.
@@ -149,6 +158,7 @@ Each item is small, local, and independently revertable.
 |---|---|---|---|
 | 2026-11-27 | file created; S1/D1/T1/T4/C19/C8/C27/C30/C11/C1 implemented (`49553cd6e`) | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
 | 2026-11-27 | C13 pre-flush in the guest-memory present fallback (`b3075bc6a`) | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
+| 2026-11-27 | T5 in-place blit staging (`cc7157d43`); full remediation plan created | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
 
 ### Notes from this pass
 
