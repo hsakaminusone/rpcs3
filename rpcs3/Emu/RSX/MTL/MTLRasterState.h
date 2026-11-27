@@ -118,9 +118,8 @@ namespace mtl
 	// The MTLScissorRect from the resolved region (LLD-raster §3.1).  The region
 	// comes from the core's graph_engine::resolve_scissor, which owns the
 	// viewport-rect intersection, the window clamp and the invalid case.  It is in
-	// guest window coordinates, so the viewport flip moves it to the mirrored target
-	// row.
-	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u16 clip_height);
+	// guest window coordinates, which the flipped viewport maps straight across.
+	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u32 rt_width, u32 rt_height);
 }
 
 #endif // RSX_ENABLE_METAL4

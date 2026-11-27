@@ -255,10 +255,11 @@ namespace mtl
 		MTL4::LibraryDescriptor* descriptor = MTL4::LibraryDescriptor::alloc()->init();
 		descriptor->setSource(NS::String::string(msl.c_str(), NS::UTF8StringEncoding));
 
-		// The GUI setting asks for precise math; the default stays the fast mode that
-		// the backend has always used.
+		// Relaxed is the default: it keeps the fast reciprocal and rsqrt paths but
+		// does not let the compiler assume finiteness, which Fast may do (C1).  The
+		// GUI setting still selects Safe (no substitution at all).
 		MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
-		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeFast);
+		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
 		descriptor->setOptions(options);
 
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
@@ -318,7 +319,7 @@ namespace mtl
 		owner->descriptor->setSource(NS::String::string(msl.c_str(), NS::UTF8StringEncoding));
 
 		owner->options = MTL::CompileOptions::alloc()->init();
-		owner->options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeFast);
+		owner->options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
 		owner->descriptor->setOptions(owner->options);
 		owner->handler = std::move(handler);
 

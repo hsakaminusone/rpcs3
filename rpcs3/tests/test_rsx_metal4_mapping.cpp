@@ -642,9 +642,6 @@ TEST(MTLMapTextureFormat, PackedFormatsUseTheGuestBitOrderWithAPermutedRead)
 		MTL::TextureSwizzleOne, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
 	constexpr std::array<MTL::TextureSwizzle, 4> alpha_bgr = {
 		MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
-	// Guest R4G4B4A4 against host ABGR4 moves every field one place.
-	constexpr std::array<MTL::TextureSwizzle, 4> rotate = {
-		MTL::TextureSwizzleRed, MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen };
 #if defined(__APPLE__)
 	// Apple arm64 expands the R6G5B5 upload to BGRA8, like the Intel build below.
 	constexpr std::array<MTL::TextureSwizzle, 4> argb = {
@@ -663,7 +660,7 @@ TEST(MTLMapTextureFormat, PackedFormatsUseTheGuestBitOrderWithAPermutedRead)
 		{ CELL_GCM_TEXTURE_R5G5B5A1, MTL::PixelFormat::PixelFormatBGR5A1Unorm, alpha_bgr }, // VKFormats.cpp:203
 		{ CELL_GCM_TEXTURE_A1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, alpha_bgr }, // VKFormats.cpp:205
 		{ CELL_GCM_TEXTURE_D1R5G5B5, MTL::PixelFormat::PixelFormatA1BGR5Unorm, one_bgr },   // VKFormats.cpp:204
-		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm,  rotate },    // VKFormats.cpp:206
+		{ CELL_GCM_TEXTURE_A4R4G4B4, MTL::PixelFormat::PixelFormatABGR4Unorm,  alpha_bgr }, // VKFormats.cpp:206
 	};
 #else
 	// The Intel uploader expands every packed format to BGRA8 (TextureUtils.cpp),

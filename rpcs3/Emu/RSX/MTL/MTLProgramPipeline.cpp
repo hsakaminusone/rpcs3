@@ -847,10 +847,14 @@ namespace mtl
 						work->vertex->library_compilation_state() != library_state::compiling &&
 						work->fragment->library_compilation_state() != library_state::compiling;
 
-					if (work->error[0] == '\0' && work->attempts < 2 &&
-						libraries_done && now >= work->retry_at)
+					// A transient link failure carries an error string, so the old
+					// `error[0] == '\0'` test made this branch dead and latched the
+					// pipeline forever (C27).  Retry twice with a backoff, then
+					// latch; a deterministic MSL error costs two extra attempts.
+					if (work->attempts < 2 && libraries_done && now >= work->retry_at)
 					{
 						work->attempts++;
+						work->error[0] = '\0';
 						work->retry_at = now + std::chrono::milliseconds(500);
 						submit_link(work);
 					}
@@ -1015,7 +1019,7 @@ namespace mtl
 		return false;
 	}
 
-	void program_cache::preload_wait(rsx::shader_loading_dialog* dlg)
+	void program_cache::preload_wait(rsx::shader_loading_dialog_native* dlg)
 	{
 		if (!m_preload_jobs)
 		{

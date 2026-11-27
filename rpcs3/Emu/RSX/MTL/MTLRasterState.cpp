@@ -6,6 +6,7 @@
 #include "Emu/RSX/Core/RSXFrameBuffer.h"
 #include "Emu/RSX/rsx_methods.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace mtl
@@ -134,14 +135,19 @@ namespace mtl
 		return MTL::Viewport{ 0.0, height, static_cast<f64>(clip_width), -height, znear, zfar };
 	}
 
-	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u16 clip_height)
+	MTL::ScissorRect build_scissor_rect(u32 x1, u32 y1, u32 x2, u32 y2, u32 rt_width, u32 rt_height)
 	{
-		// The geometry lands mirrored about the surface, so a region given in guest
-		// window coordinates lands at the mirrored target row.  It keeps its width
-		// and its height.
-		const u32 y = static_cast<u32>(clip_height) - y2;
+		// The viewport keeps the framebuffer's row order (origin at the bottom
+		// edge, negative height), so a guest window rectangle maps straight
+		// across.  Vulkan, OpenGL and KosmicKrisp do not mirror the scissor, and
+		// subtracting from the height also wraps when the region is out of
+		// range (C8).  Clamp to the pass instead.
+		x1 = std::min(x1, rt_width);
+		x2 = std::clamp(x2, x1, rt_width);
+		y1 = std::min(y1, rt_height);
+		y2 = std::clamp(y2, y1, rt_height);
 
-		return MTL::ScissorRect{ x1, y, x2 - x1, y2 - y1 };
+		return MTL::ScissorRect{ x1, y1, x2 - x1, y2 - y1 };
 	}
 }
 

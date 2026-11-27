@@ -720,10 +720,13 @@ namespace mtl
 			// alpha, so alpha is forced opaque.
 			return { MTL::TextureSwizzleOne, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
 		case CELL_GCM_TEXTURE_A4R4G4B4:
-			// The guest stores R4G4B4A4 (VKFormats.cpp:205, the same order as GL
-			// RGBA4).  Against ABGR4 every field moves one place, so the whole
-			// channel vector rotates.
-			return { MTL::TextureSwizzleRed, MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen };
+			// The guest stores A4R4G4B4: A[15:12], R[11:8], G[7:4], B[3:0].
+			// Metal's ABGR4 names its fields from the top, so host R holds guest
+			// B and host B holds guest R.  That is the same permutation as the
+			// precision-5 formats above, not a one-place rotation.  Vulkan's
+			// R4G4B4A4_UNORM_PACK16 name lists fields from the bottom, which is
+			// why it looks reversed there (T1).
+			return { MTL::TextureSwizzleAlpha, MTL::TextureSwizzleBlue, MTL::TextureSwizzleGreen, MTL::TextureSwizzleRed };
 #else
 		// The Intel uploader expands every packed format to BGRA8, so the guest
 		// channels already sit in the A-R-G-B order.

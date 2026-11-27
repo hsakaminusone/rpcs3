@@ -170,6 +170,7 @@ namespace mtl
 			u32 size = 0;
 			u32 row_pitch = 0;
 			u32 rows = 0;
+			u32 image_rows = 0;
 		};
 
 		std::vector<upload_span> spans(layouts.size());
@@ -192,14 +193,17 @@ namespace mtl
 				// is four by four, so its compressed row is much shorter than the
 				// expanded row the uploader writes.
 				span.row_pitch = utils::align<u32>(layout.width_in_texel * 4, 4);
-				span.rows = layout.height_in_texel * layout.depth;
+				span.image_rows = layout.height_in_texel;
 			}
 			else
 			{
 				span.row_pitch = utils::align<u32>(layout.width_in_block * rsx::get_format_block_size_in_bytes(gcm_format), 4);
-				span.rows = layout.height_in_block * layout.depth;
+				span.image_rows = layout.height_in_block;
 			}
 
+			// `rows` spans the whole volume for the allocation; a 3D copy advances
+			// its source by one image (one slice), not by the volume (T4).
+			span.rows = span.image_rows * layout.depth;
 			span.size = span.row_pitch * span.rows;
 
 			if (!span.size)
@@ -466,7 +470,7 @@ namespace mtl
 					layout.width_in_texel, plane_rows, span.row_pitch,
 					rsx::get_format_block_size_in_bytes(gcm_format), depth_format);
 
-				encoder->copyFromBuffer(plane, 0, plane_pitch, plane_pitch * plane_rows,
+				encoder->copyFromBuffer(plane, 0, plane_pitch, plane_pitch * layout.height_in_texel,
 					MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
 					dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z),
 					get_depth_plane_option(dst->value()->pixelFormat(), false));
@@ -490,7 +494,7 @@ namespace mtl
 							layout.width_in_texel, plane_rows, span.row_pitch,
 							rsx::get_format_block_size_in_bytes(gcm_format), stencil_pitch);
 
-						encoder->copyFromBuffer(stencil, 0, stencil_pitch, stencil_pitch * plane_rows,
+						encoder->copyFromBuffer(stencil, 0, stencil_pitch, stencil_pitch * layout.height_in_texel,
 							MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
 							dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z),
 							get_depth_plane_option(dst->value()->pixelFormat(), true));
@@ -506,7 +510,7 @@ namespace mtl
 			}
 			else
 			{
-				encoder->copyFromBuffer(staging, span.offset, span.row_pitch, span.row_pitch * span.rows,
+				encoder->copyFromBuffer(staging, span.offset, span.row_pitch, span.row_pitch * span.image_rows,
 					MTL::Size::Make(layout.width_in_texel, layout.height_in_texel, layout.depth),
 					dst->value(), slice, layout.level, MTL::Origin::Make(0, 0, z));
 			}

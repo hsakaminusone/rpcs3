@@ -2413,7 +2413,7 @@ namespace mtl
 		std::tie(x, y, width, height) = rsx::clip_region<u16>(attachments.width(), attachments.height(), x, y, width, height, true);
 
 		const MTL::ScissorRect scissor = build_scissor_rect(x, y, static_cast<u32>(x) + width,
-			static_cast<u32>(y) + height, static_cast<u16>(attachments.height()));
+			static_cast<u32>(y) + height, attachments.width(), attachments.height());
 		encoder->setScissorRect(scissor);
 
 		const std::array<f32, 4> color = {
@@ -5466,7 +5466,7 @@ namespace mtl
 			encoder_state.depth_bounds_max = 1.0f;
 		}
 
-		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.raster_height);
+		MTL::ScissorRect scissor = build_scissor_rect(scissor_region.x1, scissor_region.y1, scissor_region.x1 + scissor_region.width(), scissor_region.y1 + scissor_region.height(), encoder_state.raster_width, encoder_state.raster_height);
 		apply_encoder_state(encoder, encoder_state, scissor, frame.depth_cache);
 
 #if MTL_DEBUG_LOGS
@@ -5505,8 +5505,7 @@ namespace mtl
 			frame.current_fp_id = frame.compiled_fragment ? frame.compiled_fragment->id : 0;
 
 			const MTL::Viewport viewport = build_viewport(encoder_state.raster_width, encoder_state.raster_height,
-				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
-				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
+				0.0, 1.0);
 
 			frame.current_viewport[0] = static_cast<f32>(viewport.originX);
 			frame.current_viewport[1] = static_cast<f32>(viewport.originY);
@@ -5564,8 +5563,7 @@ namespace mtl
 		if (diagnostic_viewport_due)
 		{
 			const MTL::Viewport viewport = build_viewport(encoder_state.raster_width, encoder_state.raster_height,
-				encoder_state.has_clip_range ? encoder_state.znear : 0.0,
-				encoder_state.has_clip_range ? encoder_state.zfar : 1.0);
+				0.0, 1.0);
 
 			MTL_NOTE(3, "Metal 4: viewport %u, origin %.1f %.1f size %.1f %.1f z %.4f %.4f, scissor %u %u %ux%u, clip %ux%u, cull %u winding %u fill %u depthclip %u",
 				diagnostic_viewports, viewport.originX, viewport.originY, viewport.width, viewport.height, viewport.znear, viewport.zfar,

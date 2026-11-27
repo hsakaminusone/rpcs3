@@ -394,7 +394,7 @@ namespace mtl
 
 		// The loader calls this after every cache entry has been submitted.  It is
 		// the only drain owner during preload, so the L2 set stays single-writer.
-		void preload_wait(rsx::shader_loading_dialog* dlg);
+		void preload_wait(rsx::shader_loading_dialog_native* dlg);
 
 		template <typename... Args>
 		void add_pipeline_entry(RSXVertexProgram& vp, RSXFragmentProgram& fp, mtl::pipeline_properties& props, Args&& ...args)

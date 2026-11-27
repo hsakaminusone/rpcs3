@@ -174,6 +174,11 @@ namespace mtl
 			return false;
 		}
 
+		// Let the compiler keep more than one pipeline in flight.  The default is
+		// NO, which serialises library and link work behind the RSX thread's
+		// submission rate (C30).
+		m_device->setShouldMaximizeConcurrentCompilation(true);
+
 		// A device removal cannot be recovered by this backend.  The observer only
 		// stops new shader submissions; the existing RSX fatal path stops the frame
 		// loop.  The handler must not touch any cache or release a compiler object.

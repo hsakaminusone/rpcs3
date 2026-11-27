@@ -745,6 +745,11 @@ namespace mtl
 				MTL::Size::Make(surface_width, rows, 1),
 				scratch, 0, rsx_pitch, rsx_pitch * rows);
 
+			// This texture copy and the buffer copy below share one encoder.
+			// Without an encoder-scope edge the buffer copy may observe rows the
+			// texture copy has not written yet (S1).
+			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+
 			// A buffer-to-buffer blit needs four-byte aligned offsets and length.
 			// When the guest range is aligned the copy stays in the command stream
 			// exactly where it used to be, with no extra drain; otherwise the CPU

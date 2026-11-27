@@ -621,7 +621,8 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 #if !defined(__APPLE__) || !defined(ARCH_X64)
 		// Metal names a packed format from its most significant field, so the read
 		// restores the guest field order (REVIEW-RSX-NATIVE.md R1).  The guest
-		// A4R4G4B4 is stored R4G4B4A4, so every field moves one place.
+		// A4R4G4B4 puts A in the top field, like the precision-5 formats, so it
+		// takes the same red/blue swap (T1).
 		{ CELL_GCM_TEXTURE_A1R5G5B5, { a, b, g, r } },
 		{ CELL_GCM_TEXTURE_R5G5B5A1, { a, b, g, r } },
 #if defined(__APPLE__)
@@ -632,7 +633,7 @@ TEST(MTLFormatsLayout, ComponentLayoutMatchesTheBackendTable)
 		{ CELL_GCM_TEXTURE_R6G5B5, { o, b, g, r } },
 #endif
 		{ CELL_GCM_TEXTURE_R5G6B5, { o, b, g, r } },
-		{ CELL_GCM_TEXTURE_A4R4G4B4, { r, a, b, g } },
+		{ CELL_GCM_TEXTURE_A4R4G4B4, { a, b, g, r } },
 		{ CELL_GCM_TEXTURE_D1R5G5B5, { o, b, g, r } },
 #else
 		// The Intel uploader expands every packed format to BGRA8, so the guest
@@ -744,7 +745,7 @@ TEST(MTLConstantsLayout, StructSizesMatchTheShaderAbi)
 	EXPECT_EQ(sizeof(mtl::draw_parameters), 168u);
 	EXPECT_EQ(sizeof(mtl::fragment_context), 32u);
 	EXPECT_EQ(sizeof(mtl::sampler_info), 48u);
-	EXPECT_EQ(sizeof(mtl::blend_values), 36u);
+	EXPECT_EQ(sizeof(mtl::blend_values), 48u);
 	EXPECT_EQ(sizeof(mtl::fill_values), 32u);
 	EXPECT_EQ(sizeof(mtl::vec4_block), 16u);
 }
@@ -779,6 +780,7 @@ TEST(MTLConstantsLayout, FieldOffsetsMatchTheShaderAbi)
 	// The logic op travels in the same block, behind the blend constants
 	// (REVIEW-FINDINGS.md C1), so a change of op does not recompile the shader.
 	EXPECT_EQ(offsetof(mtl::blend_values, logic_op), 32u);
+	EXPECT_EQ(offsetof(mtl::blend_values, reserved_tail), 36u);
 
 	// The built-in fill reads the colour at 0..15 and the depth at 16.
 	EXPECT_EQ(offsetof(mtl::fill_values, color), 0u);
@@ -1002,9 +1004,9 @@ TEST(MTLDepthBounds, CaptureAppliesTheClampAndTheEncoding)
 //      (MTLRasterState.cpp:97-105; rsx_utils.h:278-361; LLD-raster §3.1)
 // =============================================================================
 
-TEST(MTLScissorGeometry, ScissorRectFollowsTheClipSpaceFlip)
+TEST(MTLScissorGeometry, ScissorRectDoesNotMirrorTheGuestRegion)
 {
-	constexpr u16 clip_height = 64;
+	constexpr u32 rt_extent = 64;
 
 	for (u32 x1 = 0; x1 < 16; ++x1)
 	{
@@ -1015,18 +1017,35 @@ TEST(MTLScissorGeometry, ScissorRectFollowsTheClipSpaceFlip)
 				for (u32 height = 0; height < 8; ++height)
 				{
 					SCOPED_TRACE(std::to_string(x1) + "," + std::to_string(y1) + " " + std::to_string(width) + "x" + std::to_string(height));
-					const MTL::ScissorRect rect = mtl::build_scissor_rect(x1, y1, x1 + width, y1 + height, clip_height);
+					const MTL::ScissorRect rect = mtl::build_scissor_rect(x1, y1, x1 + width, y1 + height, rt_extent, rt_extent);
 
-					// The flip moves a guest region to the mirrored target row and
-					// keeps its width and height (LLD-raster §3.1).
+					// The viewport keeps the framebuffer row order, so the guest
+					// window rectangle maps straight across (C8).
 					EXPECT_EQ(rect.x, x1);
-					EXPECT_EQ(rect.y, clip_height - (y1 + height));
+					EXPECT_EQ(rect.y, y1);
 					EXPECT_EQ(rect.width, width);
 					EXPECT_EQ(rect.height, height);
 				}
 			}
 		}
 	}
+}
+
+TEST(MTLScissorGeometry, ScissorRectClampsToThePassExtent)
+{
+	constexpr u32 rt_extent = 64;
+
+	const MTL::ScissorRect oversize = mtl::build_scissor_rect(0, 0, 128, 128, rt_extent, rt_extent);
+	EXPECT_EQ(oversize.x, 0u);
+	EXPECT_EQ(oversize.y, 0u);
+	EXPECT_EQ(oversize.width, rt_extent);
+	EXPECT_EQ(oversize.height, rt_extent);
+
+	const MTL::ScissorRect past_origin = mtl::build_scissor_rect(80, 80, 96, 96, rt_extent, rt_extent);
+	EXPECT_EQ(past_origin.x, rt_extent);
+	EXPECT_EQ(past_origin.y, rt_extent);
+	EXPECT_EQ(past_origin.width, 0u);
+	EXPECT_EQ(past_origin.height, 0u);
 }
 
 TEST(MTLScissorGeometry, ViewportIsTheSurfaceClipWithOneYFlip)

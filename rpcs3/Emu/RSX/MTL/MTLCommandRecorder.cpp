@@ -757,6 +757,16 @@ namespace mtl
 		// of N units costs one encoder rather than N (HLD-04 §3.1).
 		if (m_compute_encoder)
 		{
+			// Metal 4 rule: commands inside one compute encoder may run
+			// concurrently.  barrierAfterQueueStages only waits for earlier
+			// encoders, and barrierAfterStages only blocks later ones, so neither
+			// orders two copies that share this encoder.  A clear followed by an
+			// upload would otherwise race and publish a partially written image
+			// that changes from frame to frame (S1).
+			m_compute_encoder->barrierAfterEncoderStages(
+				MTL::StageBlit | MTL::StageDispatch,
+				MTL::StageBlit | MTL::StageDispatch,
+				MTL4::VisibilityOptionDevice);
 			return m_compute_encoder;
 		}
 

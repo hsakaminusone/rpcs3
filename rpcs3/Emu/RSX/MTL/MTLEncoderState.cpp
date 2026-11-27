@@ -42,8 +42,8 @@ namespace mtl
 		state.depth_bounds_min = bounds.min;
 		state.depth_bounds_max = bounds.max;
 
-		// The helper writes znear/zfar only when the range is inside [0,1], so the
-		// defaults (0.0, 1.0) survive the false case.
+		// The guest clip range is recorded for the state dump only.  The shader
+		// already emits window z, so the viewport stays [0, 1] (C19).
 		state.has_clip_range = capture_clip_range(raster, state.znear, state.zfar);
 
 		// The decoded constant is only valid while blending is enabled; the value is
@@ -101,8 +101,12 @@ namespace mtl
 		// extent; the RSX viewport transform lives in the vertex env
 		// (LLD-raster §3.1, invariant 1), and the rectangle carries the one
 		// clip-space Y flip (invariant 2).
-		const f64 znear = state.has_clip_range ? state.znear : 0.0;
-		const f64 zfar = state.has_clip_range ? state.zfar : 1.0;
+		// The vertex shader already applied the RSX z transform
+		// (_EMULATE_ZCLIP_XFORM_*), so gl_Position carries window z.  Applying the
+		// guest clip range again on the viewport would transform it twice; Metal
+		// has no unrestricted depth range, so the viewport is always [0, 1] (C19).
+		constexpr f64 znear = 0.0;
+		constexpr f64 zfar = 1.0;
 		encoder->setViewport(build_viewport(state.raster_width, state.raster_height, znear, zfar));
 
 		encoder->setScissorRect(scissor);

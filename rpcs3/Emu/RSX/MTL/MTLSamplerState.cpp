@@ -270,6 +270,10 @@ namespace mtl
 	{
 		MTL::SamplerDescriptor* descriptor = MTL::SamplerDescriptor::alloc()->init();
 
+		// The draw path binds samplers by gpuResourceID inside an argument
+		// buffer, so the descriptor has to allow it (C11).
+		descriptor->setSupportArgumentBuffers(true);
+
 		descriptor->setSAddressMode(get_address_mode(state.wrap_s));
 		descriptor->setTAddressMode(get_address_mode(state.wrap_t));
 		descriptor->setRAddressMode(get_address_mode(state.wrap_r));
