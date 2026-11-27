@@ -69,6 +69,11 @@ Demon's Souls path.
 | L1–L3 | Timeout/teardown/feedback | ~ | The recorder already abandons a stalled slot instead of resetting it (`MTLCommandRecorder.cpp:416-429`), so the review's L1 description is weaker here. Not on the pixel path. |
 | R1 | Guest window is a snapshot at import | ✔ | `MTLDevice.cpp` no-copy import. Broad; needs its own measurement. |
 
+The `Here` column is the state at the review re-read. Change set 1
+(`49553cd6e`) implements S1, C1 layer 2, D1, T1, T4, C8, C19, C27, C30 and
+C11; the C13 pre-flush follows in `b3075bc6a`. The remaining `✔` rows are
+still open.
+
 ---
 
 ## 3. Demon's Souls mapping
@@ -87,7 +92,7 @@ listed but not mixed into the first change set.
 
 ---
 
-## 4. Change set 1 (this pass)
+## 4. Change set 1 (commit `49553cd6e`)
 
 Each item is small, local, and independently revertable.
 
@@ -113,6 +118,15 @@ Each item is small, local, and independently revertable.
 10. **C1 layer 2** — the default MSL math mode becomes `Relaxed`; the
     `disable_msl_fast_math` option still selects `Safe`.
 
+### Change set 2 (commit `b3075bc6a`)
+
+11. **C13** (pre-flush only) — before the guest-memory present fallback reads
+    `vm::get_super_ptr`, find the `blit_engine_dst` / `framebuffer_storage`
+    sections overlapping the display range, `copy_texture` each unsynchronised
+    section, `flush_for_readback()`, then `invalidate_range(..., read)`. This is
+    the Vulkan sequence (`VKPresent.cpp:366-388`). The format-cast half of C13
+    stays deferred with the T6 typeless copy path.
+
 ## 5. Deferred (needs its own change and capture)
 
 - **T5** in-place blit through a temporary (seam candidate; needs a texture
@@ -120,7 +134,8 @@ Each item is small, local, and independently revertable.
 - **T2** surface upload/readback endian swap (kernel + format cast).
 - **T3** MSAA sample mosaic resolve/unresolve.
 - **L5** overlay reallocation instead of `replaceRegion`.
-- **C13** pre-flush and format cast in the guest-memory present fallback.
+- **C13 format cast** when the display format differs from the source surface;
+  the pre-flush half is done.
 - **C2** scaled clip extent everywhere (only matters at scale ≠ 100 %).
 - **C17/A1** submission and compile-pipeline rework.
 - **R1** per-block guest window imports.
@@ -132,7 +147,8 @@ Each item is small, local, and independently revertable.
 
 | Date | Change | Build | Tests |
 |---|---|---|---|
-| 2026-11-27 | file created; S1/D1/T1/T4/C19/C8/C27/C30/C11/C1 implemented | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
+| 2026-11-27 | file created; S1/D1/T1/T4/C19/C8/C27/C30/C11/C1 implemented (`49553cd6e`) | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
+| 2026-11-27 | C13 pre-flush in the guest-memory present fallback (`b3075bc6a`) | `build-tests`, arm64 Release: clean | `rpcs3_test`: 690/690, 2 disabled; `.metal4-release-scrub.py check`: clean |
 
 ### Notes from this pass
 
@@ -151,6 +167,12 @@ Each item is small, local, and independently revertable.
 - **Tests updated, not deleted.** The scissor test asserted the mirror and was
   inverted; a clamping case was added. The A4R4G4B4 table row and the
   `blend_values` size/offset assertions moved with the code.
+- **C13 cost.** The flush only runs on the fallback path (no surface or cached
+  texture covers the display range), so it does not add a readback to the
+  common present. When it does run, it waits for the copies with
+  `flush_for_readback()` before the CPU read, exactly as the VK path waits on
+  its command buffer. `invalidate_range(read)` runs even when nothing was
+  flushed, so a stale section cannot survive into the next frame.
 - **Next measurement.** Run the Demon's Souls capture with the same probe
   configuration (`MTL_PROBE_FRAME_COUNT` raised for a ~5 s window) and compare
   `classify-present.py` against the `ds24e` baseline (`stable 125 / absent 78 /
