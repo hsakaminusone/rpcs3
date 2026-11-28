@@ -53,7 +53,13 @@ namespace mtl
 
 	// Bump on any change to the MSL/GLSL the backend emits, so a stale archive is
 	// never loaded for a build that generates different code (C14).
-	constexpr u32 MTL_GENERATOR_VERSION = 1;
+	constexpr u32 MTL_GENERATOR_VERSION = 2;
+
+	// The part of a cache key that changes the generated code: the generator
+	// version, the math mode, and whether vertex position invariance is on.  A
+	// development build also folds in its commit, so an emitter change between
+	// commits never reuses the previous build's binaries (C14).
+	std::string code_generation_key();
 
 	// One MTL::Device + one MTL4::CommandQueue + one MTL4::Compiler
 	// (HLD-01 §3.4; one compiler per device, KosmicKrisp workaround W11).
@@ -70,7 +76,10 @@ namespace mtl
 		MTL4::CompilerTaskOptions* pipeline_task_options() const { return m_task_options; }
 		const features& f() const { return m_features; }
 		const guest_window& window() const { return m_window; }
-		std::atomic<bool>& lost_flag() { return m_lost; }
+		std::atomic<bool>& lost_flag()
+		{
+			return m_lost;
+		}
 		const std::atomic<bool>& lost_flag() const { return m_lost; }
 
 		// Write the captured pipelines to the archive of this device and OS

@@ -91,6 +91,7 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 	{
 		m_device = dev.dev();
 		m_compiler = dev.compiler();
+		m_options = dev.pipeline_task_options();
 		m_resources = &resources;
 
 		if (!m_device || !m_compiler)
@@ -142,6 +143,15 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 		{
 			rsx_log.error("Metal: blit sampler creation failed");
 		}
+
+		// The first copy of a frame must not compile its pipeline on the draw
+		// path.  The common display formats are built here, with the device's
+		// archive lookup, so a warm archive serves them and a cold one pays the
+		// cost before the first frame (O1).
+		pipeline(MTL::PixelFormatBGRA8Unorm);
+		pipeline(MTL::PixelFormatRGBA8Unorm);
+		pipeline(MTL::PixelFormatBGRA8Unorm_sRGB);
+		pipeline(MTL::PixelFormatRGBA8Unorm_sRGB);
 	}
 
 	void blit_pass::shutdown()
@@ -179,6 +189,7 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 
 		m_resources = nullptr;
 		m_compiler = nullptr;
+		m_options = nullptr;
 		m_device = nullptr;
 	}
 
@@ -216,7 +227,7 @@ fragment float4 blit_fragment(blit_vertex_output in [[stage_in]],
 		attachment->setWriteMask(MTL::ColorWriteMaskAll);
 
 		NS::Error* error = nullptr;
-		MTL::RenderPipelineState* state = m_compiler->newRenderPipelineState(descriptor, nullptr, &error);
+		MTL::RenderPipelineState* state = m_compiler->newRenderPipelineState(descriptor, m_options, &error);
 
 		vertex_function->release();
 		fragment_function->release();

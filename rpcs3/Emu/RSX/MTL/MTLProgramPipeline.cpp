@@ -530,7 +530,6 @@ namespace mtl
 			}
 
 			{
-				std::lock_guard compile_lock(m_compile_mutex);
 				compile();
 			}
 			m_condition.notify_all();
@@ -677,24 +676,14 @@ namespace mtl
 		return true;
 	}
 
-	bool pipeline_jobs::run_link_sync(std::function<void()>&& compile)
+	bool pipeline_jobs::enqueue_compile(std::function<void()>&& compile)
 	{
 		if (!compile)
 		{
 			return false;
 		}
 
-		{
-			std::lock_guard lock(m_link_mutex);
-			if (m_link_stop)
-			{
-				return false;
-			}
-		}
-
-		std::lock_guard compile_lock(m_compile_mutex);
-		compile();
-		return true;
+		return enqueue_link(std::move(compile));
 	}
 
 	bool pipeline_jobs::submit_link(const std::shared_ptr<job>& work)
@@ -985,7 +974,8 @@ namespace mtl
 	}
 
 	bool pipeline_jobs::shutdown()
-	{		{
+	{
+		{
 			std::lock_guard lock(m_mutex);
 			m_accepting = false;
 			m_shutting_down = true;
@@ -1257,23 +1247,10 @@ namespace mtl
 
 		if (!compile_async || !extra.jobs)
 		{
-			// A synchronous build must not race the link worker's compiler call:
-			// the serializer is not re-entrant (L18).  The worker path already
-			// owns the compile mutex, so route the fallback through the same gate.
-			if (extra.jobs)
-			{
-				pipeline_type* result = nullptr;
-				if (!extra.jobs->run_link_sync([&]
-					{
-						result = build_pipeline_sync(vertex, fragment, properties, std::move(callback), extra);
-					}))
-				{
-					return nullptr;
-				}
-
-				return result;
-			}
-
+			// The device maximizes concurrent compilation, so a synchronous build
+			// may run beside the link worker's compiler call (C26/C30).  The link
+			// worker's queue serializes only its own calls; the interpreter's
+			// links go through that queue as well.
 			return build_pipeline_sync(vertex, fragment, properties, std::move(callback), extra);
 		}
 

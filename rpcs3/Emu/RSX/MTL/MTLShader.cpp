@@ -262,7 +262,7 @@ namespace mtl
 		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
 		// Keep the shared-edge vertex position identical to the value another draw
 		// computes for the same guest input (C5).
-		options->setPreserveInvariance(true);
+		options->setPreserveInvariance(g_cfg.video.metal_invariance.get());
 		descriptor->setOptions(options);
 
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
@@ -323,7 +323,7 @@ namespace mtl
 
 		owner->options = MTL::CompileOptions::alloc()->init();
 		owner->options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
-		owner->options->setPreserveInvariance(true);
+		owner->options->setPreserveInvariance(g_cfg.video.metal_invariance.get());
 		owner->descriptor->setOptions(owner->options);
 		owner->handler = std::move(handler);
 

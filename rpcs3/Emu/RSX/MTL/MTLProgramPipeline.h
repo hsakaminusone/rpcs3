@@ -198,11 +198,11 @@ namespace mtl
 		// session that compiles slowly still rotates on the time bound.
 		u32 published_total() const;
 
-		// Run one compiler call synchronously, serialized with the link worker.
-		// Metal 4's compiler is not re-entrant with the pipeline-data-set
-		// serializer (L18), and the interpreter's first use has no other way to
-		// publish a pipeline.  The RSX thread is the only caller.
-		bool run_link_sync(std::function<void()>&& compile);
+		// Queue one compiler call on the link worker and return immediately.  The
+		// interpreter uses this so a first-use miss never blocks the RSX thread
+		// (C17).  The call is serialized with the real-pipeline links by the one
+		// worker, so no second mutex is needed (C26).
+		bool enqueue_compile(std::function<void()>&& compile);
 		bool permanently_failed(u32 vertex_id, u32 fragment_id,
 			const pipeline_properties& properties) const;
 
@@ -319,16 +319,13 @@ namespace mtl
 		// Metal 4's completion-handler render-pipeline path is not usable when a
 		// pipeline data set serializer is attached: even one task crashes the
 		// driver in MTLHashKey.  The synchronous call is safe, so links run on one
-		// worker.  The RSX thread still never waits for a compile.
+		// worker.  The RSX thread never waits for a compile, and the queue
+		// serializes the calls without a second mutex (C17/C26).
 		std::mutex m_link_mutex;
 		std::condition_variable m_link_condition;
 		std::deque<std::function<void()>> m_link_queue;
 		bool m_link_stop = false;
 		std::thread m_link_worker;
-
-		// Serializes every compiler call: the worker's synchronous links and the
-		// interpreter's first-use compile.  It is not the job-submission mutex.
-		std::mutex m_compile_mutex;
 	};
 
 	// The program_state_cache backend traits for Metal (HLD-01 §3.3; mirrors the

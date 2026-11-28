@@ -601,6 +601,42 @@ namespace mtl
 
 	void interpreter_cache::shutdown()
 	{
+		// C18: the reasons the interpreter stood aside, once per run.  The
+		// counters are always kept, so this line exists without a probe level.
+		{
+			static constexpr const char* names[refusal_count] =
+				{
+					"vertex textures",
+					"fragment control",
+					"texture state",
+					"no output",
+					"alpha never",
+				};
+
+			std::string summary;
+			for (usz i = 0; i < refusal_count; ++i)
+			{
+				const u64 count = m_refusals[i].load(std::memory_order_relaxed);
+
+				if (!count)
+				{
+					continue;
+				}
+
+				if (!summary.empty())
+				{
+					summary += ", ";
+				}
+
+				summary += fmt::format("%s %llu", names[i], static_cast<unsigned long long>(count));
+			}
+
+			if (!summary.empty())
+			{
+				rsx_log.notice("Metal 4: interpreter stood aside: %s", summary);
+			}
+		}
+
 		// Drain the prebuild libraries before the device can go away, with the
 		// same bounded wait the guest registry uses.  A lost device abandons the
 		// wait; the completion handler then finishes the entry on its own thread.
@@ -639,6 +675,18 @@ namespace mtl
 		// instruction blocks are frame data and live in constants_heap.
 	}
 
+	std::array<u64, interpreter_cache::refusal_count> interpreter_cache::refusal_counts() const
+	{
+		std::array<u64, refusal_count> counts{};
+
+		for (usz i = 0; i < refusal_count; ++i)
+		{
+			counts[i] = m_refusals[i].load(std::memory_order_relaxed);
+		}
+
+		return counts;
+	}
+
 	bool interpreter_cache::build_request(const rsx::context& ctx,
 		const RSXVertexProgram& vertex,
 		const RSXFragmentProgram& fragment,
@@ -651,6 +699,8 @@ namespace mtl
 		// The shared body cannot fetch vertex textures at all (R21).
 		if (vertex_metadata.referenced_textures_mask)
 		{
+			note_refusal(interpreter_refusal::vertex_textures);
+
 			// TODO(excise): level 2; the reason the interpreter stands aside.
 			MTL_PROBE_LATCH(2, "interpreter/reject vertex textures");
 			return false;
@@ -658,14 +708,16 @@ namespace mtl
 
 		// Features whose RSX behaviour is more than the shared body reproduces.
 		// Attribute interpolation is intentionally absent: it is normal triangle
-		// state, not an interpreter limitation (R20).
+		// state, not an interpreter limitation (R20).  Alpha kill is implemented
+		// by the shared body (C18), so it is no longer a refusal.
 		if (fragment.ctrl & (RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE |
 			RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE |
-			RSX_SHADER_CONTROL_TEXTURE_ALPHA_KILL |
 			RSX_SHADER_CONTROL_TEXTURE_FORMAT_CONVERT |
 			RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING |
 			RSX_SHADER_CONTROL_LOGIC_OP))
 		{
+			note_refusal(interpreter_refusal::fragment_control);
+
 			// TODO(excise): level 2; the reason the interpreter stands aside.
 			MTL_PROBE_LATCH(2, "interpreter/reject fragment control");
 			return false;
@@ -676,6 +728,8 @@ namespace mtl
 			fragment.texture_state.multisampled_textures ||
 			(fragment.ctrl & RSX_SHADER_CONTROL_ROP_MULTISAMPLED))
 		{
+			note_refusal(interpreter_refusal::texture_state);
+
 			// TODO(excise): level 2; the reason the interpreter stands aside.
 			MTL_PROBE_LATCH(2, "interpreter/reject texture state");
 			return false;
@@ -683,6 +737,8 @@ namespace mtl
 
 		if (!fragment.mrt_buffers_count)
 		{
+			note_refusal(interpreter_refusal::no_output);
+
 			// TODO(excise): level 2; the reason the interpreter stands aside.
 			MTL_PROBE_LATCH(2, "interpreter/reject no output");
 			return false;
@@ -699,6 +755,8 @@ namespace mtl
 			case rsx::comparison_function::always:
 				break;
 			case rsx::comparison_function::never:
+				note_refusal(interpreter_refusal::alpha_never);
+
 				// TODO(excise): level 2; the reason the interpreter stands aside.
 				MTL_PROBE_LATCH(2, "interpreter/reject alpha never");
 				return false;
@@ -750,9 +808,20 @@ namespace mtl
 		return true;
 	}
 
-	std::shared_ptr<interpreter_shader> interpreter_cache::get_vertex_shader(u64 options)
+	std::shared_ptr<interpreter_shader> interpreter_cache::try_vertex_shader(u64 options)
 	{
-		return await_library(submit_vertex_shader(options));
+		const auto found = m_vertex_shaders.find(options);
+
+		if (found != m_vertex_shaders.end())
+		{
+			const auto& shader = found->second;
+			return (shader && shader->state() == interpreter_library_state::ready) ? shader : nullptr;
+		}
+
+		// The variant is new.  Submit it now so a later draw finds it; this draw
+		// yields to the real pipeline (C17).
+		submit_vertex_shader(options);
+		return nullptr;
 	}
 
 	std::shared_ptr<interpreter_shader> interpreter_cache::submit_vertex_shader(u64 options)
@@ -795,9 +864,18 @@ namespace mtl
 		return true;
 	}
 
-	std::shared_ptr<interpreter_shader> interpreter_cache::get_fragment_shader(const interpreter_fragment_key& key)
+	std::shared_ptr<interpreter_shader> interpreter_cache::try_fragment_shader(const interpreter_fragment_key& key)
 	{
-		return await_library(submit_fragment_shader(key));
+		const auto found = m_fragment_shaders.find(key);
+
+		if (found != m_fragment_shaders.end())
+		{
+			const auto& shader = found->second;
+			return (shader && shader->state() == interpreter_library_state::ready) ? shader : nullptr;
+		}
+
+		submit_fragment_shader(key);
+		return nullptr;
 	}
 
 	std::shared_ptr<interpreter_shader> interpreter_cache::submit_fragment_shader(const interpreter_fragment_key& key)
@@ -869,23 +947,6 @@ namespace mtl
 		shader->attach(compile_msl_async(m_compiler, msl, std::move(handler)));
 	}
 
-	std::shared_ptr<interpreter_shader> interpreter_cache::await_library(std::shared_ptr<interpreter_shader> shader)
-	{
-		if (!shader)
-		{
-			return nullptr;
-		}
-
-		// A lost device never completes the compile; do not hold the RSX thread
-		// for the full timeout.
-		if (m_device_lost && m_device_lost->load(std::memory_order_acquire))
-		{
-			return nullptr;
-		}
-
-		return shader->wait(std::chrono::seconds(10)) ? std::move(shader) : nullptr;
-	}
-
 	void interpreter_cache::prebuild()
 	{
 		if (!m_compiler)
@@ -916,7 +977,81 @@ namespace mtl
 		}
 	}
 
-	std::shared_ptr<const interpreter_pipeline> interpreter_cache::get(const interpreter_request& request,
+	void interpreter_cache::link_pipeline(const std::shared_ptr<interpreter_pipeline>& pipeline,
+		const pipeline_properties& properties)
+	{
+		const auto link = [pipeline, properties, compiler = m_compiler, options = m_options]()
+		{
+			NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+			MTL4::LibraryFunctionDescriptor* vertex_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+			vertex_function->setLibrary(pipeline->vertex_shader->library);
+			vertex_function->setName(NS::String::string(msl_entry_point, NS::UTF8StringEncoding));
+
+			MTL4::LibraryFunctionDescriptor* fragment_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+			fragment_function->setLibrary(pipeline->fragment_shader->library);
+			fragment_function->setName(NS::String::string(msl_entry_point, NS::UTF8StringEncoding));
+
+			MTL4::RenderPipelineDescriptor* descriptor = MTL4::RenderPipelineDescriptor::alloc()->init();
+			descriptor->setVertexFunctionDescriptor(vertex_function);
+			descriptor->setFragmentFunctionDescriptor(fragment_function);
+			apply_pipeline_properties(descriptor, properties);
+
+			// The task options are mutable and the compiler may serialize a task
+			// after the call returns, so a link takes its own snapshot (the real
+			// pipeline path does the same in pipeline_jobs::submit_link).
+			MTL4::CompilerTaskOptions* task_options = nullptr;
+			if (options)
+			{
+				task_options = MTL4::CompilerTaskOptions::alloc()->init();
+				if (NS::Array* archives = options->lookupArchives())
+				{
+					task_options->setLookupArchives(archives);
+				}
+			}
+
+			NS::Error* error = nullptr;
+			MTL::RenderPipelineState* state = compiler->newRenderPipelineState(descriptor, task_options, &error);
+
+			if (task_options)
+			{
+				task_options->release();
+			}
+
+			descriptor->release();
+			vertex_function->release();
+			fragment_function->release();
+
+			if (!state)
+			{
+				const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+				rsx_log.error("Metal: interpreter render pipeline creation failed: %s", message);
+			}
+
+			// The synchronous call returns +1, which the pipeline keeps; the
+			// destructor releases it.  Publish the pointer before the release
+			// store the draw path acquires.
+			pipeline->state = state;
+			pipeline->link.store(state ? interpreter_pipeline::ready : interpreter_pipeline::failed, std::memory_order_release);
+
+			pool->release();
+		};
+
+		if (m_jobs)
+		{
+			if (m_jobs->enqueue_compile(link))
+			{
+				return;
+			}
+
+			// The worker is stopping.  Fall back to this thread so a shutdown
+			// still finishes the pipeline it was asked for.
+		}
+
+		link();
+	}
+
+	std::shared_ptr<const interpreter_pipeline> interpreter_cache::try_get(const interpreter_request& request,
 		const pipeline_properties& properties)
 	{
 		if (!m_compiler || (m_device_lost && m_device_lost->load(std::memory_order_acquire)))
@@ -934,8 +1069,8 @@ namespace mtl
 		fragment_key.output_count = request.output_count;
 		fragment_key.mapping = request.mapping;
 
-		const auto vertex_shader = get_vertex_shader(request.vertex_options);
-		const auto fragment_shader = get_fragment_shader(fragment_key);
+		const auto vertex_shader = try_vertex_shader(request.vertex_options);
+		const auto fragment_shader = try_fragment_shader(fragment_key);
 
 		if (!vertex_shader || !fragment_shader)
 		{
@@ -947,69 +1082,40 @@ namespace mtl
 		key.fragment = fragment_shader.get();
 		key.properties = properties;
 
-		if (auto found = m_pipelines.find(key); found != m_pipelines.end())
+		if (const auto found = m_pipelines.find(key); found != m_pipelines.end())
 		{
+			const auto& pipeline = found->second;
+
+			if (pipeline->link.load(std::memory_order_acquire) != interpreter_pipeline::ready)
+			{
+				// Still linking, or the link failed.  The failed entry stays so a
+				// repeated draw does not queue the same failing link forever.
+				return nullptr;
+			}
+
 			m_memo.valid = true;
 			m_memo.request = request;
 			m_memo.properties = properties;
-			m_memo.pipeline = found->second;
-			return found->second;
-		}
-
-		MTL4::LibraryFunctionDescriptor* vertex_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
-		vertex_function->setLibrary(vertex_shader->library);
-		vertex_function->setName(NS::String::string(msl_entry_point, NS::UTF8StringEncoding));
-
-		MTL4::LibraryFunctionDescriptor* fragment_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
-		fragment_function->setLibrary(fragment_shader->library);
-		fragment_function->setName(NS::String::string(msl_entry_point, NS::UTF8StringEncoding));
-
-		MTL4::RenderPipelineDescriptor* descriptor = MTL4::RenderPipelineDescriptor::alloc()->init();
-		descriptor->setVertexFunctionDescriptor(vertex_function);
-		descriptor->setFragmentFunctionDescriptor(fragment_function);
-		apply_pipeline_properties(descriptor, properties);
-
-		MTL::RenderPipelineState* state = nullptr;
-		NS::Error* error = nullptr;
-		auto link = [&]()
-		{
-			state = m_compiler->newRenderPipelineState(descriptor, m_options, &error);
-		};
-
-		if (m_jobs)
-		{
-			if (!m_jobs->run_link_sync(std::move(link)))
-			{
-				descriptor->release();
-				vertex_function->release();
-				fragment_function->release();
-				return nullptr;
-			}
-		}
-		else
-		{
-			link();
-		}
-
-		descriptor->release();
-		vertex_function->release();
-		fragment_function->release();
-
-		if (!state)
-		{
-			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
-			rsx_log.error("Metal: interpreter render pipeline creation failed: %s", message);
-			return nullptr;
+			m_memo.pipeline = pipeline;
+			return pipeline;
 		}
 
 		auto pipeline = std::make_shared<interpreter_pipeline>();
-		pipeline->state = state;
 		pipeline->vertex_shader = vertex_shader;
 		pipeline->fragment_shader = fragment_shader;
 		pipeline->mapping = request.mapping;
 		pipeline->output_count = request.output_count;
 
-		m_pipelines[key] = pipeline;
+		m_pipelines.emplace(key, pipeline);
+		link_pipeline(pipeline, properties);
+
+		// A link that ran on this thread is ready now; one queued on the worker
+		// is not, and this draw takes the real-pipeline path (C17).
+		if (pipeline->link.load(std::memory_order_acquire) != interpreter_pipeline::ready)
+		{
+			return nullptr;
+		}
+
 		m_memo.valid = true;
 		m_memo.request = request;
 		m_memo.properties = properties;

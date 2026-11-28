@@ -59,6 +59,7 @@ namespace mtl
 
 		MTL::Device* m_device = nullptr;
 		MTL4::Compiler* m_compiler = nullptr;
+		MTL4::CompilerTaskOptions* m_options = nullptr;
 		resource_manager* m_resources = nullptr;
 		MTL::Library* m_library = nullptr;
 		MTL::DepthStencilState* m_depth_write = nullptr;

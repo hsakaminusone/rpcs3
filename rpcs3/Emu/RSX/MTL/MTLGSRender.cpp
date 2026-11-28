@@ -1853,11 +1853,14 @@ namespace mtl
 		}
 
 		// A warm start: the pipeline set of a previous run is rebuilt here, off the
-		// draw path, so a draw never waits for a link (HLD-07 §4.1).  The load reports
-		// its progress through the same overlay dialog as the other backends
-		// (VKGSRender.cpp:1379-1391); a run with no overlay manager hides the frame
-		// instead, because the load draws nothing of its own.
-		m_frame_resources->shaders = std::make_unique<shader_cache>(m_frame_resources->programs, "metal", "v1");
+		// draw path, so a draw never waits for a link (HLD-07 §4.1).  The version
+		// prefix carries the same code-generation inputs as the archive, so a
+		// setting change does not load the previous build's programs (C14).  The
+		// load reports its progress through the same overlay dialog as the other
+		// backends (VKGSRender.cpp:1379-1391); a run with no overlay manager hides
+		// the frame instead, because the load draws nothing of its own.
+		m_frame_resources->shaders = std::make_unique<shader_cache>(m_frame_resources->programs, "metal",
+			"v" + mtl::code_generation_key());
 		const shader_context context{ m_device->compiler(), m_device->pipeline_task_options(),
 			&m_frame_resources->jobs, msl_entry_point, msl_entry_point, false, &m_device->lost_flag() };
 		m_frame_resources->programs.set_preload_jobs(&m_frame_resources->jobs);
@@ -1970,6 +1973,19 @@ namespace mtl
 			m_frame_resources->interpreter.shutdown();
 			m_frame_resources->present.shutdown();
 			m_frame_resources->output.shutdown();
+
+			// The persistent present scratch is owned by the renderer, not the
+			// resource manager, so it returns to the deferred list before the heaps
+			// go (T3).
+			for (MTL::Texture*& average : m_present_resolve)
+			{
+				if (average)
+				{
+					m_frame_resources->resources.defer_release(average);
+					average = nullptr;
+				}
+			}
+
 			m_frame_resources->zcull_control.shutdown();
 			m_frame_resources->textures.destroy();
 			m_frame_resources->samplers.shutdown();
@@ -2112,6 +2128,24 @@ namespace mtl
 
 		m_frame_resources->attachments.bind(m_frame_resources->recorder, m_frame_resources->cache,
 			m_ctx->fb.layout, RSX(m_ctx)->resolution_scaling_config);
+
+		// The bind may have loaded a CPU-backed multisampled surface into its sample
+		// mosaic.  The draw writes the multisampled image, so it has to be scattered
+		// from the mosaic first (VKDraw.cpp:1334-1341).  The barrier is a flag test
+		// on the common path.
+		for (u32 index = 0; index < m_frame_resources->attachments.color_count(); ++index)
+		{
+			if (surface* color = m_frame_resources->attachments.color(index))
+			{
+				color->write_barrier(m_frame_resources->recorder);
+			}
+		}
+
+		if (surface* depth = m_frame_resources->attachments.depth())
+		{
+			depth->write_barrier(m_frame_resources->recorder);
+		}
+
 		reconcile_render_targets();
 
 		// TODO(excise): level 2; the framebuffer bind stream and its formats.  A
@@ -5097,62 +5131,39 @@ namespace mtl
 		interpreter_request interpreted_request;
 		std::shared_ptr<const interpreter_pipeline> interpreted;
 
-		if (interpreter_enabled &&
-			interpreter_cache::build_request(*m_ctx, m_ctx->program.vertex_program, m_ctx->program.fragment_program,
-				m_ctx->program.vp_metadata, m_ctx->program.fp_metadata, interpreted_request))
-		{
-			// The interpreter declares only the outputs it writes.  The real
-			// pipeline still sees the unmodified mask, so the trim is a copy.
-			pipeline_properties interpreter_properties = properties;
-
-			for (u32 index = interpreted_request.output_count; index < interpreter_properties.write_mask.size(); ++index)
-			{
-				interpreter_properties.write_mask[index] = MTL::ColorWriteMaskNone;
-			}
-
-			interpreted = frame.interpreter.get(interpreted_request, interpreter_properties);
-
-			// TODO(excise): level 2; the source is eligible but its pipeline is not
-			// ready yet, so this draw takes the real-pipeline path or the skip.
-			if (!interpreted)
-			{
-				MTL_PROBE_LATCH(2, "interpreter/pipeline not ready");
-			}
-		}
-
 		const pipeline* program = nullptr;
 		const vertex_program* compiled_vertex = nullptr;
 		const fragment_program* compiled_fragment = nullptr;
 		bool use_interpreter = false;
 
-		if (interpreter_only && interpreted)
-		{
-			use_interpreter = true;
-		}
-		else
-		{
-			// A first-use miss yields once while the registry links.  The
-			// interpreter covers that miss when it is available; a real build is
-			// synchronous only for the two non-async modes and the interpreter-only
-			// fallback (which means the interpreter rejected the program).
-			//
-			// The interpreter does not emulate the depth range
-			// (MTLShaderInterpreter.cpp, the rejection set), so a program that needs
-			// it has no cover for an async first-use miss: the draw would yield and
-			// drop a frame's worth of geometry.  Vulkan compiles those programs
-			// synchronously for the same reason (VKGSRender.cpp:2045-2047).
-			const bool compile_async = !interpreter_only && shadermode != shader_mode::recompiler &&
-				!(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE);
+		// The real pipeline is resolved first.  The interpreter is a cover for a
+		// real-pipeline miss, so a ready pipeline never pays for a request, a
+		// cache probe, or a link (C17; VKDraw.cpp:572-590).
+		//
+		// A first-use miss yields once while the registry links.  A real build is
+		// synchronous only for the two non-async modes and the interpreter-only
+		// fallback (which means the interpreter rejected the program or its link
+		// failed).
+		//
+		// The interpreter does not emulate the depth range
+		// (MTLShaderInterpreter.cpp, the rejection set), so a program that needs
+		// it has no cover for an async first-use miss: the draw would yield and
+		// drop a frame's worth of geometry.  Vulkan compiles those programs
+		// synchronously for the same reason (VKGSRender.cpp:2045-2047).
+		const bool compile_async = shadermode != shader_mode::recompiler &&
+		                           !(m_ctx->program.fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE);
 
+		const auto build_real = [&](bool allow_async)
+		{
 			const auto data = frame.programs.get_graphics_pipeline(
 				&m_ctx->program.cache_hint,
 				m_ctx->program.vertex_program,
 				m_ctx->program.fragment_program,
 				properties,
-				compile_async,
+				allow_async,
 				true,
-				shader_context{ m_device->compiler(), m_device->pipeline_task_options(), &frame.jobs,
-					msl_entry_point, msl_entry_point, true, &m_device->lost_flag() });
+				shader_context{m_device->compiler(), m_device->pipeline_task_options(), &frame.jobs,
+					msl_entry_point, msl_entry_point, true, &m_device->lost_flag()});
 
 			program = std::get<0>(data);
 			compiled_vertex = std::get<1>(data);
@@ -5165,43 +5176,86 @@ namespace mtl
 			{
 				rsx::overlays::show_shader_compile_notification();
 			}
+		};
 
-			if (program && program->state)
+		if (!interpreter_only)
+		{
+			build_real(compile_async);
+		}
+
+		if (interpreter_only || !program || !program->state)
+		{
+			// Only a miss reaches the interpreter.  `try_get` queues a first-use
+			// library or link on the compiler and returns null without waiting, so
+			// the RSX thread never stalls here (C17/C26).
+			if (interpreter_enabled &&
+				frame.interpreter.build_request(*m_ctx, m_ctx->program.vertex_program, m_ctx->program.fragment_program,
+					m_ctx->program.vp_metadata, m_ctx->program.fp_metadata, interpreted_request))
 			{
-				// The real pipeline won.
+				// The interpreter declares only the outputs it writes.  The real
+				// pipeline still sees the unmodified mask, so the trim is a copy.
+				pipeline_properties interpreter_properties = properties;
+
+				for (u32 index = interpreted_request.output_count; index < interpreter_properties.write_mask.size(); ++index)
+				{
+					interpreter_properties.write_mask[index] = MTL::ColorWriteMaskNone;
+				}
+
+				interpreted = frame.interpreter.try_get(interpreted_request, interpreter_properties);
+
+				// TODO(excise): level 2; the source is eligible but its pipeline is
+				// not ready yet, so this draw takes the real-pipeline path or the
+				// skip.
+				if (!interpreted)
+				{
+					MTL_PROBE_LATCH(2, "interpreter/pipeline not ready");
+				}
 			}
-			else if (!interpreter_only && interpreted)
+		}
+
+		if (interpreter_only && !interpreted && !(program && program->state))
+		{
+			// LLD §10.4: interpreter-only keeps the no-skip guarantee.  When the
+			// shared body cannot represent the program, or its first link failed,
+			// build the real pipeline synchronously and use it.
+			build_real(false);
+		}
+
+		if (interpreted && !(program && program->state))
+		{
+			use_interpreter = true;
+		}
+		else if (program && program->state)
+		{
+			// The real pipeline won.
+		}
+		else
+		{
+			// TODO(excise): level 2; only the shader-failure probe reads it.
+			const bool failed = compiled_vertex && compiled_fragment &&
+			                    frame.jobs.permanently_failed(compiled_vertex->id, compiled_fragment->id, properties);
+
+			// TODO(excise): level 2; distinguish an in-flight link from a failed one.
+			if (failed)
 			{
-				use_interpreter = true;
+				MTL_PROBE_LATCH(2, "draw/skipped pipeline failed");
 			}
 			else
 			{
-				// TODO(excise): level 2; only the shader-failure probe reads it.
-				const bool failed = compiled_vertex && compiled_fragment &&
-					frame.jobs.permanently_failed(compiled_vertex->id, compiled_fragment->id, properties);
-
-				// TODO(excise): level 2; distinguish an in-flight link from a failed one.
-				if (failed)
-				{
-					MTL_PROBE_LATCH(2, "draw/skipped pipeline failed");
-				}
-				else
-				{
-					MTL_PROBE_LATCH(2, "draw/skipped pipeline pending");
-				}
-
-				// TODO(excise): level 2; report the failed pipeline once per run.
-				if (failed && !diagnostic_pipeline_reported)
-				{
-					diagnostic_pipeline_reported = true;
-					rsx_log.error("Metal 4: the program cache returned no pipeline");
-				}
-
-				// The host miss contract yields once; the link is on Metal's compiler
-				// threads.  Do not drain here: the next end()/begin() publishes.
-				std::this_thread::yield();
-				return false;
+				MTL_PROBE_LATCH(2, "draw/skipped pipeline pending");
 			}
+
+			// TODO(excise): level 2; report the failed pipeline once per run.
+			if (failed && !diagnostic_pipeline_reported)
+			{
+				diagnostic_pipeline_reported = true;
+				rsx_log.error("Metal 4: the program cache returned no pipeline");
+			}
+
+			// The host miss contract yields once; the link is on Metal's compiler
+			// threads.  Do not drain here: the next end()/begin() publishes.
+			std::this_thread::yield();
+			return false;
 		}
 
 		// A transform-constant file is relocated against the compiled vertex
@@ -5973,19 +6027,6 @@ namespace mtl
 		// says so: its write tag is what wins the tie against a cached copy
 		// (texture_cache.h:2680, VKDraw.cpp:1424).
 		frame.cache.on_write(m_ctx->fb.layout.color_write_enabled, m_ctx->fb.layout.zeta_write_enabled);
-
-		// A colour attachment resolves when its pass stores, so the resolved image
-		// already holds this draw.  on_write() sets require_resolve for the next
-		// consumer, but that consumer would resolve the same image a second time.
-		// The depth attachment is different: its resolve is the explicit pass in
-		// surface::resolve(), so it keeps the flag.
-		for (u32 index = 0; index < frame.attachments.color_count(); ++index)
-		{
-			if (auto* color = frame.attachments.color(index); color && color->resolve_surface)
-			{
-				color->msaa_flags &= ~rsx::surface_state_flags::require_resolve;
-			}
-		}
 
 		return true;
 	}
@@ -8188,6 +8229,47 @@ namespace mtl
 
 						// TODO(excise): level 3; per-event trace line.
 						MTL_NOTE(3, "Metal 4: present source from the surface, address 0x%x, %ux%u", address, width, height);
+
+						// A multisampled surface resolves to its sample mosaic, which
+						// holds samples_x*samples_y texels per guest pixel.  The
+						// display wants the averaged pixel, so the present folds the
+						// mosaic into a pixel-sized image (T3).
+						if (target->samples() > 1 && target->resolve_surface)
+						{
+							MTL::Texture*& average = m_present_resolve[eye];
+							const u32 average_w = target->width();
+							const u32 average_h = target->height();
+
+							if (!average || average->width() != average_w || average->height() != average_h ||
+								average->pixelFormat() != image->pixelFormat())
+							{
+								if (average)
+								{
+									resources.resources.defer_release(average);
+									average = nullptr;
+								}
+
+								MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+								descriptor->setTextureType(MTL::TextureType2D);
+								descriptor->setPixelFormat(image->pixelFormat());
+								descriptor->setWidth(average_w);
+								descriptor->setHeight(average_h);
+								descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+								average = resources.resources.new_texture(descriptor, MTL::StorageModePrivate);
+								descriptor->release();
+
+								if (average)
+								{
+									resources.resources.make_persistent(average);
+								}
+							}
+
+							if (average)
+							{
+								resources.recorder.average_mosaic(image, average);
+								image = average;
+							}
+						}
 
 						std::tie(width, height) = rsx::apply_resolution_scale<true>(
 							RSX(m_ctx)->resolution_scaling_config, std::min(surface_width, width), std::min(surface_height, height));

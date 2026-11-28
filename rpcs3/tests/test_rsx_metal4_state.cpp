@@ -2294,15 +2294,15 @@ TEST(MTLFormatsTexelSize, AnUncompressedFormatNamesItsTexel)
 		MTL::PixelFormat format;
 		u32 size;
 	} table[] = {
-		{ MTL::PixelFormat::PixelFormatR8Unorm, 1 },
-		{ MTL::PixelFormat::PixelFormatB5G6R5Unorm, 2 },
-		{ MTL::PixelFormat::PixelFormatDepth16Unorm, 2 },
-		{ MTL::PixelFormat::PixelFormatRGBA8Unorm, 4 },
-		{ MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB, 4 },
-		{ MTL::PixelFormat::PixelFormatDepth32Float, 4 },
-		{ MTL::PixelFormat::PixelFormatRGBA16Float, 8 },
-		{ MTL::PixelFormat::PixelFormatDepth32Float_Stencil8, 4 },
-		{ MTL::PixelFormat::PixelFormatRGBA32Float, 16 },
+		{MTL::PixelFormat::PixelFormatR8Unorm, 1},
+		{MTL::PixelFormat::PixelFormatB5G6R5Unorm, 2},
+		{MTL::PixelFormat::PixelFormatDepth16Unorm, 2},
+		{MTL::PixelFormat::PixelFormatRGBA8Unorm, 4},
+		{MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB, 4},
+		{MTL::PixelFormat::PixelFormatDepth32Float, 4},
+		{MTL::PixelFormat::PixelFormatRGBA16Float, 8},
+		{MTL::PixelFormat::PixelFormatDepth32Float_Stencil8, 4},
+		{MTL::PixelFormat::PixelFormatRGBA32Float, 16},
 	};
 
 	for (const auto& entry : table)

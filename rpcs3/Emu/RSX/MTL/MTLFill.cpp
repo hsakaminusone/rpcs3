@@ -88,6 +88,7 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 	{
 		m_device = dev.dev();
 		m_compiler = dev.compiler();
+		m_options = dev.pipeline_task_options();
 		m_resources = &resources;
 
 		if (!m_device || !m_compiler)
@@ -126,6 +127,18 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		{
 			rsx_log.error("Metal: fill depth-stencil state creation failed");
 		}
+
+		// The clear of the first frame must not compile its pipeline inside the
+		// pass.  The display formats and both sample counts are built here, with
+		// the device's archive lookup (O1).
+		for (const u8 samples : {1u, 4u})
+		{
+			pipeline(MTL::PixelFormatBGRA8Unorm, variant::color, samples, MTL::ColorWriteMaskAll);
+			pipeline(MTL::PixelFormatRGBA8Unorm, variant::color, samples, MTL::ColorWriteMaskAll);
+			pipeline(MTL::PixelFormatBGRA8Unorm, variant::color_depth, samples, MTL::ColorWriteMaskAll);
+			pipeline(MTL::PixelFormatRGBA8Unorm, variant::color_depth, samples, MTL::ColorWriteMaskAll);
+			pipeline(MTL::PixelFormatInvalid, variant::depth, samples, MTL::ColorWriteMaskNone);
+		}
 	}
 
 	void fill_pass::shutdown()
@@ -159,6 +172,7 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 
 		m_resources = nullptr;
 		m_compiler = nullptr;
+		m_options = nullptr;
 		m_device = nullptr;
 	}
 
@@ -207,7 +221,7 @@ fragment fill_combined_output fill_fragment_color_depth(constant fill_values& va
 		}
 
 		NS::Error* error = nullptr;
-		MTL::RenderPipelineState* state = m_compiler->newRenderPipelineState(descriptor, nullptr, &error);
+		MTL::RenderPipelineState* state = m_compiler->newRenderPipelineState(descriptor, m_options, &error);
 
 		vertex_function->release();
 		fragment_function->release();

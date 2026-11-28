@@ -135,6 +135,12 @@ namespace mtl
 		// format (MTLGSRender.cpp, get_present_source).
 		std::array<MTL::Texture*, 2> m_flip_convert{};
 
+		// The presentation average of a multisampled surface, one per stereo eye.
+		// The surface's resolve image is the guest sample mosaic; the display shows
+		// the hardware-average look, so the present folds the mosaic into this
+		// pixel-sized image (T3).
+		std::array<MTL::Texture*, 2> m_present_resolve{};
+
 		// The frame's command buffer is open.  A frame opens lazily on its first
 		// pass and closes at the flip, which submits it.
 		bool m_frame_open = false;

@@ -132,7 +132,7 @@ namespace mtl
 			}
 
 			block_index = static_cast<u32>(m_blocks.size());
-			m_blocks.push_back({ dedicated, {}, true });
+			m_blocks.push_back({dedicated, {}, true});
 			return dedicated;
 		}
 

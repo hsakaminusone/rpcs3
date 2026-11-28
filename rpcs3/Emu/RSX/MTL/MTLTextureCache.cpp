@@ -632,6 +632,8 @@ namespace mtl
 		}
 
 		texture* target = vram_texture;
+		u32 readback_width = width;
+		u32 readback_height = height;
 
 		if (context == rsx::texture_upload_context::framebuffer_storage)
 		{
@@ -643,9 +645,15 @@ namespace mtl
 				surf->memory_barrier(cmd, rsx::surface_access::transfer_read);
 			}
 
-			// The resolved image is pixel-sized, not sample-sized: Metal resolves a
-			// multisample image in place, so the region needs no sample scaling
-			// (VKTextureCache.h:241-261 scales because its image is sample-sized).
+			// A multisampled surface resolves to the guest sample mosaic, so the
+			// section's pixel rectangle becomes a sample rectangle
+			// (VKTextureCache.h:241-261).
+			if (surf->samples() > 1)
+			{
+				readback_width = width * surf->samples_x;
+				readback_height = height * surf->samples_y;
+			}
+
 			target = surf->get_surface(rsx::surface_access::transfer_read);
 		}
 
@@ -665,7 +673,7 @@ namespace mtl
 		}
 
 		const texture_readback_region region = get_texture_readback_region(
-			width, height, rsx_pitch, block_size, compressed, transfer_offset, transfer_tail);
+			readback_width, readback_height, rsx_pitch, block_size, compressed, transfer_offset, transfer_tail);
 		const u32 transfer_width = region.width;
 		const u32 transfer_height = region.height;
 		const u32 transfer_x = region.x;
@@ -680,7 +688,7 @@ namespace mtl
 			return;
 		}
 
-		const u32 staging_size = std::max<u32>(rsx_pitch * height, static_cast<u32>(get_section_size()));
+		const u32 staging_size = std::max<u32>(rsx_pitch * readback_height, static_cast<u32>(get_section_size()));
 		if (!m_staging || m_staging->value()->length() < staging_size)
 		{
 			// TODO(excise): level 1; block timer.
@@ -1080,15 +1088,15 @@ namespace mtl
 
 				command_recorder::typeless_region src_region{};
 				src_region.image = slice.src->value();
-				src_region.rect = areai{ static_cast<s32>(src_x), static_cast<s32>(src_y),
-					static_cast<s32>(src_x + src_w), static_cast<s32>(src_y + src_h) };
+				src_region.rect = areai{static_cast<s32>(src_x), static_cast<s32>(src_y),
+					static_cast<s32>(src_x + src_w), static_cast<s32>(src_y + src_h)};
 				src_region.depth = is_depth_format(src_format);
 				src_region.depth_format = depth_format_of(slice.src, src_format);
 
 				command_recorder::typeless_region dst_region{};
 				dst_region.image = dst_image->value();
-				dst_region.rect = areai{ static_cast<s32>(slice.dst_x), static_cast<s32>(slice.dst_y),
-					static_cast<s32>(slice.dst_x + slice.dst_w), static_cast<s32>(slice.dst_y + slice.dst_h) };
+				dst_region.rect = areai{static_cast<s32>(slice.dst_x), static_cast<s32>(slice.dst_y),
+					static_cast<s32>(slice.dst_x + slice.dst_w), static_cast<s32>(slice.dst_y + slice.dst_h)};
 				dst_region.level = slice.level;
 				dst_region.slice = static_cast<u32>(dst_slice);
 				dst_region.depth = is_depth_format(dst_format);
@@ -1234,7 +1242,7 @@ namespace mtl
 			}
 		}
 
-		return { image->resource_id(), sampler->gpuResourceID() };
+		return {image->resource_id(), sampler->gpuResourceID()};
 	}
 }
 

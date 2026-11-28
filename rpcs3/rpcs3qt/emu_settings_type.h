@@ -112,6 +112,7 @@ enum class emu_settings_type
 	VulkanAsyncSchedulerDriver,
 	AllowHostGPULabels,
 	DisableMSLFastMath,
+	MetalInvariance,
 	OutputScalingMode,
 	ForceHwMSAAResolve,
 	DisableAsyncHostMM,

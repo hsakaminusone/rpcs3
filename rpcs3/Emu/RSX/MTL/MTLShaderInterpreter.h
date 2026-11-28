@@ -136,6 +136,13 @@ namespace mtl
 		// the device is lost) and release the compiler task.  True when ready.
 		bool wait(std::chrono::milliseconds timeout);
 
+		// The current state, read without blocking.  `try_get` uses it to decide
+		// whether a variant is ready, still compiling, or failed (C17).
+		interpreter_library_state state() const
+		{
+			return m_state.load(std::memory_order_acquire);
+		}
+
 		// The compiler completion handler and the submission path.
 		void finish(MTL::Library* value, NS::Error* error);
 		void attach(MTL4::CompilerTask* task);
@@ -157,10 +164,34 @@ namespace mtl
 		interpreter_texture_mapping mapping;
 		u32 output_count = 1;
 
+		// The link the worker is running.  The state pointer above is written
+		// before the release store, and the draw path reads it only after an
+		// acquire load that sees `ready` (C17).
+		enum link_state : u8
+		{
+			compiling,
+			ready,
+			failed
+		};
+		std::atomic<u8> link{compiling};
+
 		interpreter_pipeline() = default;
 		~interpreter_pipeline();
 		interpreter_pipeline(const interpreter_pipeline&) = delete;
 		interpreter_pipeline& operator=(const interpreter_pipeline&) = delete;
+	};
+
+	// Why the interpreter stood aside for a draw (C18).  The counters are kept
+	// unconditionally, so a later overlay can show the reasons that matter
+	// without a probe level; the draw path never branches on them.
+	enum class interpreter_refusal : u8
+	{
+		vertex_textures,
+		fragment_control,
+		texture_state,
+		no_output,
+		alpha_never,
+		count
 	};
 
 	// The Metal 4 shader interpreter (LLD-shader-interpreter.md).  It reuses the
@@ -179,24 +210,46 @@ namespace mtl
 		// True when the program can be rendered by the shared body.  It rejects
 		// only features whose RSX behaviour the body does not reproduce; the
 		// attribute-interpolation control bit is not one of them (R20).
-		static bool build_request(const rsx::context& ctx,
+		bool build_request(const rsx::context& ctx,
 			const RSXVertexProgram& vertex,
 			const RSXFragmentProgram& fragment,
 			const program_hash_util::vertex_program_utils::vertex_program_metadata& vertex_metadata,
 			const program_hash_util::fragment_program_utils::fragment_program_metadata& fragment_metadata,
 			interpreter_request& request);
 
-		std::shared_ptr<const interpreter_pipeline> get(const interpreter_request& request,
+		// The per-reason refusal counts (C18).  A later overlay reads them; the
+		// shutdown logs the nonzero ones once.
+		static constexpr usz refusal_count = static_cast<usz>(interpreter_refusal::count);
+		std::array<u64, refusal_count> refusal_counts() const;
+
+		// The non-blocking form the draw path uses (C17).  A ready pipeline is
+		// returned; a miss queues the library and link work on the asynchronous
+		// compiler and returns null without waiting.  The next draw that reaches
+		// the same request finds it ready.
+		std::shared_ptr<const interpreter_pipeline> try_get(const interpreter_request& request,
 			const pipeline_properties& properties);
 
 		// The GLSL source of a shader variant.  Exposed for the unit test and for
-		// shader logs; the draw path goes through `get`.
+		// shader logs; the draw path goes through `try_get`.
 		static std::string build_vertex_source(u64 options);
 		static std::string build_fragment_source(const interpreter_fragment_key& key);
 
 	private:
-		std::shared_ptr<interpreter_shader> get_vertex_shader(u64 options);
-		std::shared_ptr<interpreter_shader> get_fragment_shader(const interpreter_fragment_key& key);
+		void note_refusal(interpreter_refusal reason)
+		{
+			m_refusals[static_cast<usz>(reason)].fetch_add(1, std::memory_order_relaxed);
+		}
+
+		// The non-blocking cache probes (C17).  A variant that is absent is
+		// submitted and null is returned; a variant that is compiling or failed
+		// also returns null.
+		std::shared_ptr<interpreter_shader> try_vertex_shader(u64 options);
+		std::shared_ptr<interpreter_shader> try_fragment_shader(const interpreter_fragment_key& key);
+
+		// Queue or run the link of one pipeline.  The caller links on its own
+		// thread when there is no registry (the unit test).
+		void link_pipeline(const std::shared_ptr<interpreter_pipeline>& pipeline,
+			const pipeline_properties& properties);
 
 		// The prebuild (LLD §9.3).  Called from `init`; it submits the base
 		// variant libraries on the asynchronous compiler.  There is no progress
@@ -211,14 +264,12 @@ namespace mtl
 		bool build_vertex_msl(u64 options, std::string& msl);
 		bool build_fragment_msl(const interpreter_fragment_key& key, std::string& msl);
 
-		// Wait for a variant library.  The device-lost flag and the shutdown drain
-		// bound the wait.
-		std::shared_ptr<interpreter_shader> await_library(std::shared_ptr<interpreter_shader> shader);
-
 		MTL4::Compiler* m_compiler = nullptr;
 		MTL4::CompilerTaskOptions* m_options = nullptr;
 		pipeline_jobs* m_jobs = nullptr;
 		const std::atomic<bool>* m_device_lost = nullptr;
+
+		std::array<std::atomic<u64>, refusal_count> m_refusals{};
 
 		std::unordered_map<u64, std::shared_ptr<interpreter_shader>> m_vertex_shaders;
 		std::unordered_map<interpreter_fragment_key, std::shared_ptr<interpreter_shader>, interpreter_fragment_key_hash> m_fragment_shaders;

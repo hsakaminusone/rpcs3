@@ -81,6 +81,22 @@ namespace mtl
 		// never requested.  Returns null when the surface carries no stencil.
 		texture* stencil_view() override;
 
+		// The stencil half of the resolve mosaic, the view the depth unresolve reads
+		// (T3).  Same format rules as stencil_view().
+		texture* resolve_stencil_view();
+
+		// The host sample mosaic is the resolve target: width*samples_x by
+		// height*samples_y (T3).  The pixel extent is what the pass, the viewport and
+		// the presentation use.
+		u32 mosaic_width() const
+		{
+			return width() * (sample_count() > 1 ? samples_x : 1);
+		}
+		u32 mosaic_height() const
+		{
+			return height() * (sample_count() > 1 ? samples_y : 1);
+		}
+
 		// An invalidated surface is recycled through the shared store's
 		// invalidated_resources list.  A Metal 4 command buffer holds no strong
 		// reference to the textures it renders into or samples, so a refcount of
@@ -118,6 +134,7 @@ namespace mtl
 		bool m_depth = false;
 		std::unique_ptr<texture> m_depth_mirror;
 		std::unique_ptr<texture> m_stencil_view;
+		std::unique_ptr<texture> m_resolve_stencil_view;
 	};
 }
 

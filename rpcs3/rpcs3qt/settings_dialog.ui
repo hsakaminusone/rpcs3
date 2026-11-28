@@ -2927,6 +2927,13 @@
                    </widget>
                   </item>
                   <item>
+                   <widget class="QCheckBox" name="metalInvariance">
+                    <property name="text">
+                     <string>Preserve Vertex Invariance</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
                    <widget class="QCheckBox" name="disableVertexCache">
                     <property name="text">
                      <string>Disable Vertex Cache</string>

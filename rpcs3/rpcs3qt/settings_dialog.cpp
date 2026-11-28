@@ -1503,8 +1503,10 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	});
 
 	EnhanceCheckBox(emu_settings_type::DisableMSLFastMath, ui->disableMslFastMath, tooltips.settings.disable_msl_fast_math);
+	EnhanceCheckBox(emu_settings_type::MetalInvariance, ui->metalInvariance, tooltips.settings.metal_invariance);
 #ifndef __APPLE__
 	ui->disableMslFastMath->setVisible(false);
+	ui->metalInvariance->setVisible(false);
 #endif
 
 	EnhanceCheckBox(emu_settings_type::DisableAsyncHostMM, ui->disableAsyncHostMM, tooltips.settings.disable_async_host_mm);

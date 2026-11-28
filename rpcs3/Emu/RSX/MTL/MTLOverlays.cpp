@@ -241,6 +241,28 @@ namespace mtl
 			return false;
 		}
 
+		// A first frame must not compile an overlay pipeline inside its pass.  The
+		// drawable format and the shapes the passes actually use are built here,
+		// with the device's archive lookup (O1).
+		const auto warm = [this](bool vertex_input, bool blend)
+		{
+			const u64 key = (static_cast<u64>(MTL::PixelFormatBGRA8Unorm) << 24) |
+			                (static_cast<u64>(MTL::PrimitiveTypeTriangle) << 8) |
+			                (vertex_input ? 2u : 0u) |
+			                (blend ? 1u : 0u);
+
+			pipeline_entry& entry = m_pipelines[key];
+
+			if (!entry.state)
+			{
+				entry.state = build_pipeline(MTL::PixelFormatBGRA8Unorm, 1, MTL::PrimitiveTypeTriangle, vertex_input, blend);
+			}
+		};
+
+		warm(true, true);
+		warm(false, true);
+		warm(false, false);
+
 		return true;
 	}
 

@@ -24,6 +24,23 @@ namespace mtl
 {
 	std::atomic<bool> g_abandoned_worker{false};
 
+	std::string code_generation_key()
+	{
+		const u32 math = g_cfg.video.disable_msl_fast_math.get() ? 1u : 0u;
+		const u32 invariance = g_cfg.video.metal_invariance.get() ? 1u : 0u;
+
+#ifndef NDEBUG
+		// A development build changes its emitters between commits, so the
+		// commit is part of the key and every build starts cold (C14).
+		return fmt::format("g%u-m%u-i%u-%s", MTL_GENERATOR_VERSION, math, invariance,
+			rpcs3::get_commit_and_hash().second);
+#else
+		// A release carries only the inputs a user can change, so an update that
+		// does not touch the generator keeps its warm cache.
+		return fmt::format("g%u-m%u-i%u", MTL_GENERATOR_VERSION, math, invariance);
+#endif
+	}
+
 	// The text of a framework error, with the domain and code, because a failure
 	// can carry an error object whose description is empty.
 	static std::string archive_error_text(NS::Error* error)
@@ -247,13 +264,12 @@ namespace mtl
 		if (const std::string cache_root = rpcs3::cache::get_ppu_cache();
 			!g_cfg.video.disable_on_disk_shader_cache && !cache_root.empty())
 		{
-			m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-g%u-m%u-%s-",
+			m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-%s-",
 				cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(),
-				MTL_GENERATOR_VERSION, g_cfg.video.disable_msl_fast_math.get() ? 1u : 0u,
-				rpcs3::get_commit_and_hash().second);
+				code_generation_key());
 
-		// EXCISE-BEGIN archive-diagnostic-suffix
-		// TODO(excise): diagnostic.  A switch that changes a shader (the
+			// EXCISE-BEGIN archive-diagnostic-suffix
+			// TODO(excise): diagnostic.  A switch that changes a shader (the
 			// alpha-test compile-out, MTLFragmentProgram.cpp) must not write its
 			// programs into the archive a normal run loads, or the change would
 			// outlive the diagnostic.  Such a run gets its own prefix.
@@ -285,10 +301,9 @@ namespace mtl
 
 			if (!diagnostic_suffix.empty())
 			{
-				m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-g%u-m%u-%s%s-",
+				m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-%s%s-",
 					cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(),
-					MTL_GENERATOR_VERSION, g_cfg.video.disable_msl_fast_math.get() ? 1u : 0u,
-					rpcs3::get_commit_and_hash().second, diagnostic_suffix);
+					code_generation_key(), diagnostic_suffix);
 			}
 			// EXCISE-END archive-diagnostic-suffix
 
@@ -393,7 +408,7 @@ namespace mtl
 				continue;
 			}
 
-			files.push_back({ entry.path().string(), entry.last_write_time(error_code) });
+			files.push_back({entry.path().string(), entry.last_write_time(error_code)});
 		}
 
 		if (files.empty())
@@ -404,9 +419,9 @@ namespace mtl
 		}
 
 		std::sort(files.begin(), files.end(), [](const archive_file& a, const archive_file& b)
-		{
-			return a.time > b.time;
-		});
+			{
+				return a.time > b.time;
+			});
 
 		// Keep the newest eight; older ones are compacted away.  Every archive that
 		// is kept is loaded, so compaction never loses a pipeline the run needs.
@@ -484,7 +499,7 @@ namespace mtl
 
 		NS::Error* error = nullptr;
 		if (!generation.serializer->serializeAsArchiveAndFlushToURL(
-			NS::URL::fileURLWithPath(NS::String::string(path.c_str(), NS::UTF8StringEncoding)), &error))
+				NS::URL::fileURLWithPath(NS::String::string(path.c_str(), NS::UTF8StringEncoding)), &error))
 		{
 			// The flush is destructive, so a second call reports "nothing to
 			// serialize"; each generation is therefore written once (HLD-07 §4.2).

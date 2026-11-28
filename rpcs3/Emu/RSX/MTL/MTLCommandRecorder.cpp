@@ -4,6 +4,7 @@
 
 #include "MTLInstrumentation.h"
 #include "MTLBarrier.h"
+#include "MTLDepthStencil.h"
 
 #include "Emu/Memory/vm.h"
 #include "Emu/RSX/Common/TextureUtils.h"
@@ -84,6 +85,7 @@ namespace mtl
 
 		build_swap_pipelines();
 		build_convert_pipelines();
+		build_resolve_pipelines();
 	}
 
 	namespace
@@ -106,7 +108,7 @@ kernel void rsx_bswap32(device uint* data [[buffer(0)]], uint i [[thread_positio
 	data[i] = (value << 24) | ((value & 0x0000ff00u) << 8) | ((value & 0x00ff0000u) >> 8) | (value >> 24);
 }
 )";
-	}
+	} // namespace
 
 	void command_recorder::build_swap_pipelines()
 	{
@@ -175,14 +177,14 @@ kernel void rsx_bswap32(device uint* data [[buffer(0)]], uint i [[thread_positio
 		// The copy ahead of the swap ran as a blit in this compute encoder, and
 		// Metal 4 tracks no hazards, so the dispatch needs an encoder-scope edge in
 		// both directions (T2).
-		emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+		emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false});
 
 		blit_table()->setAddress(buffer->gpuAddress() + offset, 0);
 		encoder->setComputePipelineState(state);
 		encoder->setArgumentTable(blit_table());
 		encoder->dispatchThreads(MTL::Size::Make(elements, 1, 1), MTL::Size::Make(64, 1, 1));
 
-		emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+		emit_barrier(encoder, barrier_spec{MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false});
 	}
 
 	namespace
@@ -319,7 +321,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 	}
 }
 )";
-	}
+	} // namespace
 
 	void command_recorder::build_convert_pipelines()
 	{
@@ -368,6 +370,585 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 
 		m_depth_to_pack = make_pipeline("rsx_depth_to_pack");
 		m_pack_to_depth = make_pipeline("rsx_pack_to_depth");
+	}
+
+	namespace
+	{
+		// The RSX sample mosaic (T3).  A colour resolve scatters the multisampled
+		// image into the guest sample grid with a compute kernel; a depth/stencil
+		// resolve is a render pass because a depth attachment is the only way to
+		// write depth.  The reverse direction is always a per-sample render pass:
+		// a multisample texture is read-only in a kernel.  The grid travels in a
+		// constant buffer for the passes; the kernels derive it from the texture
+		// extents.
+		constexpr const char* resolve_msl = R"(#include <metal_stdlib>
+using namespace metal;
+
+struct rsx_resolve_params
+{
+    uint grid_x;
+    uint grid_y;
+    uint pad0;
+    uint pad1;
+};
+
+kernel void rsx_resolve_color(
+    texture2d_ms<float, access::read> multisampled [[texture(0)]],
+    texture2d<float, access::write> resolve [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    const uint2 resolve_size = uint2(resolve.get_width(), resolve.get_height());
+
+    if (any(gid >= resolve_size))
+    {
+        return;
+    }
+
+    const uint2 aa_size = uint2(multisampled.get_width(), multisampled.get_height());
+    const uint2 grid = max(resolve_size / aa_size, uint2(1));
+    const uint2 aa_coord = gid / grid;
+    const uint2 sample_loc = gid % grid;
+    const uint sample_index = sample_loc.x + sample_loc.y * grid.x;
+
+    resolve.write(multisampled.read(aa_coord, sample_index), gid);
+}
+
+kernel void rsx_present_average(
+    texture2d<float, access::read> mosaic [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    const uint2 output_size = uint2(output.get_width(), output.get_height());
+
+    if (any(gid >= output_size))
+    {
+        return;
+    }
+
+    const uint2 mosaic_size = uint2(mosaic.get_width(), mosaic.get_height());
+    const uint2 grid = max(mosaic_size / output_size, uint2(1));
+    float4 sum = float4(0.0);
+
+    for (uint y = 0; y < grid.y; ++y)
+    {
+        for (uint x = 0; x < grid.x; ++x)
+        {
+            sum += mosaic.read(gid * grid + uint2(x, y));
+        }
+    }
+
+    output.write(sum / float(grid.x * grid.y), gid);
+}
+
+vertex float4 rsx_resolve_vertex(uint vertex_id [[vertex_id]])
+{
+    const float2 corner = float2((vertex_id << 1) & 2, vertex_id & 2);
+    return float4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+struct rsx_unresolve_color_output
+{
+    float4 color [[color(0)]];
+};
+
+fragment rsx_unresolve_color_output rsx_unresolve_color(
+    texture2d<float, access::read> resolve [[texture(0)]],
+    constant rsx_resolve_params& params [[buffer(0)]],
+    uint sample_id [[sample_id]],
+    float4 position [[position]])
+{
+    const uint2 pixel = uint2(position.xy);
+    const uint grid_total = params.grid_x * params.grid_y;
+    const uint slot = sample_id % grid_total;
+    const uint2 coord = pixel * uint2(params.grid_x, params.grid_y) + uint2(slot % params.grid_x, slot / params.grid_x);
+
+    rsx_unresolve_color_output out;
+    out.color = resolve.read(coord);
+    return out;
+}
+
+struct rsx_resolve_depth_output
+{
+    float depth [[depth(any)]];
+};
+
+fragment rsx_resolve_depth_output rsx_resolve_depth(
+    depth2d_ms<float, access::read> multisampled [[texture(0)]],
+    constant rsx_resolve_params& params [[buffer(0)]],
+    float4 position [[position]])
+{
+    const uint2 out_coord = uint2(position.xy);
+    const uint2 aa_coord = out_coord / uint2(params.grid_x, params.grid_y);
+    const uint2 sample_loc = out_coord % uint2(params.grid_x, params.grid_y);
+    const uint sample_index = sample_loc.x + sample_loc.y * params.grid_x;
+
+    rsx_resolve_depth_output out;
+    out.depth = multisampled.read(aa_coord, sample_index);
+    return out;
+}
+
+struct rsx_resolve_depth_stencil_output
+{
+    float depth [[depth(any)]];
+    uint stencil [[stencil]];
+};
+
+fragment rsx_resolve_depth_stencil_output rsx_resolve_depth_stencil(
+    depth2d_ms<float, access::read> multisampled [[texture(0)]],
+    texture2d_ms<uint, access::read> stencil [[texture(1)]],
+    constant rsx_resolve_params& params [[buffer(0)]],
+    float4 position [[position]])
+{
+    const uint2 out_coord = uint2(position.xy);
+    const uint2 aa_coord = out_coord / uint2(params.grid_x, params.grid_y);
+    const uint2 sample_loc = out_coord % uint2(params.grid_x, params.grid_y);
+    const uint sample_index = sample_loc.x + sample_loc.y * params.grid_x;
+
+    rsx_resolve_depth_stencil_output out;
+    out.depth = multisampled.read(aa_coord, sample_index);
+    out.stencil = stencil.read(aa_coord, sample_index).r;
+    return out;
+}
+
+struct rsx_unresolve_depth_output
+{
+    float depth [[depth(any)]];
+};
+
+fragment rsx_unresolve_depth_output rsx_unresolve_depth(
+    depth2d<float, access::read> resolve [[texture(0)]],
+    constant rsx_resolve_params& params [[buffer(0)]],
+    uint sample_id [[sample_id]],
+    float4 position [[position]])
+{
+    const uint2 pixel = uint2(position.xy);
+    const uint grid_total = params.grid_x * params.grid_y;
+    const uint slot = sample_id % grid_total;
+    const uint2 coord = pixel * uint2(params.grid_x, params.grid_y) + uint2(slot % params.grid_x, slot / params.grid_x);
+
+    rsx_unresolve_depth_output out;
+    out.depth = resolve.read(coord);
+    return out;
+}
+
+struct rsx_unresolve_depth_stencil_output
+{
+    float depth [[depth(any)]];
+    uint stencil [[stencil]];
+};
+
+fragment rsx_unresolve_depth_stencil_output rsx_unresolve_depth_stencil(
+    depth2d<float, access::read> resolve [[texture(0)]],
+    texture2d<uint, access::read> stencil [[texture(1)]],
+    constant rsx_resolve_params& params [[buffer(0)]],
+    uint sample_id [[sample_id]],
+    float4 position [[position]])
+{
+    const uint2 pixel = uint2(position.xy);
+    const uint grid_total = params.grid_x * params.grid_y;
+    const uint slot = sample_id % grid_total;
+    const uint2 coord = pixel * uint2(params.grid_x, params.grid_y) + uint2(slot % params.grid_x, slot / params.grid_x);
+
+    rsx_unresolve_depth_stencil_output out;
+    out.depth = resolve.read(coord);
+    out.stencil = stencil.read(coord).r;
+    return out;
+}
+)";
+	} // namespace
+
+	void command_recorder::build_resolve_pipelines()
+	{
+		if (!m_compiler)
+		{
+			return;
+		}
+
+		MTL4::LibraryDescriptor* library_descriptor = MTL4::LibraryDescriptor::alloc()->init();
+		library_descriptor->setSource(NS::String::string(resolve_msl, NS::UTF8StringEncoding));
+
+		NS::Error* error = nullptr;
+		m_resolve_library = m_compiler->newLibrary(library_descriptor, &error);
+		library_descriptor->release();
+
+		if (!m_resolve_library)
+		{
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: MSAA resolve library creation failed: %s", message);
+			return;
+		}
+
+		const auto make_compute = [this](const char* name) -> MTL::ComputePipelineState*
+		{
+			MTL4::LibraryFunctionDescriptor* function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+			function->setLibrary(m_resolve_library);
+			function->setName(NS::String::string(name, NS::UTF8StringEncoding));
+
+			MTL4::ComputePipelineDescriptor* descriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
+			descriptor->setComputeFunctionDescriptor(function);
+
+			NS::Error* pipeline_error = nullptr;
+			MTL::ComputePipelineState* state = m_compiler->newComputePipelineState(descriptor, nullptr, &pipeline_error);
+
+			function->release();
+			descriptor->release();
+
+			if (!state)
+			{
+				const char* message = (pipeline_error && pipeline_error->localizedDescription()) ? pipeline_error->localizedDescription()->utf8String() : "unknown";
+				rsx_log.error("Metal: MSAA resolve pipeline creation failed for %s: %s", name, message);
+			}
+
+			return state;
+		};
+
+		m_resolve_color_state = make_compute("rsx_resolve_color");
+		m_present_average_state = make_compute("rsx_present_average");
+
+		// The resolve pass writes depth unconditionally and stencil with a replace,
+		// so the shader's [[stencil]] value is the reference the replace stores.
+		depth_stencil_state state;
+		state.depth_compare = rsx::comparison_function::always;
+		state.depth_write = true;
+		state.front = {rsx::comparison_function::always, rsx::stencil_op::keep, rsx::stencil_op::keep,
+			rsx::stencil_op::replace, 0xff, 0xff};
+		state.back = state.front;
+		m_resolve_depth_state = create_depth_stencil_state(m_device, state);
+
+		if (!m_resolve_depth_state)
+		{
+			rsx_log.error("Metal: MSAA resolve depth-stencil state creation failed");
+		}
+	}
+
+	MTL::ComputePipelineState* command_recorder::resolve_compute_pipeline(resolve_kind kind)
+	{
+		switch (kind)
+		{
+		case resolve_kind::resolve_color:
+			return m_resolve_color_state;
+		case resolve_kind::present_average:
+			return m_present_average_state;
+		default:
+			return nullptr;
+		}
+	}
+
+	MTL::RenderPipelineState* command_recorder::resolve_render_pipeline(resolve_kind kind, MTL::PixelFormat format, u8 samples)
+	{
+		const u64 key = (static_cast<u64>(kind) << 48) | (static_cast<u64>(format) << 8) | samples;
+
+		if (const auto it = m_resolve_pipelines.find(key); it != m_resolve_pipelines.end())
+		{
+			return it->second;
+		}
+
+		const char* fragment_name = nullptr;
+
+		switch (kind)
+		{
+		case resolve_kind::unresolve_color:
+			fragment_name = "rsx_unresolve_color";
+			break;
+		case resolve_kind::resolve_depth:
+			fragment_name = "rsx_resolve_depth";
+			break;
+		case resolve_kind::resolve_depth_stencil:
+			fragment_name = "rsx_resolve_depth_stencil";
+			break;
+		case resolve_kind::unresolve_depth:
+			fragment_name = "rsx_unresolve_depth";
+			break;
+		case resolve_kind::unresolve_depth_stencil:
+			fragment_name = "rsx_unresolve_depth_stencil";
+			break;
+		default:
+			return nullptr;
+		}
+
+		MTL4::LibraryFunctionDescriptor* vertex_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+		vertex_function->setLibrary(m_resolve_library);
+		vertex_function->setName(NS::String::string("rsx_resolve_vertex", NS::UTF8StringEncoding));
+
+		MTL4::LibraryFunctionDescriptor* fragment_function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+		fragment_function->setLibrary(m_resolve_library);
+		fragment_function->setName(NS::String::string(fragment_name, NS::UTF8StringEncoding));
+
+		MTL4::RenderPipelineDescriptor* descriptor = MTL4::RenderPipelineDescriptor::alloc()->init();
+		descriptor->setVertexFunctionDescriptor(vertex_function);
+		descriptor->setFragmentFunctionDescriptor(fragment_function);
+		descriptor->setRasterSampleCount(samples);
+
+		if (kind == resolve_kind::unresolve_color)
+		{
+			descriptor->colorAttachments()->object(0)->setPixelFormat(format);
+		}
+
+		NS::Error* error = nullptr;
+		MTL::RenderPipelineState* state = m_compiler->newRenderPipelineState(descriptor, nullptr, &error);
+
+		vertex_function->release();
+		fragment_function->release();
+		descriptor->release();
+
+		if (!state)
+		{
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: MSAA resolve pipeline creation failed for %s: %s", fragment_name, message);
+			return nullptr;
+		}
+
+		m_resolve_pipelines.emplace(key, state);
+		return state;
+	}
+
+	void command_recorder::resolve_color(MTL::Texture* multisampled, MTL::Texture* mosaic)
+	{
+		if (!multisampled || !mosaic || !m_resolve_color_state)
+		{
+			return;
+		}
+
+		MTL4::ComputeCommandEncoder* encoder = open_compute();
+		if (!encoder)
+		{
+			return;
+		}
+
+		// The multisampled image was written by an earlier encoder, so the dispatch
+		// reads it through the encoder boundary the open closed.  The dispatch's own
+		// write is fenced for a copy that follows in this encoder.
+		emit_barrier(encoder, barrier_spec{MTL::StageAll, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false});
+
+		blit_table()->setTexture(multisampled->gpuResourceID(), 0);
+		blit_table()->setTexture(mosaic->gpuResourceID(), 1);
+		encoder->setComputePipelineState(m_resolve_color_state);
+		encoder->setArgumentTable(blit_table());
+		encoder->dispatchThreads(
+			MTL::Size::Make(static_cast<NS::UInteger>(mosaic->width()), static_cast<NS::UInteger>(mosaic->height()), 1),
+			MTL::Size::Make(8, 8, 1));
+
+		emit_barrier(encoder, barrier_spec{MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false});
+	}
+
+	void command_recorder::average_mosaic(MTL::Texture* mosaic, MTL::Texture* output)
+	{
+		if (!mosaic || !output || !m_present_average_state)
+		{
+			return;
+		}
+
+		MTL4::ComputeCommandEncoder* encoder = open_compute();
+		if (!encoder)
+		{
+			return;
+		}
+
+		emit_barrier(encoder, barrier_spec{MTL::StageAll, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false});
+
+		blit_table()->setTexture(mosaic->gpuResourceID(), 0);
+		blit_table()->setTexture(output->gpuResourceID(), 1);
+		encoder->setComputePipelineState(m_present_average_state);
+		encoder->setArgumentTable(blit_table());
+		encoder->dispatchThreads(
+			MTL::Size::Make(static_cast<NS::UInteger>(output->width()), static_cast<NS::UInteger>(output->height()), 1),
+			MTL::Size::Make(8, 8, 1));
+
+		emit_barrier(encoder, barrier_spec{MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false});
+	}
+
+	void command_recorder::resolve_depth_stencil(MTL::Texture* multisampled, MTL::Texture* mosaic,
+		MTL::Texture* multisampled_stencil, u8 grid_x, u8 grid_y, bool combined)
+	{
+		if (!multisampled || !mosaic || (combined && !multisampled_stencil))
+		{
+			return;
+		}
+
+		const resolve_kind kind = combined ? resolve_kind::resolve_depth_stencil : resolve_kind::resolve_depth;
+		MTL::RenderPipelineState* state = resolve_render_pipeline(kind, mosaic->pixelFormat(), 1);
+
+		if (!state || !m_resolve_depth_state)
+		{
+			return;
+		}
+
+		MTL::Buffer* params_buffer = m_resources->new_buffer(sizeof(resolve_params), MTL::StorageModeShared);
+		if (!params_buffer)
+		{
+			rsx_log.error("Metal 4: the MSAA depth resolve constant buffer could not be created");
+			return;
+		}
+
+		auto* params = static_cast<resolve_params*>(params_buffer->contents());
+		params->grid_x = grid_x;
+		params->grid_y = grid_y;
+		params->pad0 = 0;
+		params->pad1 = 0;
+
+		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
+		descriptor->setRenderTargetWidth(mosaic->width());
+		descriptor->setRenderTargetHeight(mosaic->height());
+
+		MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
+		depth->setTexture(mosaic);
+		depth->setLoadAction(MTL::LoadActionDontCare);
+		depth->setStoreAction(MTL::StoreActionStore);
+
+		if (combined)
+		{
+			MTL::RenderPassStencilAttachmentDescriptor* stencil = descriptor->stencilAttachment();
+			stencil->setTexture(mosaic);
+			stencil->setLoadAction(MTL::LoadActionDontCare);
+			stencil->setStoreAction(MTL::StoreActionStore);
+		}
+
+		MTL4::RenderCommandEncoder* encoder = open_pass(descriptor);
+		descriptor->release();
+
+		if (encoder)
+		{
+			blit_table()->setTexture(multisampled->gpuResourceID(), 0);
+
+			if (combined)
+			{
+				blit_table()->setTexture(multisampled_stencil->gpuResourceID(), 1);
+			}
+
+			blit_table()->setAddress(params_buffer->gpuAddress(), 0);
+			encoder->setRenderPipelineState(state);
+			encoder->setArgumentTable(blit_table(), MTL::RenderStageFragment);
+			encoder->setDepthStencilState(m_resolve_depth_state);
+			encoder->setCullMode(MTL::CullModeNone);
+			encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
+			encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
+		}
+
+		m_resources->defer_release(params_buffer);
+	}
+
+	void command_recorder::unresolve_color(MTL::Texture* multisampled, MTL::Texture* mosaic,
+		u8 host_samples, u8 grid_x, u8 grid_y)
+	{
+		if (!multisampled || !mosaic)
+		{
+			return;
+		}
+
+		MTL::RenderPipelineState* state = resolve_render_pipeline(resolve_kind::unresolve_color, multisampled->pixelFormat(), host_samples);
+
+		if (!state)
+		{
+			return;
+		}
+
+		MTL::Buffer* params_buffer = m_resources->new_buffer(sizeof(resolve_params), MTL::StorageModeShared);
+		if (!params_buffer)
+		{
+			rsx_log.error("Metal 4: the MSAA colour unresolve constant buffer could not be created");
+			return;
+		}
+
+		auto* params = static_cast<resolve_params*>(params_buffer->contents());
+		params->grid_x = grid_x;
+		params->grid_y = grid_y;
+		params->pad0 = 0;
+		params->pad1 = 0;
+
+		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
+		descriptor->setRenderTargetWidth(multisampled->width());
+		descriptor->setRenderTargetHeight(multisampled->height());
+
+		MTL::RenderPassColorAttachmentDescriptor* color = descriptor->colorAttachments()->object(0);
+		color->setTexture(multisampled);
+		color->setLoadAction(MTL::LoadActionDontCare);
+		color->setStoreAction(MTL::StoreActionStore);
+
+		MTL4::RenderCommandEncoder* encoder = open_pass(descriptor);
+		descriptor->release();
+
+		if (encoder)
+		{
+			blit_table()->setTexture(mosaic->gpuResourceID(), 0);
+			blit_table()->setAddress(params_buffer->gpuAddress(), 0);
+			encoder->setRenderPipelineState(state);
+			encoder->setArgumentTable(blit_table(), MTL::RenderStageFragment);
+			encoder->setCullMode(MTL::CullModeNone);
+			encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
+			encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
+		}
+
+		m_resources->defer_release(params_buffer);
+	}
+
+	void command_recorder::unresolve_depth_stencil(MTL::Texture* multisampled, MTL::Texture* mosaic,
+		MTL::Texture* mosaic_stencil, u8 host_samples, u8 grid_x, u8 grid_y, bool combined)
+	{
+		if (!multisampled || !mosaic || (combined && !mosaic_stencil))
+		{
+			return;
+		}
+
+		const resolve_kind kind = combined ? resolve_kind::unresolve_depth_stencil : resolve_kind::unresolve_depth;
+		MTL::RenderPipelineState* state = resolve_render_pipeline(kind, multisampled->pixelFormat(), host_samples);
+
+		if (!state || !m_resolve_depth_state)
+		{
+			return;
+		}
+
+		MTL::Buffer* params_buffer = m_resources->new_buffer(sizeof(resolve_params), MTL::StorageModeShared);
+		if (!params_buffer)
+		{
+			rsx_log.error("Metal 4: the MSAA depth unresolve constant buffer could not be created");
+			return;
+		}
+
+		auto* params = static_cast<resolve_params*>(params_buffer->contents());
+		params->grid_x = grid_x;
+		params->grid_y = grid_y;
+		params->pad0 = 0;
+		params->pad1 = 0;
+
+		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
+		descriptor->setRenderTargetWidth(multisampled->width());
+		descriptor->setRenderTargetHeight(multisampled->height());
+
+		MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
+		depth->setTexture(multisampled);
+		depth->setLoadAction(MTL::LoadActionDontCare);
+		depth->setStoreAction(MTL::StoreActionStore);
+
+		if (combined)
+		{
+			MTL::RenderPassStencilAttachmentDescriptor* stencil = descriptor->stencilAttachment();
+			stencil->setTexture(multisampled);
+			stencil->setLoadAction(MTL::LoadActionDontCare);
+			stencil->setStoreAction(MTL::StoreActionStore);
+		}
+
+		MTL4::RenderCommandEncoder* encoder = open_pass(descriptor);
+		descriptor->release();
+
+		if (encoder)
+		{
+			blit_table()->setTexture(mosaic->gpuResourceID(), 0);
+
+			if (combined)
+			{
+				blit_table()->setTexture(mosaic_stencil->gpuResourceID(), 1);
+			}
+
+			blit_table()->setAddress(params_buffer->gpuAddress(), 0);
+			encoder->setRenderPipelineState(state);
+			encoder->setArgumentTable(blit_table(), MTL::RenderStageFragment);
+			encoder->setDepthStencilState(m_resolve_depth_state);
+			encoder->setCullMode(MTL::CullModeNone);
+			encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
+			encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
+		}
+
+		m_resources->defer_release(params_buffer);
 	}
 
 	bool command_recorder::copy_typeless(command_recorder& cmd, const typeless_region& src, const typeless_region& dst)
@@ -441,7 +1022,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			encoder->copyFromTexture(src.image, src.slice, src.level, src_origin, extent,
 				staging, 0, row_bytes, image_bytes);
 
-			if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+			if (!emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false}))
 			{
 				rsx_log.error("Metal 4: a typeless colour copy barrier was refused");
 				cmd.resources().defer_release(staging);
@@ -552,7 +1133,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 
 			if (stencil)
 			{
-				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				if (!emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false}))
 				{
 					rsx_log.error("Metal 4: a depth conversion barrier was refused");
 					cmd.resources().defer_release(depth_buffer);
@@ -566,7 +1147,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 					stencil_buffer, 0, stencil_row, stencil_bytes, stencil_option);
 			}
 
-			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+			emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false});
 
 			blit_table()->setAddress(depth_buffer->gpuAddress(), 0);
 			blit_table()->setAddress(stencil_buffer ? stencil_buffer->gpuAddress() : depth_buffer->gpuAddress(), 1);
@@ -576,7 +1157,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			encoder->setArgumentTable(blit_table());
 			encoder->dispatchThreads(dispatch_size, MTL::Size::Make(16, 16, 1));
 
-			emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+			emit_barrier(encoder, barrier_spec{MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false});
 
 			encoder->copyFromBuffer(pack_buffer, 0, pack_row, pack_bytes, extent,
 				dst.image, dst.slice, dst.level, dst_origin);
@@ -586,7 +1167,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			encoder->copyFromTexture(colour_side.image, colour_side.slice, colour_side.level, src_origin, extent,
 				pack_buffer, 0, pack_row, pack_bytes);
 
-			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+			emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false});
 
 			blit_table()->setAddress(pack_buffer->gpuAddress(), 0);
 			blit_table()->setAddress(depth_buffer->gpuAddress(), 1);
@@ -596,14 +1177,14 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			encoder->setArgumentTable(blit_table());
 			encoder->dispatchThreads(dispatch_size, MTL::Size::Make(16, 16, 1));
 
-			emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+			emit_barrier(encoder, barrier_spec{MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false});
 
 			encoder->copyFromBuffer(depth_buffer, 0, depth_row, depth_bytes, extent,
 				dst.image, dst.slice, dst.level, dst_origin, depth_option);
 
 			if (stencil)
 			{
-				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				if (!emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false}))
 				{
 					rsx_log.error("Metal 4: a depth conversion barrier was refused");
 					cmd.resources().defer_release(depth_buffer);
@@ -971,6 +1552,40 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 		{
 			m_convert_library->release();
 			m_convert_library = nullptr;
+		}
+
+		for (auto& [key, state] : m_resolve_pipelines)
+		{
+			if (state)
+			{
+				state->release();
+			}
+		}
+
+		m_resolve_pipelines.clear();
+
+		if (m_resolve_color_state)
+		{
+			m_resolve_color_state->release();
+			m_resolve_color_state = nullptr;
+		}
+
+		if (m_present_average_state)
+		{
+			m_present_average_state->release();
+			m_present_average_state = nullptr;
+		}
+
+		if (m_resolve_depth_state)
+		{
+			m_resolve_depth_state->release();
+			m_resolve_depth_state = nullptr;
+		}
+
+		if (m_resolve_library)
+		{
+			m_resolve_library->release();
+			m_resolve_library = nullptr;
 		}
 
 		// Feedback blocks can arrive after this point.  Wait for the ones already
@@ -1711,22 +2326,22 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			{
 				owner->in_flight.fetch_add(1, std::memory_order_acq_rel);
 				options->addFeedbackHandler([owner, index, generation](MTL4::CommitFeedback* feedback)
-				{
 					{
-						std::lock_guard lock(owner->lock);
-
-						if (owner->recorder)
 						{
-							owner->recorder->on_feedback(index, generation, feedback);
-						}
-					}
+							std::lock_guard lock(owner->lock);
 
-					owner->in_flight.fetch_sub(1, std::memory_order_acq_rel);
-				});
+							if (owner->recorder)
+							{
+								owner->recorder->on_feedback(index, generation, feedback);
+							}
+						}
+
+						owner->in_flight.fetch_sub(1, std::memory_order_acq_rel);
+					});
 			}
 		}
 
-		const MTL4::CommandBuffer* buffers[] = { buffer };
+		const MTL4::CommandBuffer* buffers[] = {buffer};
 
 		{
 			// TODO(excise): level 1; block timer.
@@ -1763,9 +2378,7 @@ kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
 			// TODO(excise): level 2; the commit failed (area F, Metal faults).
 			MTL_PROBE_LATCH(2, "fault/commit failed");
 
-			const char* message = (error->localizedDescription())
-				? error->localizedDescription()->utf8String()
-				: "no description";
+			const char* message = (error->localizedDescription()) ? error->localizedDescription()->utf8String() : "no description";
 			rsx_log.error("Metal 4: commit failed: %s", message);
 
 			// L3: a GPU error is a lost device, not a completed commit.  The

@@ -124,4 +124,24 @@ TEST(MTLInterpreter, MixedTypeFragmentSourceCompiles)
 	EXPECT_NE(msl.find("array<texture3d<float>, 1> sampler3D_array"), std::string::npos);
 }
 
+TEST(MTLInterpreter, AlphaKillIsDeferredToMain)
+{
+	mtl::interpreter_fragment_key key;
+	key.options = program_common::interpreter::COMPILER_OPT_ENABLE_TEXTURES |
+	              program_common::interpreter::COMPILER_OPT_ENABLE_KIL;
+	key.output_count = 1;
+	key.mapping = mtl::interpreter_texture_mapping::from_mask(0x0001, 0x1);
+
+	const std::string glsl = mtl::interpreter_cache::build_fragment_source(key);
+
+	// The fetch records the kill and main discards after the outputs are written,
+	// because Apple silicon executes a discarded fragment's stores (C18).
+	EXPECT_NE(glsl.find("RSX_ALPHAKILL_BIT"), std::string::npos);
+	EXPECT_NE(glsl.find("interpreter_alpha_kill = true"), std::string::npos);
+	EXPECT_NE(glsl.find("if (interpreter_alpha_kill)"), std::string::npos);
+
+	const std::string msl = compile_to_msl(glsl, false);
+	EXPECT_NE(msl.find("discard_fragment"), std::string::npos);
+}
+
 #endif // RSX_ENABLE_METAL4

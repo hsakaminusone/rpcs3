@@ -257,8 +257,8 @@ namespace mtl
 		const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 		const bool gamma_in_shader = format_ex.hw_SRGB_possible() && !guest_format_has_srgb_host(format);
 		state.force_nearest = state.depth_compare ||
-			(format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0 ||
-			gamma_in_shader;
+		                      (format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0 ||
+		                      gamma_in_shader;
 
 		return state;
 	}
@@ -317,12 +317,9 @@ namespace mtl
 		// buffer, so the descriptor has to allow it (C11).
 		descriptor->setSupportArgumentBuffers(true);
 
-		descriptor->setSAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_S))
-			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_s));
-		descriptor->setTAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_T))
-			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_t));
-		descriptor->setRAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_R))
-			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_r));
+		descriptor->setSAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_S)) ? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_s));
+		descriptor->setTAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_T)) ? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_t));
+		descriptor->setRAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_R)) ? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_r));
 		if (state.force_nearest)
 		{
 			// The filter must not run on the stored value; the shader decodes it.
@@ -360,21 +357,7 @@ namespace mtl
 
 	bool operator==(const sampler_state& a, const sampler_state& b)
 	{
-		return a.wrap_s == b.wrap_s
-			&& a.wrap_t == b.wrap_t
-			&& a.wrap_r == b.wrap_r
-			&& a.min_filter == b.min_filter
-			&& a.mag_filter == b.mag_filter
-			&& a.min_lod == b.min_lod
-			&& a.max_lod == b.max_lod
-			&& a.lod_bias == b.lod_bias
-			&& a.max_aniso == b.max_aniso
-			&& a.unnormalized_coords == b.unnormalized_coords
-			&& a.border_color == b.border_color
-			&& a.border_axis_mask == b.border_axis_mask
-			&& a.depth_compare == b.depth_compare
-			&& a.compare == b.compare
-			&& a.force_nearest == b.force_nearest;
+		return a.wrap_s == b.wrap_s && a.wrap_t == b.wrap_t && a.wrap_r == b.wrap_r && a.min_filter == b.min_filter && a.mag_filter == b.mag_filter && a.min_lod == b.min_lod && a.max_lod == b.max_lod && a.lod_bias == b.lod_bias && a.max_aniso == b.max_aniso && a.unnormalized_coords == b.unnormalized_coords && a.border_color == b.border_color && a.border_axis_mask == b.border_axis_mask && a.depth_compare == b.depth_compare && a.compare == b.compare && a.force_nearest == b.force_nearest;
 	}
 
 	u64 hash_sampler_state(const sampler_state& state)

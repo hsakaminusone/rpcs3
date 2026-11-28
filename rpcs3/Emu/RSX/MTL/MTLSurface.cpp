@@ -55,6 +55,13 @@ namespace mtl
 		surface_height = height;
 		set_resolution_scaling_config(scaling);
 
+		// The cached views belong to the previous image.  A reused surface object
+		// can be re-created at a new extent, and a view of the old image would keep
+		// serving the old layout (T3).
+		m_depth_mirror.reset();
+		m_stencil_view.reset();
+		m_resolve_stencil_view.reset();
+
 		// The guest AA mode is always reported, so get_spp() stays the guest sample
 		// count (surface_store.h:646).  The host sample count follows the video
 		// configuration.
@@ -95,11 +102,31 @@ namespace mtl
 		descriptor->setUsage(usage);
 		assign(m_resources->new_texture(descriptor, MTL::StorageModePrivate));
 
-		// The resolved image persists and stays samplable (HLD-02 §2.2).
+		// The resolved image persists and stays samplable (HLD-02 §2.2).  It is the
+		// guest sample mosaic, not an average: width*samples_x by height*samples_y,
+		// single-sample (T3).
 		if (host_samples > 1)
 		{
 			descriptor->setTextureType(MTL::TextureType2D);
 			descriptor->setSampleCount(1);
+			descriptor->setWidth(scaled_w * samples_x);
+			descriptor->setHeight(scaled_h * samples_y);
+
+			// A colour mosaic is written by a compute kernel, a depth mosaic by a
+			// render pass; both are read back by shader code.  The stencil half of a
+			// combined depth mosaic needs a castable view.
+			MTL::TextureUsage resolve_usage = MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead;
+
+			if (!depth)
+			{
+				resolve_usage |= MTL::TextureUsageShaderWrite;
+			}
+			else if (rsx::is_depth_stencil_format(get_surface_depth_format()))
+			{
+				resolve_usage |= MTL::TextureUsagePixelFormatView;
+			}
+
+			descriptor->setUsage(resolve_usage);
 			resolve_surface = std::make_unique<texture>(m_resources);
 			resolve_surface->assign(m_resources->new_texture(descriptor, MTL::StorageModePrivate));
 		}
@@ -183,6 +210,25 @@ namespace mtl
 		return m_stencil_view.get();
 	}
 
+	texture* surface::resolve_stencil_view()
+	{
+		if (!m_depth || !resolve_surface ||
+			pixel_format() != MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
+		{
+			return nullptr;
+		}
+
+		if (m_resolve_stencil_view)
+		{
+			return m_resolve_stencil_view.get();
+		}
+
+		m_resolve_stencil_view = std::make_unique<texture>(m_resources);
+		m_resolve_stencil_view->assign(resolve_surface->value()->newTextureView(MTL::PixelFormat::PixelFormatX32_Stencil8));
+
+		return m_resolve_stencil_view.get();
+	}
+
 	MTL::ResourceID surface::mirror_depth(command_recorder& cmd)
 	{
 		texture* mirror = depth_mirror();
@@ -237,20 +283,29 @@ namespace mtl
 				initialize_memory(cmd, access_type);
 				on_write(rsx::get_shared_tag(), static_cast<rsx::surface_state_flags>(msaa_flags));
 			}
-		}
-		else
-		{
-			flush_old_contents(cmd, access_type);
+
+			// The guest reads the mosaic, so a surface a pass wrote is resolved on
+			// demand.  A shader write consumes the other direction: a CPU-loaded
+			// surface is scattered into the multisampled image before the draw.
+			if (msaa_flags & rsx::surface_state_flags::require_resolve)
+			{
+				if (access_type.is_transfer())
+				{
+					resolve(cmd);
+				}
+			}
+			else if (msaa_flags & rsx::surface_state_flags::require_unresolve)
+			{
+				if (access_type == rsx::surface_access::shader_write)
+				{
+					unresolve(cmd);
+				}
+			}
+
+			return;
 		}
 
-		if (access_type.is_transfer())
-		{
-			resolve(cmd);
-		}
-		else if (access_type == rsx::surface_access::shader_write)
-		{
-			unresolve(cmd);
-		}
+		flush_old_contents(cmd, access_type);
 	}
 
 	void surface::flush_old_contents(command_recorder& cmd, rsx::surface_access access)
@@ -261,6 +316,23 @@ namespace mtl
 		MTL_PROBE_LATCH(2, "surface/flush old");
 		texture* target = get_surface(rsx::surface_access::transfer_read);
 		const u32 first = prepare_rw_barrier_for_transfer(this);
+
+		// The destination mosaic may be missing the writes of earlier passes.  A
+		// partial copy leaves the rest of it in place, so it must be brought
+		// forward first (VKRenderTargets.cpp:1099-1104).
+		if (msaa_flags & rsx::surface_state_flags::require_resolve)
+		{
+			resolve(cmd);
+		}
+
+		// The sample rects are the guest layout the copies operate on (T3).
+		const auto to_samples = [](surface* object, areai& rect)
+		{
+			if (object->sample_count() > 1)
+			{
+				object->transform_pixels_to_samples(rect);
+			}
+		};
 
 		// An intact destination accepts every incoming source; otherwise a source
 		// that no longer holds its own data must not be blended in
@@ -283,7 +355,8 @@ namespace mtl
 				}
 
 				region.init_transfer(this);
-				const areai dst = region.dst_rect();
+				areai dst = region.dst_rect();
+				to_samples(this, dst);
 				covered = (dst.x1 == 0 && dst.y1 == 0 &&
 					static_cast<u32>(dst.x2) == target->value()->width() &&
 					static_cast<u32>(dst.y2) == target->value()->height());
@@ -297,6 +370,19 @@ namespace mtl
 			else
 			{
 				initialize_memory(cmd, rsx::surface_access::memory_write);
+			}
+		}
+
+		// The sources must be resolved before the copy encoder opens: a depth
+		// resolve is its own render pass and would close the encoder the copies
+		// share (T3).
+		for (u32 index = first; index < old_contents.size(); ++index)
+		{
+			surface* source = static_cast<surface*>(old_contents[index].source);
+
+			if (source && source->value() && (accept_all || source->test()))
+			{
+				source->memory_barrier(cmd, rsx::surface_access::transfer_read);
 			}
 		}
 
@@ -325,9 +411,13 @@ namespace mtl
 				continue;
 			}
 
+			// The source mosaic has to hold the data before it is read; it was
+			// resolved above, before the copy encoder opened (T3).
 			region.init_transfer(this);
-			const areai src = region.src_rect();
-			const areai dst = region.dst_rect();
+			areai src = region.src_rect();
+			areai dst = region.dst_rect();
+			to_samples(source, src);
+			to_samples(this, dst);
 
 			const bool covers = (dst.x1 == 0 && dst.y1 == 0 &&
 				static_cast<u32>(dst.x2) == target->value()->width() &&
@@ -380,6 +470,13 @@ namespace mtl
 		}
 
 		on_write_copy(newest_tag, optimize_copy);
+
+		// The copy filled the mosaic, so the multisampled image must be scattered
+		// from it before the draw that follows (VKRenderTargets.cpp:1140-1144).
+		if (access == rsx::surface_access::shader_write)
+		{
+			unresolve(cmd);
+		}
 	}
 
 	void surface::initialize_memory(command_recorder& cmd, rsx::surface_access access)
@@ -461,12 +558,17 @@ namespace mtl
 
 		texture* target = get_surface(rsx::surface_access::transfer_read);
 
+		// A multisampled surface uploads into its sample mosaic, not into the
+		// multisampled image: the guest bytes are the mosaic (T3).
+		const u32 target_w = static_cast<u32>(target->value()->width());
+		const u32 target_h = static_cast<u32>(target->value()->height());
+
 		const rsx::surface_depth_format2 depth_format = get_surface_depth_format();
 
 		if (m_depth && depth_format_needs_decode(depth_format))
 		{
-			const u32 plane_pitch = width() * 4;
-			MTL::Buffer* staging = m_resources->new_buffer(plane_pitch * height(), MTL::StorageModeShared);
+			const u32 plane_pitch = target_w * 4;
+			MTL::Buffer* staging = m_resources->new_buffer(static_cast<u64>(plane_pitch) * target_h, MTL::StorageModeShared);
 			if (!staging)
 			{
 				rsx_log.error("Metal 4: the depth background staging buffer could not be created");
@@ -474,10 +576,10 @@ namespace mtl
 			}
 
 			decode_depth_plane(staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
-				width(), height(), rsx_pitch, get_bpp(), depth_format);
+				target_w, target_h, rsx_pitch, get_bpp(), depth_format);
 
-			encoder->copyFromBuffer(staging, 0, plane_pitch, plane_pitch * height(),
-				MTL::Size::Make(width(), height(), 1),
+			encoder->copyFromBuffer(staging, 0, plane_pitch, static_cast<u64>(plane_pitch) * target_h,
+				MTL::Size::Make(target_w, target_h, 1),
 				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0),
 				get_depth_plane_option(target->value()->pixelFormat(), false));
 
@@ -488,8 +590,8 @@ namespace mtl
 				// The stencil plane is a separate aspect, so it is a second upload
 				// (T7).  Both are blits in this encoder, and Metal 4 tracks no
 				// hazards, so the depth copy is ordered before the stencil copy.
-				const u32 stencil_pitch = width();
-				MTL::Buffer* stencil_staging = m_resources->new_buffer(static_cast<u64>(stencil_pitch) * height(), MTL::StorageModeShared);
+				const u32 stencil_pitch = target_w;
+				MTL::Buffer* stencil_staging = m_resources->new_buffer(static_cast<u64>(stencil_pitch) * target_h, MTL::StorageModeShared);
 				if (!stencil_staging)
 				{
 					rsx_log.error("Metal 4: the stencil background staging buffer could not be created");
@@ -497,17 +599,17 @@ namespace mtl
 				}
 
 				decode_stencil_plane(stencil_staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
-					width(), height(), rsx_pitch, get_bpp(), stencil_pitch);
+					target_w, target_h, rsx_pitch, get_bpp(), stencil_pitch);
 
-				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				if (!emit_barrier(encoder, barrier_spec{MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false}))
 				{
 					rsx_log.error("Metal 4: the stencil background barrier was refused");
 					cmd.resources().defer_release(stencil_staging);
 					return;
 				}
 
-				encoder->copyFromBuffer(stencil_staging, 0, stencil_pitch, stencil_pitch * height(),
-					MTL::Size::Make(width(), height(), 1),
+				encoder->copyFromBuffer(stencil_staging, 0, stencil_pitch, static_cast<u64>(stencil_pitch) * target_h,
+					MTL::Size::Make(target_w, target_h, 1),
 					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0),
 					get_depth_plane_option(target->value()->pixelFormat(), true));
 
@@ -522,8 +624,8 @@ namespace mtl
 			// cannot take the guest bytes as-is (and the x1/o1 bit would move).  The decode
 			// is the inverse of the depth upload above: decode into a shared staging
 			// buffer, then fill the image from it.
-			const u32 plane_pitch = width() * 2;
-			MTL::Buffer* staging = m_resources->new_buffer(static_cast<u64>(plane_pitch) * height(), MTL::StorageModeShared);
+			const u32 plane_pitch = target_w * 2;
+			MTL::Buffer* staging = m_resources->new_buffer(static_cast<u64>(plane_pitch) * target_h, MTL::StorageModeShared);
 
 			if (!staging)
 			{
@@ -532,10 +634,10 @@ namespace mtl
 			}
 
 			decode_packed16_plane(staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
-				width(), height(), rsx_pitch, get_surface_color_format());
+				target_w, target_h, rsx_pitch, get_surface_color_format());
 
-			encoder->copyFromBuffer(staging, 0, plane_pitch, plane_pitch * height(),
-				MTL::Size::Make(width(), height(), 1),
+			encoder->copyFromBuffer(staging, 0, plane_pitch, static_cast<u64>(plane_pitch) * target_h,
+				MTL::Size::Make(target_w, target_h, 1),
 				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
 
 			cmd.resources().defer_release(staging);
@@ -549,8 +651,7 @@ namespace mtl
 				// The guest window is big-endian and holds the surface planes back
 				// to back.  A GPU swap in the staging buffer avoids dispatching on
 				// guest memory, and avoids touching the window from the CPU (T2).
-				const u32 guest_height = get_surface_height<rsx::surface_metrics::samples>();
-				const u64 staging_size = static_cast<u64>(rsx_pitch) * guest_height;
+				const u64 staging_size = static_cast<u64>(rsx_pitch) * target_h;
 				MTL::Buffer* staging = m_resources->new_buffer(staging_size, MTL::StorageModeShared);
 
 				if (!staging)
@@ -564,7 +665,7 @@ namespace mtl
 				cmd.swap_bytes(encoder, staging, 0, staging_size, element_size);
 
 				encoder->copyFromBuffer(staging, 0, rsx_pitch, staging_size,
-					MTL::Size::Make(width(), height(), 1),
+					MTL::Size::Make(target_w, target_h, 1),
 					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
 
 				cmd.resources().defer_release(staging);
@@ -573,8 +674,8 @@ namespace mtl
 			{
 				// The guest address is the offset into the guest window (HLD-02 §3.5).
 				encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr,
-					rsx_pitch, rsx_pitch * get_surface_height<rsx::surface_metrics::samples>(),
-					MTL::Size::Make(width(), height(), 1),
+					rsx_pitch, static_cast<u64>(rsx_pitch) * target_h,
+					MTL::Size::Make(target_w, target_h, 1),
 					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
 			}
 		}
@@ -602,58 +703,56 @@ namespace mtl
 		MTL_PROBE_LATCH(2, "surface/resolve");
 		MTL_PROBE_HISTOGRAM(2, "surface resolve samples", sample_count(), "sample count");
 
-		// A depth or stencil attachment resolves in its own pass, because the resolve
-		// only reads the multisampled image after the passes that wrote it have
-		// closed.  StoreAndMultisampleResolve keeps the multisampled image, so a later
-		// write needs no unresolve.
-		MTL4::RenderPassDescriptor* descriptor = MTL4::RenderPassDescriptor::alloc()->init();
-
+		// The guest layout is a sample mosaic, so the resolve scatters the
+		// multisampled image instead of averaging it (T3).
 		if (m_depth)
 		{
-			MTL::RenderPassDepthAttachmentDescriptor* depth = descriptor->depthAttachment();
-			depth->setTexture(value());
-			depth->setResolveTexture(resolve_surface->value());
-			depth->setLoadAction(MTL::LoadActionLoad);
-			depth->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+			const bool combined = rsx::is_depth_stencil_format(get_surface_depth_format());
+			texture* stencil = combined ? stencil_view() : nullptr;
 
-			if (rsx::is_depth_stencil_format(get_surface_depth_format()))
+			if (combined && !stencil)
 			{
-				MTL::RenderPassStencilAttachmentDescriptor* stencil = descriptor->stencilAttachment();
-				stencil->setTexture(value());
-				stencil->setResolveTexture(resolve_surface->value());
-				stencil->setLoadAction(MTL::LoadActionLoad);
-				stencil->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+				return;
 			}
+
+			cmd.resolve_depth_stencil(value(), resolve_surface->value(),
+				stencil ? stencil->value() : nullptr, samples_x, samples_y, combined);
 		}
 		else
 		{
-			MTL::RenderPassColorAttachmentDescriptor* attachment = descriptor->colorAttachments()->object(0);
-			attachment->setTexture(value());
-			attachment->setResolveTexture(resolve_surface->value());
-			attachment->setLoadAction(MTL::LoadActionLoad);
-			attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+			cmd.resolve_color(value(), resolve_surface->value());
 		}
 
-		MTL4::RenderCommandEncoder* encoder = cmd.open_pass(descriptor, MTL4::RenderEncoderOptionNone);
-		descriptor->release();
-
-		// A render-pass resolve is ordered for later queue work by the producer form
-		// of the barrier.  The consumer form leaves a window in which the resolved
-		// image is not yet visible, so the resolve pass declares the edge itself
-		// (REVIEW-FINDINGS.md, B6).
-		if (encoder)
-		{
-			emit_producer_barrier(encoder, { MTL::StageAll, MTL::StageAll });
-		}
-
-		msaa_flags = rsx::surface_state_flags::ready;
+		msaa_flags &= ~rsx::surface_state_flags::require_resolve;
 	}
 
-	void surface::unresolve(command_recorder&)
+	void surface::unresolve(command_recorder& cmd)
 	{
-		// Every resolve keeps the multisampled image (StoreAndMultisampleResolve), so
-		// there is nothing to copy back.  A 1-sample-to-N-sample blit is not legal
-		// anyway, because a Metal blit copy needs matching sample counts.
+		if (sample_count() == 1 || !resolve_surface || !(msaa_flags & rsx::surface_state_flags::require_unresolve))
+		{
+			return;
+		}
+
+		// A multisample image cannot be a compute destination, so the mosaic is
+		// scattered back with one invocation per sample (T3).
+		if (m_depth)
+		{
+			const bool combined = rsx::is_depth_stencil_format(get_surface_depth_format());
+			texture* stencil = combined ? resolve_stencil_view() : nullptr;
+
+			if (combined && !stencil)
+			{
+				return;
+			}
+
+			cmd.unresolve_depth_stencil(value(), resolve_surface->value(),
+				stencil ? stencil->value() : nullptr, sample_count(), samples_x, samples_y, combined);
+		}
+		else
+		{
+			cmd.unresolve_color(value(), resolve_surface->value(), sample_count(), samples_x, samples_y);
+		}
+
 		msaa_flags &= ~rsx::surface_state_flags::require_unresolve;
 	}
 
@@ -721,7 +820,11 @@ namespace mtl
 			return;
 		}
 
-		const surface_write_range range = clip_surface_write_range(src_offset, write_length, rsx_pitch, surface_height);
+		// The guest rows are the sample mosaic rows, not the pixel rows (T3).
+		const u32 guest_w = get_surface_width<rsx::surface_metrics::samples>();
+		const u32 guest_h = get_surface_height<rsx::surface_metrics::samples>();
+
+		const surface_write_range range = clip_surface_write_range(src_offset, write_length, rsx_pitch, guest_h);
 
 		if (!range.rows)
 		{
@@ -746,17 +849,13 @@ namespace mtl
 
 		const u32 host_width = static_cast<u32>(source->width());
 		const u32 host_height = static_cast<u32>(source->height());
-		const bool scaled = host_width != surface_width || host_height != surface_height;
+		const bool scaled = host_width != guest_w || host_height != guest_h;
 
 		// The host rows those guest rows read.  Unscaled, one guest row is one
 		// host row; scaled, a guest row samples the nearest host row.
-		const u32 host_first = scaled
-			? std::min<u32>(static_cast<u32>(static_cast<u64>(first_row) * host_height / surface_height), host_height - 1)
-			: static_cast<u32>(first_row);
+		const u32 host_first = scaled ? std::min<u32>(static_cast<u32>(static_cast<u64>(first_row) * host_height / guest_h), host_height - 1) : static_cast<u32>(first_row);
 		const u64 guest_end_row = first_row + rows;
-		const u32 host_last = scaled
-			? std::min<u32>(host_height, static_cast<u32>((guest_end_row * host_height + surface_height - 1) / surface_height))
-			: std::min<u32>(static_cast<u32>(guest_end_row), host_height);
+		const u32 host_last = scaled ? std::min<u32>(host_height, static_cast<u32>((guest_end_row * host_height + guest_h - 1) / guest_h)) : std::min<u32>(static_cast<u32>(guest_end_row), host_height);
 
 		if (host_first >= host_last)
 		{
@@ -787,9 +886,7 @@ namespace mtl
 		// The host row a guest row samples, relative to host_first.
 		const auto host_row_offset = [&](u32 guest_row)
 		{
-			return scaled
-				? static_cast<u32>(static_cast<u64>(guest_row) * host_height / surface_height) - host_first
-				: guest_row - static_cast<u32>(first_row);
+			return scaled ? static_cast<u32>(static_cast<u64>(guest_row) * host_height / guest_h) - host_first : guest_row - static_cast<u32>(first_row);
 		};
 
 		// Fetch the host rows of one plane into a shared buffer, at a row pitch a
@@ -827,7 +924,7 @@ namespace mtl
 
 			encoder->copyFromTexture(source, 0, 0,
 				MTL::Origin::Make(0, host_first, 0),
-				MTL::Size::Make(surface_width, rows, 1),
+				MTL::Size::Make(guest_w, rows, 1),
 				scratch, 0, rsx_pitch, rsx_pitch * rows);
 
 			// This texture copy and the buffer copy below share one encoder.
@@ -892,26 +989,26 @@ namespace mtl
 
 			cmd.flush_for_readback();
 
-			std::vector<u8> depth_row(static_cast<usz>(surface_width) * 4);
-			std::vector<u8> stencil_row(combined ? surface_width : 0);
+			std::vector<u8> depth_row(static_cast<usz>(guest_w) * 4);
+			std::vector<u8> stencil_row(combined ? guest_w : 0);
 
 			for (u32 y = 0; y < rows; ++y)
 			{
 				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
 				const u8* const plane_row = static_cast<const u8*>(plane->contents())
 					+ static_cast<usz>(source_row) * depth_pitch;
-				resample_plane_row(depth_row.data(), plane_row, surface_width, host_width, 4);
+				resample_plane_row(depth_row.data(), plane_row, guest_w, host_width, 4);
 
 				if (combined)
 				{
 					const u8* const stencil_plane_row = static_cast<const u8*>(stencil->contents())
 						+ static_cast<usz>(source_row) * stencil_pitch;
-					resample_plane_row(stencil_row.data(), stencil_plane_row, surface_width, host_width, 1);
+					resample_plane_row(stencil_row.data(), stencil_plane_row, guest_w, host_width, 1);
 				}
 
 				encode_depth_plane(staging.data() + static_cast<usz>(y) * rsx_pitch, depth_row.data(),
-					surface_width, 1, rsx_pitch, bpp, depth_format,
-					combined ? stencil_row.data() : nullptr, surface_width);
+					guest_w, 1, rsx_pitch, bpp, depth_format,
+					combined ? stencil_row.data() : nullptr, guest_w);
 			}
 
 			m_resources->defer_release(plane);
@@ -932,16 +1029,16 @@ namespace mtl
 
 			cmd.flush_for_readback();
 
-			std::vector<u8> packed_row(static_cast<usz>(surface_width) * 2);
+			std::vector<u8> packed_row(static_cast<usz>(guest_w) * 2);
 
 			for (u32 y = 0; y < rows; ++y)
 			{
 				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
 				resample_plane_row(packed_row.data(),
 					static_cast<const u8*>(plane->contents()) + static_cast<usz>(source_row) * packed_pitch,
-					surface_width, host_width, 2);
+					guest_w, host_width, 2);
 				encode_packed16_plane(staging.data() + static_cast<usz>(y) * rsx_pitch, packed_row.data(),
-					surface_width, 1, rsx_pitch, color_format);
+					guest_w, 1, rsx_pitch, color_format);
 			}
 
 			m_resources->defer_release(plane);
@@ -964,7 +1061,7 @@ namespace mtl
 				const u32 source_row = host_row_offset(static_cast<u32>(first_row) + y);
 				resample_plane_row(staging.data() + static_cast<usz>(y) * rsx_pitch,
 					static_cast<const u8*>(plane->contents()) + static_cast<usz>(source_row) * scaled_pitch,
-					surface_width, host_width, bpp);
+					guest_w, host_width, bpp);
 			}
 
 			m_resources->defer_release(plane);

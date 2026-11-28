@@ -313,16 +313,10 @@ namespace mtl
 			MTL::RenderPassColorAttachmentDescriptor* attachment = descriptor->colorAttachments()->object(index);
 			attachment->setTexture(m_color[index]->value());
 			attachment->setLoadAction(clear_color ? MTL::LoadActionClear : MTL::LoadActionLoad);
+			// The multisampled image is the pass attachment; its sample mosaic is
+			// filled by the explicit resolve pass, not by a hardware average on
+			// store (T3).
 			attachment->setStoreAction(MTL::StoreActionStore);
-
-			// A multisampled attachment resolves on store, so the resolved image is
-			// the samplable one (HLD-02 §2.2).  The multisampled image survives the
-			// resolve, so a later write needs no unresolve.
-			if (texture* resolve = m_color[index]->resolve_surface.get())
-			{
-				attachment->setResolveTexture(resolve->value());
-				attachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
-			}
 
 			// EXCISE-BEGIN sentinel-clear-color
 			if (sentinel_passes)

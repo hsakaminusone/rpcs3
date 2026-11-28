@@ -120,6 +120,12 @@ vec4 fogc;         // Fog coordinate register FOGC
 const vec4 vr_zero = vec4(0.);
 const vec4 vr_one = vec4(1.);
 
+// RSX texture_control_bits::ALPHAKILL (color_utils.hpp).  A fetch whose sampled
+// alpha is zero kills the fragment.  Metal executes a discarded fragment's
+// stores, so the fetch records the kill and main discards at the end (C18).
+#define RSX_ALPHAKILL_BIT 4
+bool interpreter_alpha_kill = false;
+
 bool shader_attribute(const in uint mask)
 {
 	return (shader_control & mask) != 0;
@@ -409,6 +415,12 @@ vec4 _texture(in vec4 coord, float bias)
 		break;
 	}
 
+	if (TEST_BIT(texture_parameters[ur0 + texture_base_index].flags, RSX_ALPHAKILL_BIT) &&
+		vr0.a < 0.000001)
+	{
+		interpreter_alpha_kill = true;
+	}
+
 	if (TEST_INST_BIT(0, 21))
 	{
 		vr0 = vr0 * 2. - 1.;
@@ -458,6 +470,12 @@ vec4 _textureLod(in vec4 coord, float lod)
 	default:
 		vr0 = vr_zero;
 		break;
+	}
+
+	if (TEST_BIT(texture_parameters[ur0 + texture_base_index].flags, RSX_ALPHAKILL_BIT) &&
+		vr0.a < 0.000001)
+	{
+		interpreter_alpha_kill = true;
 	}
 
 	if (TEST_INST_BIT(0, 21))
@@ -971,6 +989,13 @@ void main()
 		gl_SampleMask[0] = int(mtl_rasteriser_state.z);
 	}
 #endif
+
+	// The alpha kill the texture fetch recorded, deferred so a discarded fragment
+	// does not write its outputs first (C18).
+	if (interpreter_alpha_kill)
+	{
+		discard;
+	}
 }
 
 )"

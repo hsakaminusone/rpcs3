@@ -13,6 +13,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace mtl
@@ -101,7 +102,10 @@ namespace mtl
 
 		// True once a commit timed out or a feedback reported an error.  The core
 		// stops issuing draws and the UI can report the loss (L1, L3).
-		bool device_lost() const { return m_device_lost; }
+		bool device_lost() const
+		{
+			return m_device_lost;
+		}
 
 		// Wait for the slot to come back from the GPU, recycle its frame resources,
 		// then open the slot's command buffer (HLD-04 §3.2).  Returns false when the
@@ -144,8 +148,14 @@ namespace mtl
 		// boundary rather than immediately, so a release inside a pass does not
 		// split it (A2).  The next pass boundary commits; the caller also checks
 		// `label_commit_due` against its deadline for a parked FIFO.
-		void request_label_commit() { m_label_commit_due = true; }
-		bool label_commit_due() const { return m_label_commit_due; }
+		void request_label_commit()
+		{
+			m_label_commit_due = true;
+		}
+		bool label_commit_due() const
+		{
+			return m_label_commit_due;
+		}
 
 		// Submit the frame's recorded work so the pending label writes become
 		// visible, and leave the slot to be re-entered by the next command.  A guest
@@ -186,6 +196,31 @@ namespace mtl
 		// formats stage through a buffer, and depth ↔ colour is a compute
 		// conversion.  Returns false when no bit-preserving route exists (T6).
 		bool copy_typeless(command_recorder& cmd, const typeless_region& src, const typeless_region& dst);
+
+		// Resolve a multisampled colour image into the guest sample mosaic (T3).
+		// The mosaic is width*samples_x by height*samples_y; the compute kernel
+		// scatters each guest sample to its slot, so the guest bytes stay canonical.
+		void resolve_color(MTL::Texture* multisampled, MTL::Texture* mosaic);
+
+		// Resolve depth (and stencil, for a combined format) into the mosaic.  The
+		// multisampled stencil view is read as a uint texture; `combined` adds the
+		// stencil attachment and the [[stencil]] output.
+		void resolve_depth_stencil(MTL::Texture* multisampled, MTL::Texture* mosaic,
+			MTL::Texture* multisampled_stencil, u8 grid_x, u8 grid_y, bool combined);
+
+		// Scatter the mosaic back into the multisampled colour image.  A compute
+		// kernel cannot write a multisample texture, so this is a per-sample pass.
+		void unresolve_color(MTL::Texture* multisampled, MTL::Texture* mosaic,
+			u8 host_samples, u8 grid_x, u8 grid_y);
+
+		// Scatter the mosaic depth (and stencil) back into the multisampled image.
+		void unresolve_depth_stencil(MTL::Texture* multisampled, MTL::Texture* mosaic,
+			MTL::Texture* mosaic_stencil, u8 host_samples, u8 grid_x, u8 grid_y, bool combined);
+
+		// Average the mosaic over the guest grid into a pixel-sized image.  The
+		// present path uses it to keep the hardware-average look without a
+		// pixel-sized resolve target in the surface itself (T3).
+		void average_mosaic(MTL::Texture* mosaic, MTL::Texture* output);
 
 		// End the open encoder, if any.  Every encoder ends with a producer-scope
 		// ALL->ALL barrier: Metal 4 tracks no hazards, so the encoder boundary is
@@ -307,6 +342,33 @@ namespace mtl
 		// Build the depth ↔ z24s8 conversion kernels (T6).
 		void build_convert_pipelines();
 
+		// Build the MSAA resolve/unresolve kernels and pipelines (T3).
+		void build_resolve_pipelines();
+
+		// The resolve pass needs the guest grid, which is not derivable from the
+		// render target alone, so it travels in a small constant buffer.
+		struct resolve_params
+		{
+			u32 grid_x;
+			u32 grid_y;
+			u32 pad0;
+			u32 pad1;
+		};
+
+		enum class resolve_kind : u32
+		{
+			resolve_color,
+			present_average,
+			unresolve_color,
+			resolve_depth,
+			resolve_depth_stencil,
+			unresolve_depth,
+			unresolve_depth_stencil,
+		};
+
+		MTL::RenderPipelineState* resolve_render_pipeline(resolve_kind kind, MTL::PixelFormat format, u8 samples);
+		MTL::ComputePipelineState* resolve_compute_pipeline(resolve_kind kind);
+
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
 		MTL4::Compiler* m_compiler = nullptr;
@@ -317,6 +379,11 @@ namespace mtl
 		MTL::Library* m_convert_library = nullptr;
 		MTL::ComputePipelineState* m_depth_to_pack = nullptr;
 		MTL::ComputePipelineState* m_pack_to_depth = nullptr;
+		MTL::Library* m_resolve_library = nullptr;
+		MTL::ComputePipelineState* m_resolve_color_state = nullptr;
+		MTL::ComputePipelineState* m_present_average_state = nullptr;
+		MTL::DepthStencilState* m_resolve_depth_state = nullptr;
+		std::unordered_map<u64, MTL::RenderPipelineState*> m_resolve_pipelines;
 		std::array<frame_slot, frame_slot_count> m_slots{};
 		// Delivered commit feedback per slot.  The feedback thread writes it and the
 		// RSX thread reads it, so it is atomic.
@@ -397,7 +464,7 @@ namespace mtl
 		// instead of waiting for a completion that will never arrive (L1).
 		std::atomic<bool> m_device_lost{false};
 		// The device's own loss flag, so check_device_status() sees the same state.
-		std::atomic<bool>* m_lost = nullptr;		// Feedback blocks capture this owner, not `this` (L3).
+		std::atomic<bool>* m_lost = nullptr; // Feedback blocks capture this owner, not `this` (L3).
 		std::shared_ptr<feedback_owner> m_feedback;
 		MTL::Drawable* m_drawable = nullptr;
 	};
