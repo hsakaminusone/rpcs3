@@ -823,6 +823,19 @@ namespace fs
 			// For safety; see read()
 			while (auto r = ::write(m_fd, buffer, count))
 			{
+				if (r == ssize_t{-1})
+				{
+					if (const int error = errno; error == ENOSPC || error == EDQUOT || error == EFBIG || error == EROFS)
+					{
+						// The disk is full.  Keep the bytes we have and stop:
+						// the log writer detects a short write and shuts the
+						// file sink down, and a save writer gets a partial
+						// result instead of the emulator dying behind an
+						// ensure() that reads as a game crash.
+						break;
+					}
+				}
+
 				ensure(r > 0); // "file::write"
 				count -= r;
 				result += r;

@@ -7,6 +7,7 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/system_config.h"
 
+
 #define ENABLE_SURFACE_CACHE_DEBUG 0
 
 namespace rsx
@@ -182,6 +183,7 @@ namespace rsx
 			bool locked = false;
 		}
 		texture_cache_metadata;
+
 
 		render_target_descriptor() {}
 
@@ -785,6 +787,7 @@ namespace rsx
 
 		void on_swap_out()
 		{
+
 			if (is_locked())
 			{
 				on_unlock();
@@ -797,6 +800,7 @@ namespace rsx
 
 		void on_swap_in(bool lock)
 		{
+
 			if (!is_locked() && lock)
 			{
 				on_lock();
@@ -818,6 +822,7 @@ namespace rsx
 			rsx_pitch = ref->get_rsx_pitch();
 			last_use_tag = ref->last_use_tag;
 			raster_type = ref->raster_type;     // Can't actually cut up swizzled data
+
 		}
 
 		bool is_locked() const
@@ -827,6 +832,7 @@ namespace rsx
 
 		bool has_flushable_data() const
 		{
+
 			ensure(is_locked());
 			ensure(texture_cache_metadata.timestamp);
 			return (texture_cache_metadata.timestamp < last_use_tag);

@@ -1,0 +1,655 @@
+#include "MTLResourceManager.h"
+
+#ifdef RSX_ENABLE_METAL4
+
+#include "Emu/Memory/vm.h"
+#include "util/logs.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <vector>
+
+namespace mtl
+{
+	MTL::ResourceOptions storage_options(MTL::StorageMode storage)
+	{
+		return storage == MTL::StorageModePrivate ? MTL::ResourceStorageModePrivate : MTL::ResourceStorageModeShared;
+	}
+
+	void heap_pool::init(MTL::Device* device, MTL::StorageMode storage, u64 block_size)
+	{
+		m_device = device;
+		m_storage = storage;
+		m_block_size = block_size;
+	}
+
+	void heap_pool::shutdown()
+	{
+		garbage_collect();
+
+		for (const block& entry : m_blocks)
+		{
+			if (entry.heap)
+			{
+				entry.heap->release();
+			}
+		}
+
+		m_blocks.clear();
+		m_device = nullptr;
+	}
+
+	void heap_pool::garbage_collect()
+	{
+		if (m_empty_heaps.empty())
+		{
+			return;
+		}
+
+		// The removal reaches the set before the object goes, so the set never names
+		// a released heap (L7).
+		if (m_residency)
+		{
+			for (MTL::Heap* heap : m_empty_heaps)
+			{
+				m_residency->remove(heap);
+			}
+
+			m_residency->flush();
+		}
+
+		for (MTL::Heap* heap : m_empty_heaps)
+		{
+			heap->release();
+		}
+
+		m_empty_heaps.clear();
+	}
+
+	void heap_pool::set_residency(residency_manager* residency)
+	{
+		m_residency = residency;
+	}
+
+	MTL::Heap* heap_pool::create_heap(u64 size)
+	{
+		MTL::HeapDescriptor* descriptor = MTL::HeapDescriptor::alloc()->init();
+		descriptor->setType(MTL::HeapTypePlacement);
+		descriptor->setStorageMode(m_storage);
+		// The pass scheduler inserts the barriers, so a heap does not track hazards.
+		descriptor->setSize(size);
+
+		MTL::Heap* heap = m_device->newHeap(descriptor);
+		descriptor->release();
+
+		// A sub-allocation is reachable only through its heap, so the heap is the
+		// unit of residency.  It is released at shutdown, after the set is gone.
+		if (heap && m_residency)
+		{
+			m_residency->make_persistent(heap);
+		}
+
+		return heap;
+	}
+
+	MTL::Heap* heap_pool::allocate(u64 size, u64 alignment, u64& offset, u32& block_index)
+	{
+		// A request over half a block gets a dedicated heap (01 §3.2), so it cannot
+		// fragment the pool.
+		if (size * 2 > m_block_size)
+		{
+			MTL::Heap* dedicated = create_heap(size);
+			if (!dedicated)
+			{
+				return nullptr;
+			}
+
+			offset = 0;
+
+			// A retired dedicated heap leaves its entry behind so the block indices
+			// already handed out stay valid; the entry is reused here (L7).
+			for (usz index = 0; index < m_blocks.size(); ++index)
+			{
+				block& entry = m_blocks[index];
+
+				if (!entry.heap && entry.dedicated)
+				{
+					entry.heap = dedicated;
+					entry.free_spans.clear();
+					block_index = static_cast<u32>(index);
+					return dedicated;
+				}
+			}
+
+			block_index = static_cast<u32>(m_blocks.size());
+			m_blocks.push_back({ dedicated, {}, true });
+			return dedicated;
+		}
+
+		for (usz index = 0; index < m_blocks.size(); ++index)
+		{
+			block& entry = m_blocks[index];
+
+			for (auto span = entry.free_spans.begin(); span != entry.free_spans.end(); ++span)
+			{
+				const u64 aligned = (span->first + alignment - 1) & ~(alignment - 1);
+				const u64 padding = aligned - span->first;
+				if (span->second < padding + size)
+				{
+					continue;
+				}
+
+				const u64 remaining = span->second - padding - size;
+
+				if (padding > 0)
+				{
+					span->second = padding;
+					entry.free_spans.insert(span + 1, { aligned + size, remaining });
+				}
+				else if (remaining > 0)
+				{
+					span->first = aligned + size;
+					span->second = remaining;
+				}
+				else
+				{
+					entry.free_spans.erase(span);
+				}
+
+				offset = aligned;
+				block_index = static_cast<u32>(index);
+				return entry.heap;
+			}
+		}
+
+		MTL::Heap* heap = create_heap(m_block_size);
+		if (!heap)
+		{
+			return nullptr;
+		}
+
+		// Offset zero is aligned, and the request is at most half a block.
+		block_index = static_cast<u32>(m_blocks.size());
+		block& entry = m_blocks.emplace_back();
+		entry.heap = heap;
+		entry.free_spans.push_back({ size, m_block_size - size });
+
+		offset = 0;
+		return heap;
+	}
+
+	void heap_pool::free(u32 block_index, u64 offset, u64 size)
+	{
+		// The index is the one the allocation recorded.  A block is only dropped at
+		// shutdown, so it still names the same heap (P3).
+		if (static_cast<usz>(block_index) >= m_blocks.size())
+		{
+			return;
+		}
+
+		block& entry = m_blocks[block_index];
+
+		if (!entry.heap)
+		{
+			// The dedicated heap has already been retired.
+			return;
+		}
+
+		std::vector<std::pair<u64, u64>>& spans = entry.free_spans;
+		const auto at = std::lower_bound(spans.begin(), spans.end(), offset,
+			[](const std::pair<u64, u64>& span, u64 value) { return span.first < value; });
+
+		auto span = spans.insert(at, { offset, size });
+
+		// Join the next span, then the previous one.
+		if (span + 1 != spans.end() && span->first + span->second == (span + 1)->first)
+		{
+			span->second += (span + 1)->second;
+			spans.erase(span + 1);
+		}
+
+		if (span != spans.begin())
+		{
+			auto previous = span - 1;
+			if (previous->first + previous->second == span->first)
+			{
+				previous->second += span->second;
+				spans.erase(span);
+			}
+		}
+
+		// A dedicated heap holds one span, so a free that returns the whole heap
+		// leaves it empty.  It is retired once the ring reaches a safe point; the
+		// entry stays behind so the block indices already handed out keep naming
+		// their heap (L7).
+		if (entry.dedicated && spans.size() == 1 && spans[0].first == 0 && spans[0].second == entry.heap->size())
+		{
+			m_empty_heaps.push_back(entry.heap);
+			entry.heap = nullptr;
+			spans.clear();
+		}
+	}
+
+	namespace
+	{
+		MTL::ResidencySet* create_residency_set(MTL::Device* device, u32 capacity)
+		{
+			MTL::ResidencySetDescriptor* descriptor = MTL::ResidencySetDescriptor::alloc()->init();
+			descriptor->setInitialCapacity(capacity);
+
+			MTL::ResidencySet* set = device->newResidencySet(descriptor, nullptr);
+			descriptor->release();
+			return set;
+		}
+	}
+
+	void residency_manager::init(MTL::Device* device, MTL4::CommandQueue* queue)
+	{
+		m_device = device;
+		m_queue = queue;
+
+		// The set is attached before any heap exists, so no allocation can become
+		// reachable before the set that covers it.
+		m_persistent = create_residency_set(device, 256);
+		m_queue->addResidencySet(m_persistent);
+	}
+
+	void residency_manager::shutdown()
+	{
+		if (!m_queue)
+		{
+			return;
+		}
+
+		if (m_persistent)
+		{
+			// The set goes before its allocations are released (HLD-02 I7).
+			m_queue->removeResidencySet(m_persistent);
+			m_persistent->release();
+			m_persistent = nullptr;
+		}
+
+		m_published.clear();
+		m_dirty = false;
+		m_device = nullptr;
+		m_queue = nullptr;
+	}
+
+	void residency_manager::make_persistent(MTL::Allocation* allocation)
+	{
+		if (!allocation || !m_persistent)
+		{
+			return;
+		}
+
+		// The commit is deferred: a run of heap creations is one driver call, and the
+		// flush before the next command buffer commit publishes them all (P6).
+		m_persistent->addAllocation(allocation);
+		m_published.insert(allocation);
+		m_dirty = true;
+	}
+
+	void residency_manager::flush()
+	{
+		if (!m_persistent || (!m_dirty && m_removals.empty()))
+		{
+			return;
+		}
+
+		// Additions and removals travel in one commit, so a frame that releases a
+		// heap and allocates another costs one driver call (L7).
+		for (MTL::Allocation* allocation : m_removals)
+		{
+			m_persistent->removeAllocation(allocation);
+		}
+
+		m_removals.clear();
+		m_persistent->commit();
+		m_dirty = false;
+	}
+
+	void residency_manager::remove(MTL::Allocation* allocation)
+	{
+		if (!allocation || !m_persistent)
+		{
+			return;
+		}
+
+		// Only a published allocation is in the set, and a repeated removal must not
+		// touch the set again.
+		if (m_published.erase(allocation) == 0)
+		{
+			return;
+		}
+
+		// The set retains what it names, so the owner may be released before the
+		// removal reaches the set at the next flush (L7).
+		m_removals.push_back(allocation);
+		m_dirty = true;
+	}
+
+	bool residency_manager::is_persistent(MTL::Allocation* allocation) const
+	{
+		return m_published.count(allocation) != 0;
+	}
+
+	void resource_manager::init(const device& dev, u32 frame_count)
+	{
+		m_device = dev.dev();
+		m_guest = dev.window().buffer;
+		m_supports_bc = m_device->supportsBCTextureCompression();
+
+
+		m_shared.init(m_device, MTL::StorageModeShared, shared_block_size);
+		m_private.init(m_device, MTL::StorageModePrivate, private_block_size);
+		m_residency.init(m_device, dev.queue());
+		m_deferred.resize(frame_count);
+
+		// Every heap the pools create is published to the persistent set, so heap
+		// residency covers each sub-allocation for its whole life (HLD-02 §2.6 I5).
+		m_shared.set_residency(&m_residency);
+		m_private.set_residency(&m_residency);
+
+		// The guest window is an application-lifetime resource, and every buffer
+		// binding refers to it (HLD-02 I5).
+		m_residency.make_persistent(dev.window().buffer);
+	}
+
+	void resource_manager::shutdown()
+	{
+		garbage_collect();
+
+		// The label imports leave the residency set before their memory goes (L136).
+		for (label_page& page : m_label_pages)
+		{
+			m_residency.remove(page.buffer);
+			page.buffer->release();
+		}
+
+		m_label_pages.clear();
+		m_residency.shutdown();
+		m_shared.shutdown();
+		m_private.shutdown();
+		m_device = nullptr;
+	}
+
+	MTL::Buffer* resource_manager::new_buffer(u64 length, MTL::StorageMode storage)
+	{
+		const MTL::ResourceOptions options = storage_options(storage);
+
+		// The answer depends only on the length and the storage options, and the
+		// pool asks for the same handful of sizes repeatedly (rings, staging, the
+		// per-frame blocks), so the driver call is memoised (P4).
+		const auto memo_key = std::pair<u64, u64>(length, static_cast<u64>(options));
+		MTL::SizeAndAlign required{};
+		const auto memo = m_buffer_size_align.find(memo_key);
+
+		if (memo != m_buffer_size_align.end())
+		{
+			required = memo->second;
+		}
+		else
+		{
+			required = m_device->heapBufferSizeAndAlign(length, options);
+
+			if (m_buffer_size_align.size() < 1024)
+			{
+				m_buffer_size_align.emplace(memo_key, required);
+			}
+		}
+
+		heap_pool& pool = (storage == MTL::StorageModePrivate) ? m_private : m_shared;
+
+		u64 offset = 0;
+		u32 block = 0;
+		MTL::Heap* heap = pool.allocate(required.size, required.align, offset, block);
+		if (!heap)
+		{
+			rsx_log.error("Metal 4: heap growth failed for a %llu byte buffer", length);
+			return nullptr;
+		}
+
+		MTL::Buffer* buffer = heap->newBuffer(length, options, offset);
+		if (!buffer)
+		{
+			pool.free(block, offset, required.size);
+			rsx_log.error("Metal 4: buffer allocation failed for %llu bytes", length);
+			return nullptr;
+		}
+
+		track(buffer, pool, block, offset, required.size);
+#ifndef NDEBUG
+		// The invariant is structural, so it belongs to a build that can assert it
+		// rather than to the allocation path (P7).
+		check_residency(heap);
+#endif
+
+		return buffer;
+	}
+
+	MTL::Buffer* resource_manager::label_buffer(u32 address, u32& offset)
+	{
+		// The host page is the unit of a guest mapping, so it is the unit of the
+		// import.  A page re-mapped after this call would keep the GPU on the old
+		// physical page, which is why the import is made here, after the page exists,
+		// rather than with the application-lifetime window (L136).
+		constexpr u32 page_size = 0x10000;
+		const u32 base = address & ~(page_size - 1);
+
+		// A guest address is 32 bits, so its page always lies inside the imported
+		// window; the invariant is stated for the reader, not enforced at run time.
+		ensure(static_cast<u64>(base) + page_size <= guest_address_space);
+
+		for (const label_page& page : m_label_pages)
+		{
+			if (page.base == base)
+			{
+				offset = address - base;
+				return page.buffer;
+			}
+		}
+
+		MTL::Buffer* buffer = m_device->newBuffer(vm::g_sudo_addr + base, page_size,
+			MTL::ResourceStorageModeShared, nullptr);
+		if (!buffer)
+		{
+			rsx_log.error("Metal 4: the label import at 0x%x could not be created", base);
+			return nullptr;
+		}
+
+		m_residency.make_persistent(buffer);
+		m_label_pages.push_back({ base, buffer });
+		offset = address - base;
+		return buffer;
+	}
+
+	u8 resource_manager::supported_sample_count(u8 count) const
+	{
+		// Apple lists 4 samples as universal and 2 as "some devices", so a request
+		// the device rejects folds up to 4 and keeps the antialiasing.
+		if (count > 1 && !m_device->supportsTextureSampleCount(count))
+		{
+			return 4;
+		}
+
+		return count;
+	}
+
+	MTL::Texture* resource_manager::new_texture(MTL::TextureDescriptor* descriptor, MTL::StorageMode storage)
+	{
+		descriptor->setStorageMode(storage);
+
+		const MTL::SizeAndAlign required = m_device->heapTextureSizeAndAlign(descriptor);
+
+		heap_pool& pool = (storage == MTL::StorageModePrivate) ? m_private : m_shared;
+
+		u64 offset = 0;
+		u32 block = 0;
+		MTL::Heap* heap = pool.allocate(required.size, required.align, offset, block);
+		if (!heap)
+		{
+			rsx_log.error("Metal 4: heap growth failed for a texture");
+			return nullptr;
+		}
+
+		MTL::Texture* texture = heap->newTexture(descriptor, offset);
+		if (!texture)
+		{
+			pool.free(block, offset, required.size);
+			rsx_log.error("Metal 4: texture allocation failed");
+			return nullptr;
+		}
+
+		track(texture, pool, block, offset, required.size);
+#ifndef NDEBUG
+		check_residency(heap);
+#endif
+		return texture;
+	}
+
+	void resource_manager::make_persistent(MTL::Allocation* allocation)
+	{
+		m_residency.make_persistent(allocation);
+	}
+
+	void resource_manager::flush_residency()
+	{
+		m_residency.flush();
+	}
+
+	void resource_manager::on_frame_begin(u32 index)
+	{
+		m_frame_slot = index % frame_slot_count;
+		m_slot_serial[m_frame_slot] = ++m_frame_serial;
+	}
+
+	bool resource_manager::is_frame_complete(u64 serial, u32 slot) const
+	{
+		if (slot >= frame_slot_count)
+		{
+			return false;
+		}
+
+		// A zero serial means the surface was invalidated before the frame clock
+		// existed (or outside a frame), so there is nothing to wait for.
+		return serial == 0 || m_slot_completed[slot] >= serial;
+	}
+
+	void resource_manager::on_commit_complete(u32 index)
+	{
+		index %= frame_slot_count;
+		// begin_frame calls this before on_frame_begin, so m_slot_serial still
+		// names the frame the slot has just finished.
+		m_slot_completed[index] = m_slot_serial[index];
+
+		if (m_deferred.empty())
+		{
+			return;
+		}
+
+		// The slot that just went idle is the one the frame that just completed
+		// used, so the objects deferred during that frame are safe to release
+		// (HLD-02 I7).  The frames on later slots may still be in flight.
+		release_list(m_deferred[index]);
+	}
+
+	void resource_manager::quarantine(u32 index)
+	{
+		if (m_deferred.empty())
+		{
+			return;
+		}
+
+		std::vector<MTL::Allocation*>& list = m_deferred[index];
+
+		if (list.empty())
+		{
+			return;
+		}
+
+		m_quarantine.insert(m_quarantine.end(), list.begin(), list.end());
+		list.clear();
+	}
+
+	void resource_manager::drain_quarantine()
+	{
+		release_list(m_quarantine);
+	}
+
+	void resource_manager::check_residency(MTL::Heap* heap)
+	{
+		if (m_residency.is_persistent(heap))
+		{
+			return;
+		}
+
+		// A sub-allocation of an unpublished heap reads zeros in silence: Metal
+		// raises no validation error and no GPU fault (HLD-02 F1).  Report it here,
+		// where the cause is, rather than at the draw that shows the symptom.
+		static bool reported = false;
+		if (!reported)
+		{
+			reported = true;
+			rsx_log.error("Metal 4: heap %p is not in the persistent residency set, so its allocations read zeros",
+				static_cast<const void*>(heap));
+		}
+	}
+
+	void resource_manager::track(MTL::Allocation* allocation, heap_pool& pool, u32 block, u64 offset, u64 size)
+	{
+		m_spans.emplace(allocation, allocation_span{ &pool, block, offset, size });
+	}
+
+	void resource_manager::defer_release(MTL::Allocation* allocation)
+	{
+		if (!allocation)
+		{
+			return;
+		}
+
+		if (m_deferred.empty())
+		{
+			allocation->release();
+			return;
+		}
+
+		m_deferred[m_frame_slot % static_cast<u32>(m_deferred.size())].push_back(allocation);
+	}
+
+	void resource_manager::garbage_collect()
+	{
+		for (std::vector<MTL::Allocation*>& list : m_deferred)
+		{
+			release_list(list);
+		}
+
+		// A dedicated heap whose only span was freed above is retired here, at a
+		// point where nothing in flight can still reach it (L7).
+		m_shared.garbage_collect();
+		m_private.garbage_collect();
+	}
+
+	void resource_manager::release_list(std::vector<MTL::Allocation*>& list)
+	{
+		for (MTL::Allocation* allocation : list)
+		{
+			if (const auto found = m_spans.find(allocation); found != m_spans.end())
+			{
+				const allocation_span& span = found->second;
+				span.pool->free(span.block, span.offset, span.size);
+				m_spans.erase(found);
+			}
+
+			// The object is about to be released, so the set must stop naming it;
+			// otherwise a later allocation that reuses its span is covered by a stale
+			// entry (DEVIATIONS-SYNC.md, SY5).
+			m_residency.remove(allocation);
+			allocation->release();
+		}
+
+		list.clear();
+	}
+}
+
+#endif // RSX_ENABLE_METAL4

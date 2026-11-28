@@ -74,8 +74,11 @@ namespace rsx
 				// Bit cast - optimize to mem copy
 
 				const u32 data_length = count * 4;
+				// The blit writes at an element offset inside the destination;
+				// invalidation must cover the bytes actually written.
+				const u32 write_offset = dst_offset + (x * 4) + (out_pitch * y);
 
-				const auto dst_address = get_address(ctx, dst_offset + (x * 4) + (out_pitch * y), dst_dma, data_length);
+				const auto dst_address = get_address(ctx, write_offset, dst_dma, data_length);
 
 				if (!dst_address)
 				{
@@ -88,11 +91,14 @@ namespace rsx
 
 				rsx::reservation_lock<true> rsx_lock(dst_address, data_length);
 
+
 				if (RSX(ctx)->fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) [[unlikely]]
 				{
 					// Move last 32 bits
 					reinterpret_cast<u32*>(dst)[0] = reinterpret_cast<const u32*>(src)[count - 1];
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 4);
+
+
+					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 4, "nv308a");
 					return;
 				}
 
@@ -107,14 +113,16 @@ namespace rsx
 					std::memcpy(dst, src, data_length);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 4);
+
+				RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, count * 4, "nv308a");
 				break;
 			}
 			case blit_engine::transfer_destination_format::r5g6b5:
 			{
 				const auto data_length = count * 2;
+				const u32 write_offset = dst_offset + (x * 2) + (y * out_pitch);
 
-				const auto dst_address = get_address(ctx, dst_offset + (x * 2) + (y * out_pitch), dst_dma, data_length);
+				const auto dst_address = get_address(ctx, write_offset, dst_dma, data_length);
 				const auto dst = vm::_ptr<u16>(dst_address);
 				const auto src = utils::bless<const be_t<u32>>(fifo_span.data());
 
@@ -125,6 +133,7 @@ namespace rsx
 				}
 
 				rsx::reservation_lock<true> rsx_lock(dst_address, data_length);
+
 
 				auto convert = [](u32 input) -> u16
 				{
@@ -143,7 +152,7 @@ namespace rsx
 				{
 					// Move last 16 bits
 					dst[0] = convert(src[count - 1]);
-					RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, 2);
+					RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, 2, "nv308a-r5g6b5");
 					break;
 				}
 
@@ -152,7 +161,8 @@ namespace rsx
 					dst[i] = convert(src[i]);
 				}
 
-				RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, count * 2);
+
+				RSX(ctx)->invalidate_fragment_program(dst_dma, write_offset, count * 2, "nv308a-r5g6b5");
 				break;
 			}
 			default:

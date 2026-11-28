@@ -660,7 +660,8 @@ namespace rsx
 			texture_dimension_extended extended_dimension,
 			const texture_channel_remap_t& decoded_remap,
 			bool surface_is_rop_target,
-			bool force_convert)
+			bool force_convert,
+			bool force_feedback_copy = false)
 		{
 			using deferred_subresource_type = typename sampled_image_descriptor::deferred_subresource_type;
 
@@ -747,7 +748,7 @@ namespace rsx
 					}
 				}
 
-				if (surface_is_rop_target && texture_cache_helpers::force_strict_fbo_sampling(texptr->samples()))
+				if (surface_is_rop_target && (force_feedback_copy || texture_cache_helpers::force_strict_fbo_sampling(texptr->samples())))
 				{
 					// Framebuffer feedback avoidance. For MSAA, we do not need to make copies; just use the resolve target
 					if (texptr->samples() == 1)
@@ -770,7 +771,7 @@ namespace rsx
 					const coord3u src_rect = { scaled_offset.x, scaled_offset.y, 0, attr2.width, attr2.height, 1 };
 
 					texptr->memory_barrier(cmd, rsx::surface_access::transfer_read);
-					return
+					sampled_image_descriptor result =
 					{
 						deferred_subresource_type::create_copy(
 							texptr->get_surface(rsx::surface_access::transfer_read),
@@ -779,6 +780,12 @@ namespace rsx
 						format_class, scale, extended_dimension,
 						texptr->base_addr
 					};
+
+					// The copy exists because the sample reads the bound target; mark
+					// it so the backend's witness can tell a feedback copy from an
+					// ordinary deferred copy.
+					result.is_feedback_loop_read = surface_is_rop_target;
+					return result;
 				}
 
 				texptr->memory_barrier(cmd, access_type);
@@ -794,6 +801,8 @@ namespace rsx
 					surface_is_rop_target,
 					viewed_surface->samples()
 				};
+
+				result.is_feedback_loop_read = surface_is_rop_target;
 
 				if (requires_clip)
 				{

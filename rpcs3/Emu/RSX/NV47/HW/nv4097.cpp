@@ -301,6 +301,7 @@ namespace rsx
 			const auto current = REGS(ctx)->decode<NV4097_SET_SURFACE_FORMAT>(arg);
 			const auto previous = REGS(ctx)->decode<NV4097_SET_SURFACE_FORMAT>(REGS(ctx)->latch);
 
+
 			// Check for different ROP emulation
 			if (current.is_integer_color_format() != previous.is_integer_color_format())
 			{

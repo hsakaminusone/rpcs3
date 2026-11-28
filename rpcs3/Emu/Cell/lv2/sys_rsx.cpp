@@ -12,6 +12,8 @@
 #include "Emu/RSX/Overlays/overlay_cursor.h"
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/RSXThread.h"
+
+
 #include "util/asm.hpp"
 #include "sys_event.h"
 #include "sys_vm.h"
@@ -179,6 +181,7 @@ static void _sys_rsx_dmactl(rsx::thread* render, rsx::context* ctx, u64 get_put)
 		// Schedule FIFO interrupt to deal with this immediately
 		render->eng_interrupt_mask |= rsx::dma_control_interrupt;
 	}
+
 
 	if (auto cpu = cpu_thread::get_current())
 	{

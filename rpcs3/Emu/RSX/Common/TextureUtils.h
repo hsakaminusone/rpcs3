@@ -222,6 +222,13 @@ namespace rsx
 		rsx::texture_dimension_extended image_type = texture_dimension_extended::texture_dimension_2d;
 		rsx::format_class format_class = RSX_FORMAT_CLASS_UNDEFINED;
 		bool is_cyclic_reference = false;
+		// True when this sample reads the image the draw is currently rendering to.
+		// The backend decides how to legalise it: GL binds it live behind a texture
+		// barrier, Vulkan uses the attachment feedback-loop layout, and Metal copies
+		// it because it has neither primitive.  Kept separate from
+		// `is_cyclic_reference` because the copy path is not a cyclic reference and
+		// must not take the barrier.
+		bool is_feedback_loop_read = false;
 		u8 samples = 1;
 		u32 ref_address = 0;
 		u64 surface_cache_tag = 0;

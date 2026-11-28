@@ -317,6 +317,7 @@ namespace vm
 			return _ref<u16>(addr);
 		}
 
+
 #ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
 		template <typename T, typename U = T>
 		inline void write(u32 addr, U value, ppu_thread* ppu = nullptr)
@@ -331,6 +332,7 @@ namespace vm
 			{
 				*_ptr<dest_t>(addr) = value;
 			}
+
 
 #ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
 			if (ppu && g_breakpoint_handler.HasBreakpoint(addr, breakpoint_types::bp_write))

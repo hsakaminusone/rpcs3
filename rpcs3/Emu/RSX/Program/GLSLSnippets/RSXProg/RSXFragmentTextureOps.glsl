@@ -82,19 +82,19 @@ vec4 _decode_depth_texel(const in vec4 texel, const in uint flags, const in uint
 #define COORD_PROJ3(index, coord4) COORD_SCALE3(index, coord4.xyz / coord4.w)
 
 #ifdef _ENABLE_TEX1D
-#define TEX1D(index, coord1) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE1(index, coord1))), TEX_FLAGS(index))
-#define TEX1D_BIAS(index, coord1, bias) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE1(index, coord1), bias)), TEX_FLAGS(index))
-#define TEX1D_LOD(index, coord1, lod) _process_texel(_DEPTH_DECODE(index, textureLod(TEX_NAME(index), COORD_SCALE1(index, coord1), lod)), TEX_FLAGS(index))
-#define TEX1D_GRAD(index, coord1, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, textureGrad(TEX_NAME(index), COORD_SCALE1(index, coord1), dpdx, dpdy)), TEX_FLAGS(index))
-#define TEX1D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_PROJ1(index, coord4.xw))), TEX_FLAGS(index))
+#define TEX1D(index, coord1) _process_texel(_DEPTH_DECODE(index, _BORDER_1(index, COORD_SCALE1(index, coord1), texture(TEX_NAME(index), COORD_SCALE1(index, coord1)))), TEX_FLAGS(index))
+#define TEX1D_BIAS(index, coord1, bias) _process_texel(_DEPTH_DECODE(index, _BORDER_1(index, COORD_SCALE1(index, coord1), texture(TEX_NAME(index), COORD_SCALE1(index, coord1), bias))), TEX_FLAGS(index))
+#define TEX1D_LOD(index, coord1, lod) _process_texel(_DEPTH_DECODE(index, _BORDER_1(index, COORD_SCALE1(index, coord1), textureLod(TEX_NAME(index), COORD_SCALE1(index, coord1), lod))), TEX_FLAGS(index))
+#define TEX1D_GRAD(index, coord1, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, _BORDER_1(index, COORD_SCALE1(index, coord1), textureGrad(TEX_NAME(index), COORD_SCALE1(index, coord1), dpdx, dpdy))), TEX_FLAGS(index))
+#define TEX1D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, _BORDER_1(index, COORD_PROJ1(index, coord4.xw), texture(TEX_NAME(index), COORD_PROJ1(index, coord4.xw)))), TEX_FLAGS(index))
 #endif
 
 #ifdef _ENABLE_TEX2D
-#define TEX2D(index, coord2) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE2(index, coord2))), TEX_FLAGS(index))
-#define TEX2D_BIAS(index, coord2, bias) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE2(index, coord2), bias)), TEX_FLAGS(index))
-#define TEX2D_LOD(index, coord2, lod) _process_texel(_DEPTH_DECODE(index, textureLod(TEX_NAME(index), COORD_SCALE2(index, coord2), lod)), TEX_FLAGS(index))
-#define TEX2D_GRAD(index, coord2, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, textureGrad(TEX_NAME(index), COORD_SCALE2(index, coord2), dpdx, dpdy)), TEX_FLAGS(index))
-#define TEX2D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_PROJ2(index, coord4.xyw))), TEX_FLAGS(index))
+#define TEX2D(index, coord2) _process_texel(_DEPTH_DECODE(index, _BORDER_2(index, COORD_SCALE2(index, coord2), texture(TEX_NAME(index), COORD_SCALE2(index, coord2)))), TEX_FLAGS(index))
+#define TEX2D_BIAS(index, coord2, bias) _process_texel(_DEPTH_DECODE(index, _BORDER_2(index, COORD_SCALE2(index, coord2), texture(TEX_NAME(index), COORD_SCALE2(index, coord2), bias))), TEX_FLAGS(index))
+#define TEX2D_LOD(index, coord2, lod) _process_texel(_DEPTH_DECODE(index, _BORDER_2(index, COORD_SCALE2(index, coord2), textureLod(TEX_NAME(index), COORD_SCALE2(index, coord2), lod))), TEX_FLAGS(index))
+#define TEX2D_GRAD(index, coord2, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, _BORDER_2(index, COORD_SCALE2(index, coord2), textureGrad(TEX_NAME(index), COORD_SCALE2(index, coord2), dpdx, dpdy))), TEX_FLAGS(index))
+#define TEX2D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, _BORDER_2(index, COORD_PROJ2(index, coord4.xyw), texture(TEX_NAME(index), COORD_PROJ2(index, coord4.xyw)))), TEX_FLAGS(index))
 #endif
 
 #ifdef _ENABLE_SHADOW
@@ -115,11 +115,11 @@ vec4 _decode_depth_texel(const in vec4 texel, const in uint flags, const in uint
 #endif
 
 #ifdef _ENABLE_TEX3D
-#define TEX3D(index, coord3) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE3(index, coord3))), TEX_FLAGS(index))
-#define TEX3D_BIAS(index, coord3, bias) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_SCALE3(index, coord3), bias)), TEX_FLAGS(index))
-#define TEX3D_LOD(index, coord3, lod) _process_texel(_DEPTH_DECODE(index, textureLod(TEX_NAME(index), COORD_SCALE3(index, coord3), lod)), TEX_FLAGS(index))
-#define TEX3D_GRAD(index, coord3, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, textureGrad(TEX_NAME(index), COORD_SCALE3(index, coord3), dpdx, dpdy)), TEX_FLAGS(index))
-#define TEX3D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, texture(TEX_NAME(index), COORD_PROJ3(index, coord4).xyz)), TEX_FLAGS(index))
+#define TEX3D(index, coord3) _process_texel(_DEPTH_DECODE(index, _BORDER_3(index, COORD_SCALE3(index, coord3), texture(TEX_NAME(index), COORD_SCALE3(index, coord3)))), TEX_FLAGS(index))
+#define TEX3D_BIAS(index, coord3, bias) _process_texel(_DEPTH_DECODE(index, _BORDER_3(index, COORD_SCALE3(index, coord3), texture(TEX_NAME(index), COORD_SCALE3(index, coord3), bias))), TEX_FLAGS(index))
+#define TEX3D_LOD(index, coord3, lod) _process_texel(_DEPTH_DECODE(index, _BORDER_3(index, COORD_SCALE3(index, coord3), textureLod(TEX_NAME(index), COORD_SCALE3(index, coord3), lod))), TEX_FLAGS(index))
+#define TEX3D_GRAD(index, coord3, dpdx, dpdy) _process_texel(_DEPTH_DECODE(index, _BORDER_3(index, COORD_SCALE3(index, coord3), textureGrad(TEX_NAME(index), COORD_SCALE3(index, coord3), dpdx, dpdy))), TEX_FLAGS(index))
+#define TEX3D_PROJ(index, coord4) _process_texel(_DEPTH_DECODE(index, _BORDER_3(index, COORD_PROJ3(index, coord4).xyz, texture(TEX_NAME(index), COORD_PROJ3(index, coord4).xyz))), TEX_FLAGS(index))
 #endif
 
 #ifdef _ENABLE_TEX1D
@@ -170,6 +170,30 @@ vec3 _texcoord_xform(const in vec3 coord, const in sampler_info params)
 	return result;
 }
 #endif
+
+// A border colour Metal has no sampler preset for travels in the clamp fields,
+// which the border test does not use, and is returned for a coordinate outside
+// the unit square (T11).  The sampler clamps to the edge, so the fetch itself is
+// valid and only the result is replaced.
+vec4 _border_color(const in sampler_info params)
+{
+	return vec4(params.clamp_min_x, params.clamp_min_y, params.clamp_max_x, params.clamp_max_y);
+}
+
+bool _border_test(const in sampler_info params, const in uint bit, const in float coord)
+{
+	return _test_bit(params.flags, bit) && (coord < 0.0 || coord > 1.0);
+}
+
+#define _BORDER_1(index, coord1, texel) \
+	(_border_test(TEX_PARAM(index), BORDER_S_BIT, coord1) ? _border_color(TEX_PARAM(index)) : (texel))
+#define _BORDER_2(index, coord2, texel) \
+	((_border_test(TEX_PARAM(index), BORDER_S_BIT, coord2.x) || \
+		_border_test(TEX_PARAM(index), BORDER_T_BIT, coord2.y)) ? _border_color(TEX_PARAM(index)) : (texel))
+#define _BORDER_3(index, coord3, texel) \
+	((_border_test(TEX_PARAM(index), BORDER_S_BIT, coord3.x) || \
+		_border_test(TEX_PARAM(index), BORDER_T_BIT, coord3.y) || \
+		_border_test(TEX_PARAM(index), BORDER_R_BIT, coord3.z)) ? _border_color(TEX_PARAM(index)) : (texel))
 
 #if defined(_ENABLE_SHADOW) && defined(_EMULATED_TEXSHADOW)
 #ifdef _ENABLE_TEX2D

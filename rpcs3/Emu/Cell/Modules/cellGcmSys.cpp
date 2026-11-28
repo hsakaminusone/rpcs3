@@ -8,6 +8,7 @@
 #include "Emu/Cell/lv2/sys_process.h"
 #include "Emu/RSX/RSXThread.h"
 
+
 #include "cellGcmSys.h"
 #include "sysPrxForUser.h"
 
@@ -38,6 +39,7 @@ namespace rsx
 {
 	u32 make_command(vm::bptr<u32>& dst, u32 start_register, std::initializer_list<any32> values)
 	{
+
 		*dst++ = start_register << 2 | static_cast<u32>(values.size()) << 18;
 
 		for (const any32& cmd : values)
@@ -45,12 +47,15 @@ namespace rsx
 			*dst++ = cmd.as<u32>();
 		}
 
+
 		return u32{sizeof(u32)} * (static_cast<u32>(values.size()) + 1);
 	}
 
 	u32 make_jump(vm::bptr<u32>& dst, u32 offset)
 	{
+
 		*dst++ = RSX_METHOD_OLD_JUMP_CMD | offset;
+
 
 		return sizeof(u32);
 	}
@@ -502,6 +507,8 @@ error_code cellGcmInitInternal(ppu_thread& ppu, vm::pptr<CellGcmContextData> con
 
 	gcm_cfg.current_config.ioSize = ioSize;
 	gcm_cfg.current_config.ioAddress = ioAddress;
+
+
 	gcm_cfg.current_config.localSize =  gcm_cfg.local_size;
 	gcm_cfg.current_config.localAddress =  gcm_cfg.local_addr;
 	gcm_cfg.current_config.memoryFrequency = 650000000;
@@ -1149,6 +1156,8 @@ error_code gcmMapEaIoAddress(ppu_thread& ppu, u32 ea, u32 io, u32 size, bool is_
 	}
 
 	gcm_cfg.IoMapTable[ea] = size;
+
+
 	return CELL_OK;
 }
 
@@ -1582,10 +1591,12 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 	// Flush command buffer (ie allow RSX to read up to context->current)
 	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
 
+
 	std::pair<u32, u32> newCommandBuffer = getNextCommandBufferBeginEnd(context->current.addr());
 	u32 offset = getOffsetFromAddress(newCommandBuffer.first);
 	// Write jump instruction
 	*context->current = RSX_METHOD_OLD_JUMP_CMD | offset;
+
 	// Update current command buffer
 	context->begin.set(newCommandBuffer.first);
 	context->current.set(newCommandBuffer.first);

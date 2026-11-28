@@ -408,6 +408,11 @@ namespace glsl
 			enabled_options.push_back("_ENABLE_PROGRAMMABLE_BLENDING");
 		}
 
+		if (props.ROP_logic_op)
+		{
+			enabled_options.push_back("_ENABLE_LOGIC_OP");
+		}
+
 		if (props.require_fog_read)
 		{
 			program_common::define_glsl_constants<rsx::fog_mode>(OS,
@@ -466,6 +471,9 @@ namespace glsl
 				{ "FILTERED_MIN_BIT", rsx::texture_control_bits::FILTERED_MIN },
 				{ "INT_COORDS_BIT  ", rsx::texture_control_bits::UNNORMALIZED_COORDS },
 				{ "CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT },
+				{ "BORDER_S_BIT", rsx::texture_control_bits::BORDER_S },
+				{ "BORDER_T_BIT", rsx::texture_control_bits::BORDER_T },
+				{ "BORDER_R_BIT", rsx::texture_control_bits::BORDER_R },
 
 				{ "FORMAT_FEATURE_SIGNED_BIT", rsx::texture_control_bits::FF_SIGNED_BIT },
 				{ "FORMAT_FEATURE_GAMMA_BIT",  rsx::texture_control_bits::FF_GAMMA_BIT },

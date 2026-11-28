@@ -587,7 +587,11 @@ namespace rsx
 		// The ZCULL unit belongs to the thread. The renderer only provides the host queries.
 		zcull_ctrl = std::make_unique<reports::ZCULL_control>();
 
-		if (g_cfg.video.ui.render_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
+		// The in-game interface is an output pass of the renderer, so it needs the
+		// renderer's overlay tier.  Vulkan, OpenGL and Metal carry one
+		// (MTLPresent.cpp:frame_output).
+		if (g_cfg.video.ui.render_native_interface && (g_cfg.video.renderer == video_renderer::opengl ||
+			g_cfg.video.renderer == video_renderer::vulkan || g_cfg.video.renderer == video_renderer::metal))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
 
@@ -755,6 +759,12 @@ namespace rsx
 			g_fxo->get<rsx::dma_manager>().init();
 			m_renderer->on_init();
 			create_backend_resources();
+
+			// The logical id is final only after on_init has created the device.
+			// A backend that opens its device there would otherwise keep the
+			// pre-init "NULL" id, and the display engine would replace it again
+			// on the first flip, once per frame.
+			m_renderer_info = m_renderer->logical_id();
 
 			if (m_ctx->in_begin_end)
 			{
@@ -1022,9 +1032,11 @@ namespace rsx
 			m_renderer = std::move(renderer);
 		}
 
-		m_renderer_info = m_renderer->logical_id();
 		m_renderer->on_init();
 		create_backend_resources();
+
+		// See on_task: the id is final only after the device exists.
+		m_renderer_info = m_renderer->logical_id();
 
 		// The new backend has seen nothing yet
 		for_each_context([](context* ctx)
@@ -1383,9 +1395,9 @@ namespace rsx
 		m_ctx->core.graph().on_framebuffer_options_changed(opt);
 	}
 
-	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
+	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size, const char* writer)
 	{
-		return m_ctx->core.graph().invalidate_fragment_program(dst_dma, dst_offset, size);
+		return m_ctx->core.graph().invalidate_fragment_program(dst_dma, dst_offset, size, writer);
 	}
 
 	void thread::reset()
@@ -1745,11 +1757,15 @@ namespace rsx
 		return pair;
 	}
 
+	void invalid_method(context*, u32, u32);
+
 	void thread::recover_fifo(std::source_location src_loc)
 	{
 		bool kill_itself = g_cfg.core.rsx_fifo_accuracy == rsx_fifo_mode::as_ps3;
 
 		const u64 current_time = get_system_time();
+
+		// The discriminating capture of a desync (RR7-FREEZE-FORENSICS.md §8.1).
 
 		if (recovered_fifo_cmds_history.size() == 20u)
 		{
@@ -1876,7 +1892,6 @@ namespace rsx
 		return fifo_ctrl->last_cmd();
 	}
 
-	void invalid_method(context*, u32, u32);
 
 	void thread::dump_regs(std::string& result, std::any& /*custom_data*/) const
 	{

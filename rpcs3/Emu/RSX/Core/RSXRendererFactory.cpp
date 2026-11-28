@@ -13,6 +13,12 @@
 #include "Emu/RSX/VK/VKGSRender.h"
 #endif
 
+#include "Emu/RSX/MTL/MTLAvailability.h"
+
+#ifdef RSX_ENABLE_METAL4
+#include "Emu/RSX/MTL/MTLGSRender.h"
+#endif
+
 namespace rsx
 {
 	void create_render_thread(utils::serial* ar)
@@ -36,6 +42,12 @@ namespace rsx
 #else
 			[[fallthrough]];
 #endif
+		case video_renderer::metal:
+#ifdef RSX_ENABLE_METAL4
+			return video_renderer::metal;
+#else
+			[[fallthrough]];
+#endif
 		default:
 		case video_renderer::null:
 			return video_renderer::null;
@@ -53,6 +65,10 @@ namespace rsx
 #if defined(HAVE_VULKAN)
 		case video_renderer::vulkan:
 			return std::make_unique<VKGSRender>(ctx, display);
+#endif
+#ifdef RSX_ENABLE_METAL4
+		case video_renderer::metal:
+			return std::make_unique<mtl::MTLGSRender>(ctx, display);
 #endif
 		default:
 			return std::make_unique<NullGSRender>(ctx, display);

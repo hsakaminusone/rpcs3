@@ -3,6 +3,7 @@
 #include "vm_ptr.h"
 #include "vm_reservation.h"
 
+
 #include "Utilities/Thread.h"
 #include "Utilities/address_range.h"
 #include "Emu/CPU/CPUThread.h"
@@ -2532,6 +2533,7 @@ namespace vm
 		// Non-null terminated but terminated by size limit (so the string may continue)
 		return size == max_size;
 	}
+
 }
 
 template <>

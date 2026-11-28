@@ -2135,6 +2135,7 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 	u8* dst = nullptr;
 	const u8* src = nullptr;
 
+
 	std::tie(dst, src) = [&]() -> std::pair<u8*, const u8*>
 	{
 		u8* dst = vm::_ptr<u8>(eal);
@@ -3353,6 +3354,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Avoid inlining huge transfers because it intentionally drops range lock unlock
 		else if (optimization_compatible == MFC_PUT_CMD && ((addr >> 28 == rsx::constants::local_mem_base >> 28) || (addr < RAW_SPU_BASE_ADDR && size - 1 <= 0x400 - 1 && (addr % 0x10000 + (size - 1)) < 0x10000)))
 		{
+
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
 			{
 				rsx_lock.update_if_enabled(addr, size, range_lock);
@@ -3492,6 +3494,7 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 
 	// Store conditionally
 	const u32 addr = args.eal & -128;
+
 
 	if ([&]()
 	{
@@ -3817,6 +3820,7 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 	perf_meter<"PUTLLUC"_u64> perf0;
 
 	const u32 addr = args.eal & -128;
+
 
 	if (raddr && addr == raddr && g_cfg.core.spu_accurate_reservations)
 	{

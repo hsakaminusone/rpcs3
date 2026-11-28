@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <span>
 
+
 #ifdef ARCH_ARM64
 #include "Emu/CPU/Backends/AArch64/AArch64JIT.h"
 #include "Emu/IdManager.h"
@@ -985,6 +986,7 @@ void PPUTranslator::WriteMemory(Value* addr, Value* value, bool is_be, u32 align
 
 	// Write
 	m_ir->CreateAlignedStore(value, GetMemory(addr), llvm::MaybeAlign{align})->setVolatile(true);
+
 }
 
 void PPUTranslator::CompilationError(std::string_view error)
@@ -3728,6 +3730,7 @@ void PPUTranslator::STVLX(ppu_opcode_t op)
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(splat<u16>(0xffff) << trunc<u16>(value<u64>(addr) & 0xf));
 	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
 }
 
 void PPUTranslator::STDBRX(ppu_opcode_t op)
@@ -3756,6 +3759,7 @@ void PPUTranslator::STVRX(ppu_opcode_t op)
 	const auto data = pshufb(get_vr<u8[16]>(op.vs), build<u8[16]>(255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 243, 242, 241, 240) + vsplat<u8[16]>(trunc<u8>(value<u64>(addr) & 0xf)));
 	const auto mask = bitcast<bool[16]>(trunc<u16>(splat<u64>(0xffff) << (value<u64>(addr) & 0xf) >> 16));
 	m_ir->CreateMaskedStore(data.eval(m_ir), GetMemory(m_ir->CreateAnd(addr, ~0xfull)), llvm::Align(16), mask.eval(m_ir));
+
 }
 
 void PPUTranslator::STFSUX(ppu_opcode_t op)
