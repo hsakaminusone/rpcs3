@@ -6,6 +6,8 @@
 #include "MTLBarrier.h"
 
 #include "Emu/Memory/vm.h"
+#include "Emu/RSX/Common/TextureUtils.h"
+#include "Emu/RSX/Host/MM.h"
 #include "util/asm.hpp"
 #include "util/logs.hpp"
 
@@ -35,11 +37,15 @@ namespace mtl
 	}
 #endif // MTL_DIAGNOSTICS
 
-	void command_recorder::init(const device& dev, resource_manager& resources)
+	void command_recorder::init(device& dev, resource_manager& resources)
 	{
 		m_device = dev.dev();
 		m_queue = dev.queue();
+		m_compiler = dev.compiler();
 		m_resources = &resources;
+		m_lost = &dev.lost_flag();
+		m_feedback = std::make_shared<feedback_owner>();
+		m_feedback->recorder = this;
 
 		// One timeline for every commit.  The queue signals it after the commit's
 		// work, so the CPU can read completion without the feedback handler's lock
@@ -75,6 +81,548 @@ namespace mtl
 			die("Metal 4: the label probe buffer could not be allocated");
 		}
 		// EXCISE-END label-probe-buffer
+
+		build_swap_pipelines();
+		build_convert_pipelines();
+	}
+
+	namespace
+	{
+		// One invocation per element, so `dispatchThreads` supplies the exact count
+		// and the kernel needs no bound.  Both kernels read and write the buffer in
+		// place; the element width is chosen by the pipeline that is bound (T2).
+		constexpr const char* swap_msl = R"(#include <metal_stdlib>
+using namespace metal;
+
+kernel void rsx_bswap16(device ushort* data [[buffer(0)]], uint i [[thread_position_in_grid]])
+{
+	const ushort value = data[i];
+	data[i] = (value >> 8) | (value << 8);
+}
+
+kernel void rsx_bswap32(device uint* data [[buffer(0)]], uint i [[thread_position_in_grid]])
+{
+	const uint value = data[i];
+	data[i] = (value << 24) | ((value & 0x0000ff00u) << 8) | ((value & 0x00ff0000u) >> 8) | (value >> 24);
+}
+)";
+	}
+
+	void command_recorder::build_swap_pipelines()
+	{
+		if (!m_compiler)
+		{
+			return;
+		}
+
+		MTL4::LibraryDescriptor* library_descriptor = MTL4::LibraryDescriptor::alloc()->init();
+		library_descriptor->setSource(NS::String::string(swap_msl, NS::UTF8StringEncoding));
+
+		NS::Error* error = nullptr;
+		m_swap_library = m_compiler->newLibrary(library_descriptor, &error);
+		library_descriptor->release();
+
+		if (!m_swap_library)
+		{
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: byte-swap library creation failed: %s", message);
+			return;
+		}
+
+		const auto make_pipeline = [this](const char* name) -> MTL::ComputePipelineState*
+		{
+			MTL4::LibraryFunctionDescriptor* function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+			function->setLibrary(m_swap_library);
+			function->setName(NS::String::string(name, NS::UTF8StringEncoding));
+
+			MTL4::ComputePipelineDescriptor* descriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
+			descriptor->setComputeFunctionDescriptor(function);
+
+			NS::Error* pipeline_error = nullptr;
+			MTL::ComputePipelineState* state = m_compiler->newComputePipelineState(descriptor, nullptr, &pipeline_error);
+
+			function->release();
+			descriptor->release();
+
+			if (!state)
+			{
+				const char* message = (pipeline_error && pipeline_error->localizedDescription()) ? pipeline_error->localizedDescription()->utf8String() : "unknown";
+				rsx_log.error("Metal: byte-swap pipeline creation failed for %s: %s", name, message);
+			}
+
+			return state;
+		};
+
+		m_bswap16 = make_pipeline("rsx_bswap16");
+		m_bswap32 = make_pipeline("rsx_bswap32");
+	}
+
+	void command_recorder::swap_bytes(MTL4::ComputeCommandEncoder* encoder, MTL::Buffer* buffer, u64 offset, u64 size, u32 element_size)
+	{
+		if (!encoder || !buffer || !size || (element_size != 2 && element_size != 4))
+		{
+			return;
+		}
+
+		MTL::ComputePipelineState* state = (element_size == 2) ? m_bswap16 : m_bswap32;
+		const u64 elements = size / element_size;
+
+		if (!state || !elements)
+		{
+			return;
+		}
+
+		// The copy ahead of the swap ran as a blit in this compute encoder, and
+		// Metal 4 tracks no hazards, so the dispatch needs an encoder-scope edge in
+		// both directions (T2).
+		emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+
+		blit_table()->setAddress(buffer->gpuAddress() + offset, 0);
+		encoder->setComputePipelineState(state);
+		encoder->setArgumentTable(blit_table());
+		encoder->dispatchThreads(MTL::Size::Make(elements, 1, 1), MTL::Size::Make(64, 1, 1));
+
+		emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+	}
+
+	namespace
+	{
+		// The depth planes and the packed guest words are all buffers, so the
+		// conversion needs no texture binding and the same argument table slot
+		// layout serves both directions.  `mode` names the guest depth encoding
+		// (T6): 0 z24s8_uint, 1 z24s8_float, 2 z16_uint, 3 z16_float.
+		struct convert_params
+		{
+			u32 width;
+			u32 height;
+			u32 depth_stride;
+			u32 pack_stride;
+			u32 stencil_stride;
+			u32 mode;
+			u32 reserved0;
+			u32 reserved1;
+		};
+		static_assert(sizeof(convert_params) == 32);
+
+		constexpr const char* convert_msl = R"(#include <metal_stdlib>
+using namespace metal;
+
+struct rsx_convert_params
+{
+	uint width;
+	uint height;
+	uint depth_stride;
+	uint pack_stride;
+	uint stencil_stride;
+	uint mode;
+	uint reserved0;
+	uint reserved1;
+};
+
+kernel void rsx_depth_to_pack(device const uchar* depth [[buffer(0)]],
+	device const uchar* stencil [[buffer(1)]],
+	device uchar* packed [[buffer(2)]],
+	constant rsx_convert_params& p [[buffer(3)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= p.width || gid.y >= p.height)
+	{
+		return;
+	}
+
+	uint s = 0;
+	if (p.stencil_stride != 0)
+	{
+		s = stencil[gid.y * p.stencil_stride + gid.x];
+	}
+
+	const uint depth_offset = gid.y * p.depth_stride;
+	const uint pack_offset = gid.y * p.pack_stride;
+
+	if (p.mode <= 1)
+	{
+		const device float* d = (const device float*)(depth + depth_offset);
+		const float v = d[gid.x];
+		uint depth24;
+
+		if (p.mode == 0)
+		{
+			depth24 = uint(clamp(v, 0.0f, 1.0f) * 16777215.0f + 0.5f);
+		}
+		else
+		{
+			depth24 = (as_uint(v) >> 7) & 0x00FFFFFFu;
+		}
+
+		((device uint*)(packed + pack_offset))[gid.x] = (depth24 << 8) | s;
+	}
+	else if (p.mode == 2)
+	{
+		const device ushort* d = (const device ushort*)(depth + depth_offset);
+		((device ushort*)(packed + pack_offset))[gid.x] = d[gid.x];
+	}
+	else
+	{
+		const device float* d = (const device float*)(depth + depth_offset);
+		const float v = d[gid.x];
+		const float scaled = clamp(v, 0.0f, as_float(0x3F7FF800u)) * as_float(0x08000000u);
+		const ushort raw = ushort((as_uint(scaled) + 0x400u) >> 11);
+		((device ushort*)(packed + pack_offset))[gid.x] = raw;
+	}
+}
+
+kernel void rsx_pack_to_depth(device const uchar* packed [[buffer(0)]],
+	device uchar* depth [[buffer(1)]],
+	device uchar* stencil [[buffer(2)]],
+	constant rsx_convert_params& p [[buffer(3)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= p.width || gid.y >= p.height)
+	{
+		return;
+	}
+
+	const uint pack_offset = gid.y * p.pack_stride;
+	const uint depth_offset = gid.y * p.depth_stride;
+
+	if (p.mode <= 1)
+	{
+		const uint word = ((const device uint*)(packed + pack_offset))[gid.x];
+		const uint depth24 = (word >> 8) & 0x00FFFFFFu;
+		float v;
+
+		if (p.mode == 0)
+		{
+			v = float(depth24) / 16777215.0f;
+		}
+		else
+		{
+			v = as_float(depth24 << 7);
+		}
+
+		((device float*)(depth + depth_offset))[gid.x] = v;
+
+		if (p.stencil_stride != 0)
+		{
+			stencil[gid.y * p.stencil_stride + gid.x] = uchar(word & 0xFFu);
+		}
+	}
+	else if (p.mode == 2)
+	{
+		((device ushort*)(depth + depth_offset))[gid.x] = ((const device ushort*)(packed + pack_offset))[gid.x];
+	}
+	else
+	{
+		const uint raw = ((const device ushort*)(packed + pack_offset))[gid.x];
+		const float v = as_float((raw << 11) & 0x07FFF800u) * as_float(0x77000000u);
+		((device float*)(depth + depth_offset))[gid.x] = v;
+	}
+}
+)";
+	}
+
+	void command_recorder::build_convert_pipelines()
+	{
+		if (!m_compiler)
+		{
+			return;
+		}
+
+		MTL4::LibraryDescriptor* library_descriptor = MTL4::LibraryDescriptor::alloc()->init();
+		library_descriptor->setSource(NS::String::string(convert_msl, NS::UTF8StringEncoding));
+
+		NS::Error* error = nullptr;
+		m_convert_library = m_compiler->newLibrary(library_descriptor, &error);
+		library_descriptor->release();
+
+		if (!m_convert_library)
+		{
+			const char* message = (error && error->localizedDescription()) ? error->localizedDescription()->utf8String() : "unknown";
+			rsx_log.error("Metal: depth conversion library creation failed: %s", message);
+			return;
+		}
+
+		const auto make_pipeline = [this](const char* name) -> MTL::ComputePipelineState*
+		{
+			MTL4::LibraryFunctionDescriptor* function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+			function->setLibrary(m_convert_library);
+			function->setName(NS::String::string(name, NS::UTF8StringEncoding));
+
+			MTL4::ComputePipelineDescriptor* descriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
+			descriptor->setComputeFunctionDescriptor(function);
+
+			NS::Error* pipeline_error = nullptr;
+			MTL::ComputePipelineState* state = m_compiler->newComputePipelineState(descriptor, nullptr, &pipeline_error);
+
+			function->release();
+			descriptor->release();
+
+			if (!state)
+			{
+				const char* message = (pipeline_error && pipeline_error->localizedDescription()) ? pipeline_error->localizedDescription()->utf8String() : "unknown";
+				rsx_log.error("Metal: depth conversion pipeline creation failed for %s: %s", name, message);
+			}
+
+			return state;
+		};
+
+		m_depth_to_pack = make_pipeline("rsx_depth_to_pack");
+		m_pack_to_depth = make_pipeline("rsx_pack_to_depth");
+	}
+
+	bool command_recorder::copy_typeless(command_recorder& cmd, const typeless_region& src, const typeless_region& dst)
+	{
+		if (!src.image || !dst.image)
+		{
+			return false;
+		}
+
+		const s32 src_w = src.rect.x2 - src.rect.x1;
+		const s32 src_h = src.rect.y2 - src.rect.y1;
+		const s32 dst_w = dst.rect.x2 - dst.rect.x1;
+		const s32 dst_h = dst.rect.y2 - dst.rect.y1;
+
+		if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
+		{
+			rsx_log.error("Metal 4: a typeless copy was asked for an empty region");
+			return false;
+		}
+
+		MTL4::ComputeCommandEncoder* encoder = cmd.open_compute();
+		if (!encoder)
+		{
+			return false;
+		}
+
+		const MTL::PixelFormat src_format = src.image->pixelFormat();
+		const MTL::PixelFormat dst_format = dst.image->pixelFormat();
+		const MTL::Origin src_origin = MTL::Origin::Make(src.rect.x1, src.rect.y1, 0);
+		const MTL::Origin dst_origin = MTL::Origin::Make(dst.rect.x1, dst.rect.y1, 0);
+		const MTL::Size extent = MTL::Size::Make(src_w, src_h, 1);
+
+		if (src_format == dst_format)
+		{
+			if (src_w != dst_w || src_h != dst_h)
+			{
+				rsx_log.error("Metal 4: a same-format copy between different-sized regions is not a copy");
+				return false;
+			}
+
+			encoder->copyFromTexture(src.image, src.slice, src.level, src_origin, extent,
+				dst.image, dst.slice, dst.level, dst_origin);
+			return true;
+		}
+
+		const bool src_is_depth = is_depth_format(src_format);
+		const bool dst_is_depth = is_depth_format(dst_format);
+
+		if (!src_is_depth && !dst_is_depth)
+		{
+			const u32 src_texel = get_texel_size(src_format);
+			const u32 dst_texel = get_texel_size(dst_format);
+
+			if (!src_texel || !dst_texel || src_texel != dst_texel || src_w != dst_w || src_h != dst_h)
+			{
+				rsx_log.error("Metal 4: typeless copy between colour formats %u and %u has no bit-preserving route",
+					static_cast<u32>(src_format), static_cast<u32>(dst_format));
+				return false;
+			}
+
+			const u32 row_bytes = utils::align(static_cast<u32>(src_w) * src_texel, 256u);
+			const u64 image_bytes = static_cast<u64>(row_bytes) * src_h;
+			MTL::Buffer* staging = cmd.resources().new_buffer(image_bytes, MTL::StorageModeShared);
+
+			if (!staging)
+			{
+				rsx_log.error("Metal 4: a typeless colour copy staging allocation failed");
+				return false;
+			}
+
+			encoder->copyFromTexture(src.image, src.slice, src.level, src_origin, extent,
+				staging, 0, row_bytes, image_bytes);
+
+			if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+			{
+				rsx_log.error("Metal 4: a typeless colour copy barrier was refused");
+				cmd.resources().defer_release(staging);
+				return false;
+			}
+
+			encoder->copyFromBuffer(staging, 0, row_bytes, image_bytes, extent,
+				dst.image, dst.slice, dst.level, dst_origin);
+
+			cmd.resources().defer_release(staging);
+			return true;
+		}
+
+		if (src_is_depth && dst_is_depth)
+		{
+			rsx_log.error("Metal 4: typeless copy between depth formats %u and %u has no bit-preserving route",
+				static_cast<u32>(src_format), static_cast<u32>(dst_format));
+			return false;
+		}
+
+		const typeless_region& depth_side = src_is_depth ? src : dst;
+		const typeless_region& colour_side = src_is_depth ? dst : src;
+
+		u32 mode = 0;
+		u32 guest_texel = 0;
+
+		switch (depth_side.depth_format)
+		{
+		case rsx::surface_depth_format2::z24s8_uint:
+			mode = 0;
+			guest_texel = 4;
+			break;
+		case rsx::surface_depth_format2::z24s8_float:
+			mode = 1;
+			guest_texel = 4;
+			break;
+		case rsx::surface_depth_format2::z16_uint:
+			mode = 2;
+			guest_texel = 2;
+			break;
+		case rsx::surface_depth_format2::z16_float:
+			mode = 3;
+			guest_texel = 2;
+			break;
+		default:
+			rsx_log.error("Metal 4: typeless depth conversion has an unknown guest depth format");
+			return false;
+		}
+
+		if (src_w != dst_w || src_h != dst_h || get_texel_size(colour_side.image->pixelFormat()) != guest_texel)
+		{
+			rsx_log.error("Metal 4: a depth/colour typeless copy does not describe the same guest bytes");
+			return false;
+		}
+
+		MTL::ComputePipelineState* pipeline = src_is_depth ? m_depth_to_pack : m_pack_to_depth;
+
+		if (!pipeline)
+		{
+			rsx_log.error("Metal 4: the depth conversion pipeline is unavailable");
+			return false;
+		}
+
+		const u32 width = static_cast<u32>(src_w);
+		const u32 height = static_cast<u32>(src_h);
+		const u32 depth_row = utils::align(width * depth_plane_texel_size(depth_side.image->pixelFormat()), 256u);
+		const u32 pack_row = utils::align(width * guest_texel, 256u);
+		const bool stencil = rsx::is_depth_stencil_format(depth_side.depth_format);
+		const u32 stencil_row = utils::align(width, 256u);
+
+		const u64 depth_bytes = static_cast<u64>(depth_row) * height;
+		const u64 pack_bytes = static_cast<u64>(pack_row) * height;
+		const u64 stencil_bytes = stencil ? static_cast<u64>(stencil_row) * height : 0;
+
+		MTL::Buffer* depth_buffer = cmd.resources().new_buffer(depth_bytes, MTL::StorageModeShared);
+		MTL::Buffer* pack_buffer = cmd.resources().new_buffer(pack_bytes, MTL::StorageModeShared);
+		MTL::Buffer* stencil_buffer = stencil ? cmd.resources().new_buffer(stencil_bytes, MTL::StorageModeShared) : nullptr;
+		MTL::Buffer* params_buffer = cmd.resources().new_buffer(sizeof(convert_params), MTL::StorageModeShared);
+
+		if (!depth_buffer || !pack_buffer || !params_buffer || (stencil && !stencil_buffer))
+		{
+			rsx_log.error("Metal 4: a depth conversion staging allocation failed");
+			cmd.resources().defer_release(depth_buffer);
+			cmd.resources().defer_release(pack_buffer);
+			cmd.resources().defer_release(stencil_buffer);
+			cmd.resources().defer_release(params_buffer);
+			return false;
+		}
+
+		auto* params = static_cast<convert_params*>(params_buffer->contents());
+		params->width = width;
+		params->height = height;
+		params->depth_stride = depth_row;
+		params->pack_stride = pack_row;
+		params->stencil_stride = stencil ? stencil_row : 0;
+		params->mode = mode;
+		params->reserved0 = 0;
+		params->reserved1 = 0;
+
+		const MTL::BlitOption depth_option = get_depth_plane_option(depth_side.image->pixelFormat(), false);
+		const MTL::BlitOption stencil_option = get_depth_plane_option(depth_side.image->pixelFormat(), true);
+		const MTL::Size dispatch_size = MTL::Size::Make(width, height, 1);
+
+		if (src_is_depth)
+		{
+			encoder->copyFromTexture(depth_side.image, depth_side.slice, depth_side.level, src_origin, extent,
+				depth_buffer, 0, depth_row, depth_bytes, depth_option);
+
+			if (stencil)
+			{
+				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				{
+					rsx_log.error("Metal 4: a depth conversion barrier was refused");
+					cmd.resources().defer_release(depth_buffer);
+					cmd.resources().defer_release(pack_buffer);
+					cmd.resources().defer_release(stencil_buffer);
+					cmd.resources().defer_release(params_buffer);
+					return false;
+				}
+
+				encoder->copyFromTexture(depth_side.image, depth_side.slice, depth_side.level, src_origin, extent,
+					stencil_buffer, 0, stencil_row, stencil_bytes, stencil_option);
+			}
+
+			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+
+			blit_table()->setAddress(depth_buffer->gpuAddress(), 0);
+			blit_table()->setAddress(stencil_buffer ? stencil_buffer->gpuAddress() : depth_buffer->gpuAddress(), 1);
+			blit_table()->setAddress(pack_buffer->gpuAddress(), 2);
+			blit_table()->setAddress(params_buffer->gpuAddress(), 3);
+			encoder->setComputePipelineState(pipeline);
+			encoder->setArgumentTable(blit_table());
+			encoder->dispatchThreads(dispatch_size, MTL::Size::Make(16, 16, 1));
+
+			emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+
+			encoder->copyFromBuffer(pack_buffer, 0, pack_row, pack_bytes, extent,
+				dst.image, dst.slice, dst.level, dst_origin);
+		}
+		else
+		{
+			encoder->copyFromTexture(colour_side.image, colour_side.slice, colour_side.level, src_origin, extent,
+				pack_buffer, 0, pack_row, pack_bytes);
+
+			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice, false });
+
+			blit_table()->setAddress(pack_buffer->gpuAddress(), 0);
+			blit_table()->setAddress(depth_buffer->gpuAddress(), 1);
+			blit_table()->setAddress(stencil_buffer ? stencil_buffer->gpuAddress() : depth_buffer->gpuAddress(), 2);
+			blit_table()->setAddress(params_buffer->gpuAddress(), 3);
+			encoder->setComputePipelineState(pipeline);
+			encoder->setArgumentTable(blit_table());
+			encoder->dispatchThreads(dispatch_size, MTL::Size::Make(16, 16, 1));
+
+			emit_barrier(encoder, barrier_spec{ MTL::StageDispatch, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+
+			encoder->copyFromBuffer(depth_buffer, 0, depth_row, depth_bytes, extent,
+				dst.image, dst.slice, dst.level, dst_origin, depth_option);
+
+			if (stencil)
+			{
+				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				{
+					rsx_log.error("Metal 4: a depth conversion barrier was refused");
+					cmd.resources().defer_release(depth_buffer);
+					cmd.resources().defer_release(pack_buffer);
+					cmd.resources().defer_release(stencil_buffer);
+					cmd.resources().defer_release(params_buffer);
+					return false;
+				}
+
+				encoder->copyFromBuffer(stencil_buffer, 0, stencil_row, stencil_bytes, extent,
+					dst.image, dst.slice, dst.level, dst_origin, stencil_option);
+			}
+		}
+
+		cmd.resources().defer_release(depth_buffer);
+		cmd.resources().defer_release(pack_buffer);
+		cmd.resources().defer_release(stencil_buffer);
+		cmd.resources().defer_release(params_buffer);
+		return true;
 	}
 
 	u64 command_recorder::completed_commits(u32 slot) const
@@ -217,11 +765,18 @@ namespace mtl
 			slot.vertex_table = nullptr;
 		}
 
-		if (slot.command_buffer)
+		for (MTL4::CommandBuffer*& buffer : slot.buffers)
 		{
-			slot.command_buffer->release();
-			slot.command_buffer = nullptr;
+			if (buffer)
+			{
+				buffer->release();
+				buffer = nullptr;
+			}
 		}
+
+		slot.buffer_index = 0;
+		slot.buffer_open = false;
+		slot.committed_label_count = 0;
 
 		if (slot.allocator)
 		{
@@ -248,7 +803,6 @@ namespace mtl
 		descriptor->setInitializeBindings(true);
 
 		slot.allocator = m_device->newCommandAllocator();
-		slot.command_buffer = m_device->newCommandBuffer();
 		slot.vertex_table = m_device->newArgumentTable(descriptor, nullptr);
 		slot.fragment_table = m_device->newArgumentTable(descriptor, nullptr);
 		slot.interpreter_vertex_table = m_device->newArgumentTable(descriptor, nullptr);
@@ -257,7 +811,7 @@ namespace mtl
 
 		descriptor->release();
 
-		if (!slot.allocator || !slot.command_buffer || !slot.vertex_table || !slot.fragment_table ||
+		if (!slot.allocator || !slot.vertex_table || !slot.fragment_table ||
 			!slot.interpreter_vertex_table || !slot.interpreter_fragment_table || !slot.blit_table)
 		{
 			die("command recorder allocation failed");
@@ -331,7 +885,7 @@ namespace mtl
 		return await_value(target, "wait idle");
 	}
 
-	void command_recorder::shutdown()
+	bool command_recorder::shutdown()
 	{
 		// Drain the ring before the objects go away (HLD-04 §2.4).  The wait is
 		// bounded: a commit whose signal never arrives must not hold the shutdown
@@ -383,9 +937,78 @@ namespace mtl
 			}
 		}
 
+		if (m_bswap16)
+		{
+			m_bswap16->release();
+			m_bswap16 = nullptr;
+		}
+
+		if (m_bswap32)
+		{
+			m_bswap32->release();
+			m_bswap32 = nullptr;
+		}
+
+		if (m_swap_library)
+		{
+			m_swap_library->release();
+			m_swap_library = nullptr;
+		}
+
+		if (m_depth_to_pack)
+		{
+			m_depth_to_pack->release();
+			m_depth_to_pack = nullptr;
+		}
+
+		if (m_pack_to_depth)
+		{
+			m_pack_to_depth->release();
+			m_pack_to_depth = nullptr;
+		}
+
+		if (m_convert_library)
+		{
+			m_convert_library->release();
+			m_convert_library = nullptr;
+		}
+
+		// Feedback blocks can arrive after this point.  Wait for the ones already
+		// running, then null the recorder so a late block skips it instead of
+		// dereferencing freed state (L3).
+		if (m_feedback)
+		{
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(recorder_feedback_timeout);
+			u32 spins = 0;
+
+			while (m_feedback->in_flight.load(std::memory_order_acquire))
+			{
+				if (++spins < 256)
+				{
+					utils::pause();
+					continue;
+				}
+
+				if (std::chrono::steady_clock::now() >= deadline)
+				{
+					rsx_log.error("Metal 4: commit feedback blocks did not drain; the recorder stays reachable");
+					break;
+				}
+
+				std::this_thread::sleep_for(std::chrono::microseconds(50));
+			}
+
+			std::lock_guard lock(m_feedback->lock);
+			m_feedback->recorder = nullptr;
+			m_feedback.reset();
+		}
+
 		m_device = nullptr;
 		m_queue = nullptr;
+		m_compiler = nullptr;
 		m_resources = nullptr;
+		m_lost = nullptr;
+		return idle;
 	}
 
 	bool command_recorder::begin_frame()
@@ -394,8 +1017,8 @@ namespace mtl
 		MTL_PERF_SCOPE(1, "recorder/begin frame");
 		frame_slot& slot = m_slots[m_slot];
 
-		// The slot returns only after its commit feedback (HLD-04 §3.2).  The wait
-		// is bounded, because a feedback that never arrives must not stop the RSX
+		// The slot returns only after its last commit (HLD-04 §3.2).  The wait is
+		// bounded, because a feedback that never arrives must not stop the RSX
 		// thread (VKPresent.cpp:250 bounds the same wait with
 		// FRAME_PRESENT_TIMEOUT).
 		bool reported = true;
@@ -413,35 +1036,19 @@ namespace mtl
 
 		if (!reported)
 		{
-			// The commit never completed, so its allocator cannot be reset:
-			// resetting an allocator whose GPU work is unfinished is undefined.  The
-			// slot takes fresh objects, the generation advances so the late feedback
-			// is ignored, and the stalled objects are abandoned rather than reset.
-			// The frame ring keeps moving and the RSX thread keeps running.
-			rsx_log.error("Metal 4: slot %u did not complete in %u s, the slot takes fresh objects",
-				m_slot, recorder_feedback_timeout);
-			allocate_slot(slot);
-			slot.generation.fetch_add(1, std::memory_order_relaxed);
-			slot.completion_value = 0;
+			// L1: a slot whose commit never reported is not recycled.  Its
+			// allocator, the command buffers it handed out and every ring they read
+			// may still be in use, so resetting or freeing them is undefined.  The
+			// only safe action is to stop recording and report the loss; the core
+			// then stops issuing draws.
+			mark_device_lost("a frame slot did not complete");
+			return false;
 		}
 
 		// The frame clock must observe the completion before it is advanced to the
 		// new frame: the surface reuse test needs to know which frame the slot has
 		// just finished, not the one it is about to record.
-		if (reported)
-		{
-			// The slot is idle, so the frame that used it is complete: its deferred
-			// objects can go (HLD-02 I7).
-			m_resources->on_commit_complete(m_slot);
-		}
-		else
-		{
-			// The GPU may still read the objects this slot deferred, so they wait
-			// for an idle ring instead of being released now (DEVIATIONS-SYNC.md,
-			// SY2).
-			m_resources->quarantine(m_slot);
-		}
-
+		m_resources->on_commit_complete(m_slot);
 		m_resources->on_frame_begin(m_slot);
 
 		// The ring is idle, so nothing can reference a deferred object (HLD-02 §4).
@@ -456,21 +1063,24 @@ namespace mtl
 			}
 		}
 
-		// The commit options live for the recorder's lifetime, so nothing to
-		// recycle here (HLD-04 §3.2).
-
 		{
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/begin frame/allocator");
 
-			// Never reset an allocator while its GPU work is in flight (HLD-01 §4.7).
-			slot.allocator->reset();
-			slot.command_buffer->beginCommandBuffer(slot.allocator);
-			slot.buffer_open = true;
-			slot.label_staging_offset = 0;
-			slot.labels.clear();
+			// Every command buffer of the slot has completed, so the allocator can
+			// be reset and its buffers reused.  A slot is recycled once per frame;
+			// a mid-frame commit reuses the allocator without this reset (A1/R1).
+			if (!recycle_slot("begin frame"))
+			{
+				return false;
+			}
+
+			if (!next_buffer())
+			{
+				return false;
+			}
+
 			m_pending_count = 0;
-			m_reenter_pending = false;
 			m_encoder = nullptr;
 			m_compute_encoder = nullptr;
 			// EXCISE-BEGIN encoder-provenance-begin-frame
@@ -490,7 +1100,137 @@ namespace mtl
 		MTL_PERF_GAUGE(1, "recorder/ring in flight", in_flight);
 #endif // MTL_PERF_ENABLED
 
-		return reported;
+		return true;
+	}
+
+	void command_recorder::mark_device_lost(const char* why)
+	{
+		if (!m_device_lost.exchange(true, std::memory_order_acq_rel))
+		{
+			rsx_log.fatal("Metal 4: %s; the device is treated as lost", why);
+		}
+
+		if (m_lost)
+		{
+			m_lost->store(true, std::memory_order_release);
+		}
+	}
+
+	bool command_recorder::next_buffer()
+	{
+		frame_slot& slot = m_slots[m_slot];
+
+		if (m_device_lost)
+		{
+			return false;
+		}
+
+		if (slot.buffer_open)
+		{
+			return true;
+		}
+
+		// The pool is exhausted only after every buffer it holds has been
+		// committed.  The queue runs them in order, so the slot's last commit
+		// proves the whole pool done and the allocator can be reset (A1/R1).
+		if (slot.buffer_index >= frame_slot::buffer_capacity)
+		{
+			if (!await_slot(slot, "buffer pool"))
+			{
+				mark_device_lost("the command-buffer pool did not complete");
+				return false;
+			}
+
+			slot.allocator->reset();
+			slot.buffer_index = 0;
+		}
+
+		const u32 index = slot.buffer_index;
+
+		if (!slot.buffers[index])
+		{
+			slot.buffers[index] = m_device->newCommandBuffer();
+
+			if (!slot.buffers[index])
+			{
+				die("command buffer allocation failed");
+			}
+		}
+
+		slot.buffers[index]->beginCommandBuffer(slot.allocator);
+		++slot.buffer_index;
+		slot.buffer_open = true;
+		return true;
+	}
+
+	bool command_recorder::recycle_slot(const char* what)
+	{
+		frame_slot& slot = m_slots[m_slot];
+
+		if (!slot_idle(slot) && !await_slot(slot, what))
+		{
+			mark_device_lost("a frame slot did not complete");
+			return false;
+		}
+
+		slot.allocator->reset();
+		slot.buffer_index = 0;
+		slot.buffer_open = false;
+		slot.label_staging_offset = 0;
+		slot.labels.clear();
+		slot.committed_label_count = 0;
+		return true;
+	}
+
+	u64 command_recorder::commit_open_buffer(const char* what)
+	{
+		// TODO(excise): level 1; block timer.
+		MTL_PERF_SCOPE(1, "recorder/commit buffer");
+
+		if (m_device_lost)
+		{
+			return 0;
+		}
+
+		frame_slot& slot = m_slots[m_slot];
+
+		// Whatever the caller deferred is carried by this commit.
+		m_label_commit_due = false;
+
+		// A label recorded after the last pass belongs to this commit, and a copy
+		// opened for it must be closed before the buffer ends.
+		flush_label_writes();
+		close_encoder();
+
+		if (!slot.buffer_open)
+		{
+			return 0;
+		}
+
+		// The GPU is about to read guest memory that the CPU may still have a
+		// deferred mprotect for, so apply the queue before the commit.  It is a
+		// no-op when the queue is empty, and Vulkan does the same before it submits
+		// (VKGSRender.cpp:2536; C25).
+		rsx::mm_flush();
+		publish_residency();
+
+		{
+			// TODO(excise): level 1; block timer.
+			MTL_PERF_SCOPE(1, "recorder/commit buffer/end");
+			slot.buffers[slot.buffer_index - 1]->endCommandBuffer();
+			slot.buffer_open = false;
+		}
+
+		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
+		const u64 value = commit_slot(slot, m_slot, generation, slot.buffers[slot.buffer_index - 1]);
+
+		// Every label staged so far is carried by this commit, so a later acquire
+		// on one of them needs this value rather than the open buffer.
+		slot.committed_label_count = static_cast<u32>(slot.labels.size());
+
+		// TODO(excise): level 4; deep-probe line.
+		MTL_NOTE(4, "Metal 4: %s committed slot %u at value %llu", what, m_slot, value);
+		return value;
 	}
 
 	void command_recorder::submit()
@@ -498,54 +1238,19 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/submit");
 
-		if (m_reenter_pending)
-		{
-			// A label commit already submitted the frame's last commands, so only the
-			// drawable is left; a commit with nothing in it would be pure overhead.
-			m_reenter_pending = false;
-			m_slots[m_slot].buffer_open = false;
-
-			if (m_drawable)
-			{
-				// TODO(excise): level 1; block timer.
-				MTL_PERF_SCOPE(1, "recorder/submit/signal drawable");
-				m_queue->signalDrawable(m_drawable);
-				m_drawable = nullptr;
-			}
-
-			m_slot = (m_slot + 1) % frame_slot_count;
-			return;
-		}
-
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/submit/close encoder");
-			// A label recorded after the last pass belongs to this commit.
-			flush_label_writes();
-			close_encoder();
-			publish_residency();
-		}
-
 		const u32 index = m_slot;
 		frame_slot& slot = m_slots[index];
 
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/submit/end buffer");
-			slot.command_buffer->endCommandBuffer();
-			slot.buffer_open = false;
-		}
-
-		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
-
-		commit_slot(slot, index, generation);
+		// A label recorded after the last pass belongs to this commit, and the
+		// commit's value covers every chunk committed earlier in the frame.
+		commit_open_buffer("submit");
 
 #if MTL_DIAGNOSTICS
 		// TODO(excise): level 1; the commit stamp the feedback lag is measured from.
 		slot.debug_commit_time.store(debug_now_seconds(), std::memory_order_relaxed);
 #endif
 		// TODO(excise): level 4; deep-probe line.
-		MTL_NOTE(4, "Metal 4: slot %u committed at %.3f, %s %p", m_slot, slot.debug_commit_time.load(std::memory_order_relaxed), m_drawable ? "with drawable" : "no drawable", static_cast<const void*>(m_drawable));
+		MTL_NOTE(4, "Metal 4: slot %u submitted at %.3f, %s %p", m_slot, slot.debug_commit_time.load(std::memory_order_relaxed), m_drawable ? "with drawable" : "no drawable", static_cast<const void*>(m_drawable));
 
 		// The drawable is signalled only after the commit that fills it, so the
 		// present is ordered behind the frame (C7, HLD-03 §4.9).
@@ -569,83 +1274,30 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/readback wait");
 
-		if (m_reenter_pending)
-		{
-			reenter_slot();
-		}
-
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/readback wait/close encoder");
-			// A pending label must reach the commit; a readback may be what the guest
-			// uses to learn that the GPU finished.
-			flush_label_writes();
-			close_encoder();
-		}
-
+		// A readback must observe the copy it encoded.  The commit ends the open
+		// buffer and returns the value the queue will signal; earlier chunks of
+		// the slot are ordered before it.  When nothing is open (a local task
+		// outside a frame) the last commit is the one to await.
+		const u64 value = commit_open_buffer("readback");
 		frame_slot& slot = m_slots[m_slot];
+		const u64 target = value ? value : slot.completion_value;
 
-		if (!slot.buffer_open)
-		{
-			// A readback can be requested from the RSX thread's local task
-			// (ZCULL sync), which is not necessarily inside a frame.  After the
-			// last commit the buffer is already ended, and Metal 4 asserts in
-			// endCommandBuffer when it has no allocator/storage.  The work that
-			// must be visible is in that earlier commit: awaiting it is what
-			// reenter_slot does, and it opens a fresh buffer for the frame.
-			// Nothing was encoded for this flush, so commit nothing.
-			reenter_slot();
-			return;
-		}
-
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/readback wait/end buffer");
-			publish_residency();
-			slot.command_buffer->endCommandBuffer();
-			slot.buffer_open = false;
-		}
-
-		// Each commit takes a generation of its own, so a late feedback of the
-		// frame's earlier commit cannot clear this one.
-		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
 		// EXCISE-BEGIN encoder-provenance-readback
 		note_encoder_event(encoder_event::readback, nullptr, __builtin_return_address(0));
 		// EXCISE-END encoder-provenance-readback
 
-		commit_slot(slot, m_slot, generation);
-
-		// The slot came back, so its GPU work is complete and the same slot serves
-		// the rest of the frame (HLD-04 §3.1).
-		reenter_slot();
-	}
-
-	void command_recorder::reenter_slot()
-	{
-		// TODO(excise): level 1; block timer.
-		MTL_PERF_SCOPE(1, "recorder/re-enter slot");
-
-		frame_slot& slot = m_slots[m_slot];
-
-		// One atomic load when the commit has already finished, which is the common
-		// case: the frame committed, the GPU ran it, and the next encoder re-enters.
-		bool reported = true;
+		if (!await_value(target, "read-back"))
 		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/re-enter slot/wait");
-			reported = await_slot(slot, "re-enter slot");
+			mark_device_lost("a read-back commit did not complete");
+			return;
 		}
 
-		if (!reported)
-		{
-			// The commit never completed, and an allocator must not be reset while its
-			// command buffer may still run (Vulkan bounds the same wait with
-			// GENERAL_WAIT_TIMEOUT, VKTextureCache.cpp:1472).  The slot takes fresh
-			// objects.
-			allocate_slot(slot);
-			slot.generation.fetch_add(1, std::memory_order_relaxed);
-			slot.completion_value = 0;
-		}
+		// The completion proves every commit that referenced the slot's label
+		// staging region done, so the region can be reused and its addresses
+		// retired (A1/R1).
+		slot.label_staging_offset = 0;
+		slot.labels.clear();
+		slot.committed_label_count = 0;
 
 		// TODO(excise): level 2; the GPU write must be visible in the guest window.
 		if (m_diag_label_address)
@@ -666,29 +1318,10 @@ namespace mtl
 			m_diag_label_address = 0;
 		}
 
-		slot.allocator->reset();
-		slot.command_buffer->beginCommandBuffer(slot.allocator);
-		slot.buffer_open = true;
-
-		// A batch that was staged but not yet encoded is not covered by the
-		// feedback of the commit that just completed, so it is kept: the buffer
-		// that has just begun is the one that will carry its copy.  The staging
-		// offset goes with it, because the staged words are still in the region.
-		if (!m_pending_count)
-		{
-			slot.label_staging_offset = 0;
-			// The feedback proves every label of the committed command buffer
-			// visible, so the next acquire on one of them needs no wait.
-			slot.labels.clear();
-		}
-
-		m_reenter_pending = false;
+		// The next encoder begins the slot's next buffer lazily; a readback does
+		// not reset the allocator or reopen one eagerly (A1/R1).
 		m_encoder = nullptr;
 		m_compute_encoder = nullptr;
-
-		// EXCISE-BEGIN encoder-provenance-reenter-slot
-		note_encoder_event(encoder_event::reenter_slot, nullptr, __builtin_return_address(0));
-		// EXCISE-END encoder-provenance-reenter-slot
 	}
 
 	void command_recorder::set_present_drawable(MTL::Drawable* drawable)
@@ -710,26 +1343,25 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/open pass");
 
-		if (m_reenter_pending)
-		{
-			reenter_slot();
-		}
-
-		frame_slot& slot = m_slots[m_slot];
-
-		if (!slot.buffer_open)
-		{
-			// A pass opened outside a frame would be encoded on an ended buffer;
-			// re-enter the slot instead (L159).
-			reenter_slot();
-		}
-
 		// The pass boundary is the natural place for a label batch: no open pass is
 		// split, and the writes are ordered before the pass's load actions.
 		flush_label_writes();
 		close_encoder();
 
-		MTL4::RenderCommandEncoder* encoder = m_slots[m_slot].command_buffer->renderCommandEncoder(descriptor, options);
+		// A back-end release asked for its label at the next boundary instead of
+		// splitting the pass it arrived in (A2).  The pass is closed now, so this
+		// commit costs nothing extra.
+		if (m_label_commit_due)
+		{
+			commit_open_buffer("label boundary");
+		}
+
+		if (!next_buffer())
+		{
+			return nullptr;
+		}
+
+		MTL4::RenderCommandEncoder* encoder = m_slots[m_slot].buffers[m_slots[m_slot].buffer_index - 1]->renderCommandEncoder(descriptor, options);
 		m_encoder = encoder;
 		// EXCISE-BEGIN encoder-provenance-open-pass
 		note_encoder_event(encoder_event::open_pass, encoder, __builtin_return_address(0));
@@ -741,11 +1373,6 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/open compute");
-
-		if (m_reenter_pending)
-		{
-			reenter_slot();
-		}
 
 		flush_label_writes();
 		return open_copy_encoder();
@@ -770,19 +1397,14 @@ namespace mtl
 			return m_compute_encoder;
 		}
 
-		frame_slot& open_slot = m_slots[m_slot];
-
-		if (!open_slot.buffer_open)
+		if (!next_buffer())
 		{
-			// The slot's command buffer was ended (e.g. the frame was submitted)
-			// while a copy outside the frame was still queued; encoding on an
-			// ended buffer faults inside Metal.  Re-enter the slot first (L159).
-			reenter_slot();
+			return nullptr;
 		}
 
 		close_encoder();
 
-		MTL4::ComputeCommandEncoder* encoder = m_slots[m_slot].command_buffer->computeCommandEncoder();
+		MTL4::ComputeCommandEncoder* encoder = m_slots[m_slot].buffers[m_slots[m_slot].buffer_index - 1]->computeCommandEncoder();
 		m_encoder = encoder;
 		m_compute_encoder = encoder;
 		// EXCISE-BEGIN encoder-provenance-open-compute
@@ -803,31 +1425,27 @@ namespace mtl
 			return false;
 		}
 
-		if (m_reenter_pending)
+		if (!next_buffer())
 		{
-			reenter_slot();
+			return false;
 		}
 
 		frame_slot& slot = m_slots[m_slot];
 
-		if (!slot.buffer_open)
-		{
-			// A staged label belongs to the command buffer whose copy will carry
-			// it, so the buffer is opened before the word is staged.  A label
-			// staged into an ended buffer is written by nobody, and the guest then
-			// waits on a word that never changes.
-			reenter_slot();
-		}
-
 		if (slot.label_staging_offset + sizeof(u32) > label_staging_bytes)
 		{
-			// Emitting frees nothing, because the GPU still reads the region, so the
-			// slot commits and comes back with a clean one.
+			// The region is rewritten only once every commit that reads it has
+			// completed, so the slot commits and waits once.  The read-back resets
+			// the staging offset and the label list.
 			// TODO(excise): level 2; a frame that spends its whole label region.
 			MTL_PROBE_LATCH(2, "sync/label write/region wrap");
 
-			flush_label_writes();
 			flush_for_readback();
+
+			if (m_device_lost)
+			{
+				return false;
+			}
 		}
 
 		const u32 offset = m_slot * label_staging_bytes + slot.label_staging_offset;
@@ -852,42 +1470,11 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/commit labels");
 
-		if (m_reenter_pending)
-		{
-			reenter_slot();
-		}
-
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/commit labels/encode");
-			flush_label_writes();
-			close_encoder();
-		}
-
-		frame_slot& slot = m_slots[m_slot];
-
-		if (!slot.buffer_open)
-		{
-			// Nothing has been encoded since the last commit, so there is no buffer
-			// to end; the staged batch above was empty for the same reason.
-			return;
-		}
-
-		{
-			// TODO(excise): level 1; block timer.
-			MTL_PERF_SCOPE(1, "recorder/commit labels/end buffer");
-			publish_residency();
-			slot.command_buffer->endCommandBuffer();
-			slot.buffer_open = false;
-		}
-
-		const u32 generation = slot.generation.fetch_add(1, std::memory_order_relaxed) + 1;
-		commit_slot(slot, m_slot, generation);
-
 		// The GPU writes the labels when it runs this commit.  The guest is the one
-		// waiting, so the RSX thread does not: the slot comes back on the next
-		// encoder, after the completion has almost certainly arrived.
-		m_reenter_pending = true;
+		// waiting, so the RSX thread does not: the next encoder begins a fresh
+		// buffer from the same allocator, and `sync_label` awaits the value this
+		// commit returns (A1/R1).
+		commit_open_buffer("label commit");
 	}
 
 	bool command_recorder::sync_label(u32 address)
@@ -899,13 +1486,17 @@ namespace mtl
 			frame_slot& slot = m_slots[index];
 
 			bool has_address = false;
-			for (const u32 label : slot.labels)
+			bool uncommitted = false;
+
+			for (u32 i = 0; i < slot.labels.size(); ++i)
 			{
-				if (label == address)
+				if (slot.labels[i] != address)
 				{
-					has_address = true;
-					break;
+					continue;
 				}
+
+				has_address = true;
+				uncommitted |= (i >= slot.committed_label_count);
 			}
 
 			if (!has_address)
@@ -913,51 +1504,50 @@ namespace mtl
 				continue;
 			}
 
-			if (index == m_slot)
+			if (index == m_slot && uncommitted)
 			{
-				// The label is in the open command buffer: either still staged, or
-				// already flushed at a pass boundary.  Neither has reached the GPU,
-				// so commit the buffer.  A buffer that was committed already is
-				// waiting for its slot to come back.  Both end in re-enter, which is
-				// the wait for this slot's feedback.
-				if (!m_reenter_pending)
-				{
-					commit_pending_labels();
-				}
+				// The label is in the open buffer: still staged, or flushed at a
+				// pass boundary.  It has not reached the GPU, so commit the buffer
+				// and await the value this commit returns.
+				// TODO(excise): level 2; a guest acquire waited on a GPU label.
+				MTL_PROBE_LATCH(2, "sync/label wait");
 
-				if (m_reenter_pending)
+				const u64 value = commit_open_buffer("label wait");
+				const u64 target = value ? value : slot.completion_value;
+
+				if (!await_value(target, "label wait"))
 				{
-					// TODO(excise): level 2; a guest acquire waited on a GPU label.
-					MTL_PROBE_LATCH(2, "sync/label wait");
-					reenter_slot();
-					waited = true;
+					mark_device_lost("a label commit did not complete");
 				}
 				else
 				{
-					slot.labels.clear();
+					waited = true;
 				}
 			}
 			else if (!slot_idle(slot))
 			{
+				// The label is in a committed buffer of this slot (or an earlier
+				// slot).  A later commit of the slot proves it visible.
 				// TODO(excise): level 2; a guest acquire waited on an earlier slot.
 				MTL_PROBE_LATCH(2, "sync/label wait");
-				wait_for_slot(index);
-				slot.labels.clear();
-				waited = true;
+
+				if (!await_slot(slot, "label wait"))
+				{
+					mark_device_lost("a label commit did not complete");
+				}
+				else
+				{
+					waited = true;
+				}
 			}
-			else
-			{
-				// This slot's commit has completed, so its label is visible.
-				slot.labels.clear();
-			}
+
+			// Every label of the slot is now visible: the wait above was for the
+			// slot's last commit, which the serialized queue orders after them all.
+			slot.labels.clear();
+			slot.committed_label_count = 0;
 		}
 
 		return waited;
-	}
-
-	bool command_recorder::wait_for_slot(u32 index)
-	{
-		return await_slot(m_slots[index], "label wait");
 	}
 
 	void command_recorder::publish_residency()
@@ -980,9 +1570,16 @@ namespace mtl
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/flush labels");
 
-		// The encoder opens first: opening it can re-enter the slot, and the batch
-		// that survives that is the one this copy must encode.
+		// The encoder opens first: opening it can begin a new command buffer, and
+		// the batch that survives that is the one this copy must encode.
 		MTL4::ComputeCommandEncoder* encoder = open_copy_encoder();
+
+		if (!encoder)
+		{
+			// The device is lost; no label can reach the guest from here.
+			m_pending_count = 0;
+			return;
+		}
 
 		frame_slot& slot = m_slots[m_slot];
 		const u32 first = slot.label_staging_offset - m_pending_count * sizeof(u32);
@@ -1090,7 +1687,7 @@ namespace mtl
 		m_compute_encoder = nullptr;
 	}
 
-	void command_recorder::commit_slot(frame_slot& slot, u32 index, u32 generation)
+	u64 command_recorder::commit_slot(frame_slot& slot, u32 index, u32 generation, MTL4::CommandBuffer* buffer)
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "recorder/commit slot");
@@ -1105,10 +1702,31 @@ namespace mtl
 			// TODO(excise): level 1; block timer.
 			MTL_PERF_SCOPE(1, "recorder/commit slot/options");
 			options = MTL4::CommitOptions::alloc()->init();
-			options->addFeedbackHandler([this, index, generation](MTL4::CommitFeedback* feedback) { on_feedback(index, generation, feedback); });
+
+			// The block captures the owner, not the recorder, so it can outlive
+			// shutdown without dereferencing freed state (L3).
+			std::shared_ptr<feedback_owner> owner = m_feedback;
+
+			if (owner)
+			{
+				owner->in_flight.fetch_add(1, std::memory_order_acq_rel);
+				options->addFeedbackHandler([owner, index, generation](MTL4::CommitFeedback* feedback)
+				{
+					{
+						std::lock_guard lock(owner->lock);
+
+						if (owner->recorder)
+						{
+							owner->recorder->on_feedback(index, generation, feedback);
+						}
+					}
+
+					owner->in_flight.fetch_sub(1, std::memory_order_acq_rel);
+				});
+			}
 		}
 
-		const MTL4::CommandBuffer* buffers[] = { slot.command_buffer };
+		const MTL4::CommandBuffer* buffers[] = { buffer };
 
 		{
 			// TODO(excise): level 1; block timer.
@@ -1128,6 +1746,7 @@ namespace mtl
 
 		// TODO(excise): level 1; running total.
 		MTL_PERF_COUNT(1, "recorder/commits", 1);
+		return completion;
 	}
 
 	void command_recorder::on_feedback(u32 index, u32 generation, MTL4::CommitFeedback* feedback)
@@ -1143,7 +1762,17 @@ namespace mtl
 		{
 			// TODO(excise): level 2; the commit failed (area F, Metal faults).
 			MTL_PROBE_LATCH(2, "fault/commit failed");
-			rsx_log.error("Metal 4: commit failed: %s", error->localizedDescription()->utf8String());
+
+			const char* message = (error->localizedDescription())
+				? error->localizedDescription()->utf8String()
+				: "no description";
+			rsx_log.error("Metal 4: commit failed: %s", message);
+
+			// L3: a GPU error is a lost device, not a completed commit.  The
+			// completion counter must not advance, or the query gate would read a
+			// result the GPU never produced.
+			mark_device_lost("a commit reported a GPU error");
+			return;
 		}
 
 		// EXCISE-BEGIN feedback-lag

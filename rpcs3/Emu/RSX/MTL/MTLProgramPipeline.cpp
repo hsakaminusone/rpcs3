@@ -972,9 +972,20 @@ namespace mtl
 		}
 	}
 
-	bool pipeline_jobs::shutdown()
+	bool pipeline_jobs::idle() const
 	{
-		{
+		std::lock_guard lock(m_mutex);
+		return m_jobs.empty();
+	}
+
+	u32 pipeline_jobs::published_total() const
+	{
+		std::lock_guard lock(m_mutex);
+		return m_published;
+	}
+
+	bool pipeline_jobs::shutdown()
+	{		{
 			std::lock_guard lock(m_mutex);
 			m_accepting = false;
 			m_shutting_down = true;
@@ -1015,6 +1026,10 @@ namespace mtl
 			// TODO(excise): level 1; the compiler did not drain at teardown.
 			MTL_PROBE_LATCH(1, "session/archive skipped after abort");
 		}
+		// The link worker was not stopped, so it still holds this device's compiler
+		// and program addresses.  A later init must not create a second compiler
+		// beside it (L6).
+		g_abandoned_worker.store(true, std::memory_order_release);
 		rsx_log.error("Metal: %u shader jobs did not finish before teardown; the device is left alive", remaining);
 		return false;
 	}

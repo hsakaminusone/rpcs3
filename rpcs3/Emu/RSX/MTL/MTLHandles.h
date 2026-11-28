@@ -115,6 +115,11 @@ namespace mtl
 		// cached on the root and released with it.
 		texture* get_view(const rsx::texture_channel_remap_t& remap);
 
+		// The same image under another pixel format, with the view's channel map.
+		// Used for the sRGB sample of a gamma texture (T8).  The view is cached on
+		// the object it was asked of and released with it.
+		texture* get_format_view(MTL::PixelFormat format);
+
 		// The stencil read of a redirected depth unit (REALISATION.md, "The
 		// depth/stencil-as-texture cluster").  Only a depth surface has a castable
 		// stencil view, so the base returns null and a sampled view delegates to
@@ -124,6 +129,10 @@ namespace mtl
 	private:
 		texture* m_image = nullptr;
 		std::unordered_map<u32, std::unique_ptr<texture>> m_views;
+		std::unique_ptr<texture> m_format_view;
+		MTL::PixelFormat m_format_view_format = MTL::PixelFormat::PixelFormatInvalid;
+		MTL::TextureSwizzleChannels m_view_channels{};
+		bool m_view_channels_set = false;
 		std::array<MTL::TextureSwizzle, 4> m_native_layout =
 		{
 			MTL::TextureSwizzleAlpha, MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue

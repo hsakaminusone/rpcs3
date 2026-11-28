@@ -42,6 +42,13 @@ namespace mtl
 
 		MTL::SamplerBorderColor border_color = MTL::SamplerBorderColorTransparentBlack;
 
+		// Metal has three border colours.  A guest colour that is not one of them
+		// is returned by the shader, which reads it from the texture parameters,
+		// and the sampler clamps to the edge on the axes named here by
+		// rsx::texture_control_bits BORDER_S/T/R (T11).
+		u32 border_axis_mask = 0;
+		color4f border_value{};
+
 		// A shadow sampler compares instead of filtering.  The caller sets the flag
 		// from current_fp_texture_state.shadow_textures (RSXThread.cpp:2599-2605); the
 		// compare value is SET_TEXTURE_ADDRESS.zfunc (LLD-texture §3.2).

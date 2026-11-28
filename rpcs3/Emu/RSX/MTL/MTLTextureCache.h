@@ -398,7 +398,10 @@ namespace mtl
 			// generators).  It is a usage bit, not a format: Metal accepts it for
 			// every format the cache creates, compressed ones included, and a
 			// texture only becomes a pass's attachment when a transfer asks for it.
-			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView | MTL::TextureUsageRenderTarget);
+			// The views this cache takes keep the pixel format and only change the
+			// channel swizzle (MTLHandles.cpp, get_view), so PixelFormatView buys
+			// nothing here and turns off lossless compression (C20).
+			descriptor->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageRenderTarget);
 			return descriptor;
 		}
 

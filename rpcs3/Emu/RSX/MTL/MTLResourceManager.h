@@ -39,12 +39,19 @@ namespace mtl
 		MTL::Heap* allocate(u64 size, u64 alignment, u64& offset, u32& block_index);
 		void free(u32 block_index, u64 offset, u64 size);
 
+		// Release the dedicated heaps that became empty.  Called at a point where
+		// the GPU can no longer reference them (L7).
+		void garbage_collect();
+
 	private:
 		struct block
 		{
 			MTL::Heap* heap = nullptr;
 			// (offset, size) spans, offset-sorted.
 			std::vector<std::pair<u64, u64>> free_spans;
+			// A dedicated heap holds exactly one span, so it can be retired as soon
+			// as that span is free; a pooled block always stays.
+			bool dedicated = false;
 		};
 
 		MTL::Heap* create_heap(u64 size);
@@ -53,6 +60,7 @@ namespace mtl
 		MTL::StorageMode m_storage = MTL::StorageModeShared;
 		u64 m_block_size = 0;
 		std::vector<block> m_blocks;
+		std::vector<MTL::Heap*> m_empty_heaps;
 		residency_manager* m_residency = nullptr;
 	};
 
@@ -87,6 +95,10 @@ namespace mtl
 		MTL4::CommandQueue* m_queue = nullptr;
 		MTL::ResidencySet* m_persistent = nullptr;
 		std::unordered_set<MTL::Allocation*> m_published;
+		// Removals wait for the next flush so a frame's releases are one commit,
+		// not one per allocation (L7).  The set retains what it names, so the
+		// owner can be released before the removal reaches it.
+		std::vector<MTL::Allocation*> m_removals;
 		bool m_dirty = false;
 	};
 

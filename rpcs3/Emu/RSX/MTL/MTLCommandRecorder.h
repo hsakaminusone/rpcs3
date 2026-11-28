@@ -2,23 +2,48 @@
 
 #include "MTLDevice.h"
 #include "MTLResourceManager.h"
+#include "MTLFormats.h"
 
 #ifdef RSX_ENABLE_METAL4
 
 #include "MTLArgumentBinds.h"
+#include "Emu/RSX/Utils/rsx_utils.h"
 
 #include <array>
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace mtl
 {
-	// One frame slot: one allocator, one reusable command buffer, and one argument
-	// table per stage (HLD-04 §3.1).
+	class command_recorder;
+
+	// The commit feedback blocks outlive the recorder: Metal keeps a block until
+	// the queue delivers its feedback, which can be after shutdown.  The block
+	// therefore captures this owner by value and reaches the recorder only
+	// through the pointer it guards (L3).
+	struct feedback_owner
+	{
+		std::mutex lock;
+		command_recorder* recorder = nullptr;
+		std::atomic<u32> in_flight{0};
+	};
+
+	// One frame slot: one allocator, a small pool of command buffers, and one
+	// argument table per stage (HLD-04 §3.1).  A mid-frame commit (read-back,
+	// label release) ends the open buffer and continues in the next one, so the
+	// allocator is reset only when the slot is recycled, never while its buffers
+	// may still run (A1/R1).
 	struct frame_slot
 	{
+		static constexpr u32 buffer_capacity = 8;
+
 		MTL4::CommandAllocator* allocator = nullptr;
-		MTL4::CommandBuffer* command_buffer = nullptr;
+		std::array<MTL4::CommandBuffer*, buffer_capacity> buffers{};
+		// The object the next buffer uses.  Every entry below it has been
+		// allocated at least once; a reset reuses them from zero.
+		u32 buffer_index = 0;
 		MTL4::ArgumentTable* vertex_table = nullptr;
 		MTL4::ArgumentTable* fragment_table = nullptr;
 		// The interpreter draws from its own tables so its compact texture and
@@ -49,6 +74,10 @@ namespace mtl
 		u32 label_staging_offset = 0;
 		// True when the slot's command buffer has been begun since its last end.
 		bool buffer_open = false;
+		// The number of label addresses in `labels` that belong to a command
+		// buffer already committed.  The rest are still staged or encoded in the
+		// open buffer, so an acquire on one must commit it first (A1/R1).
+		u32 committed_label_count = 0;
 		// The addresses whose label writes are in this slot's command buffer (or
 		// its last commit, until that commit reports back).  A guest acquire on one
 		// of them must wait for this slot before it reads the old guest word.
@@ -65,8 +94,14 @@ namespace mtl
 	class command_recorder
 	{
 	public:
-		void init(const device& dev, resource_manager& resources);
-		void shutdown();
+		void init(device& dev, resource_manager& resources);
+		// False when the frame ring did not drain.  The caller then leaks the
+		// backend rather than freeing objects the GPU may still read (L2).
+		bool shutdown();
+
+		// True once a commit timed out or a feedback reported an error.  The core
+		// stops issuing draws and the UI can report the loss (L1, L3).
+		bool device_lost() const { return m_device_lost; }
 
 		// Wait for the slot to come back from the GPU, recycle its frame resources,
 		// then open the slot's command buffer (HLD-04 §3.2).  Returns false when the
@@ -105,6 +140,13 @@ namespace mtl
 		// submitted: a guest that waits for it would wait for ever.
 		bool label_writes_pending() const { return m_pending_count != 0; }
 
+		// Ask for the pending label writes to be committed at the next natural
+		// boundary rather than immediately, so a release inside a pass does not
+		// split it (A2).  The next pass boundary commits; the caller also checks
+		// `label_commit_due` against its deadline for a parked FIFO.
+		void request_label_commit() { m_label_commit_due = true; }
+		bool label_commit_due() const { return m_label_commit_due; }
+
 		// Submit the frame's recorded work so the pending label writes become
 		// visible, and leave the slot to be re-entered by the next command.  A guest
 		// waiting on a label needs this; it does not wait for the GPU, the guest's
@@ -120,6 +162,30 @@ namespace mtl
 
 		MTL4::RenderCommandEncoder* open_pass(const MTL4::RenderPassDescriptor* descriptor, MTL4::RenderEncoderOptions options = MTL4::RenderEncoderOptionNone);
 		MTL4::ComputeCommandEncoder* open_compute();
+
+		// Byte-swap `size` bytes of `buffer` at `offset` in place, one guest element
+		// of `element_size` (2 or 4) at a time.  The copies around it are blits in
+		// the same compute encoder, and Metal 4 tracks no hazards, so the dispatch
+		// is fenced on both sides with an encoder-scope edge (T2).
+		void swap_bytes(MTL4::ComputeCommandEncoder* encoder, MTL::Buffer* buffer, u64 offset, u64 size, u32 element_size);
+
+		// One side of a typeless copy.  `depth` names the guest depth encoding,
+		// because a D32F_S8 image cannot tell z24s8_uint from z24s8_float (T6).
+		struct typeless_region
+		{
+			MTL::Texture* image = nullptr;
+			areai rect{};
+			u32 level = 0;
+			u32 slice = 0;
+			bool depth = false;
+			rsx::surface_depth_format2 depth_format = rsx::surface_depth_format2::z24s8_uint;
+		};
+
+		// Copy `src` into `dst` when the two images describe the same guest bytes
+		// under different formats: same format is a texture copy, two colour
+		// formats stage through a buffer, and depth ↔ colour is a compute
+		// conversion.  Returns false when no bit-preserving route exists (T6).
+		bool copy_typeless(command_recorder& cmd, const typeless_region& src, const typeless_region& dst);
 
 		// End the open encoder, if any.  Every encoder ends with a producer-scope
 		// ALL->ALL barrier: Metal 4 tracks no hazards, so the encoder boundary is
@@ -188,7 +254,7 @@ namespace mtl
 
 		void release_slot(frame_slot& slot);
 		void allocate_slot(frame_slot& slot);
-		void commit_slot(frame_slot& slot, u32 index, u32 generation);
+		u64 commit_slot(frame_slot& slot, u32 index, u32 generation, MTL4::CommandBuffer* buffer);
 		void on_feedback(u32 index, u32 generation, MTL4::CommitFeedback* feedback);
 
 		// True when the slot's last commit has reached the GPU.  One atomic load,
@@ -203,13 +269,22 @@ namespace mtl
 		bool await_value(u64 value, const char* what);
 		bool await_slot(const frame_slot& slot, const char* what);
 
-		// Wait for the slot's commit, reset its allocator and open a new command
-		// buffer.  The caller must know the slot's command buffer is closed.
-		void reenter_slot();
+		// Begin the slot's next command buffer.  This never waits: the allocator
+		// keeps handing out buffers until the slot's pool is full, and only then
+		// does the slot await its own completion and reset (A1/R1).
+		bool next_buffer();
 
-		// Wait for a slot other than the open one to complete its commit.  The
-		// caller has already found a label write in that slot.
-		bool wait_for_slot(u32 index);
+		// End the open command buffer, commit it and return the completion value
+		// the queue will signal.  Zero when nothing was open.  The caller decides
+		// whether to await the value; a label commit does not.
+		u64 commit_open_buffer(const char* what);
+
+		// Wait for the slot's last commit and reset its allocator and buffer pool.
+		// Called when the slot is recycled at the frame boundary.
+		bool recycle_slot(const char* what);
+
+		// Latch device loss.  Recording stops; nothing in flight is freed.
+		void mark_device_lost(const char* why);
 
 		// Open the compute encoder that carries copies, closing an open pass.  A
 		// consecutive copy reuses it, so a batch costs one encoder (HLD-04 §3.1).
@@ -224,9 +299,24 @@ namespace mtl
 		// has to make sure they are in the set before the buffer is committed (P6).
 		void publish_residency();
 
+		// Build the guest-endian byte-swap kernels (T2).  They live with the
+		// recorder because every upload and read-back path needs them, and the
+		// recorder already owns the compiler and the shared blit argument table.
+		void build_swap_pipelines();
+
+		// Build the depth ↔ z24s8 conversion kernels (T6).
+		void build_convert_pipelines();
+
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
+		MTL4::Compiler* m_compiler = nullptr;
 		resource_manager* m_resources = nullptr;
+		MTL::Library* m_swap_library = nullptr;
+		MTL::ComputePipelineState* m_bswap16 = nullptr;
+		MTL::ComputePipelineState* m_bswap32 = nullptr;
+		MTL::Library* m_convert_library = nullptr;
+		MTL::ComputePipelineState* m_depth_to_pack = nullptr;
+		MTL::ComputePipelineState* m_pack_to_depth = nullptr;
 		std::array<frame_slot, frame_slot_count> m_slots{};
 		// Delivered commit feedback per slot.  The feedback thread writes it and the
 		// RSX thread reads it, so it is atomic.
@@ -244,6 +334,9 @@ namespace mtl
 		MTL::Buffer* m_label_probe = nullptr;
 		std::array<u32, label_staging_capacity> m_pending_labels{};
 		u32 m_pending_count = 0;
+		// A back-end release asked for the labels to be committed at the next pass
+		// boundary instead of splitting the open pass (A2).
+		bool m_label_commit_due = false;
 		// EXCISE-BEGIN label-verify
 		// TODO(excise): level 2; the last GPU label write, verified after feedback.
 		u32 m_diag_label_address = 0;
@@ -299,8 +392,13 @@ namespace mtl
 		void* m_watch_stack[encoder_watch_depth] = {};
 		// EXCISE-END encoder-watch-state
 
-		// Set when a commit left the slot closed; the next command re-enters it.
-		bool m_reenter_pending = false;
+		// Set when the slot could not be recycled: every commit of the slot is
+		// abandoned and the slot holds fresh objects.  The next command uses them
+		// instead of waiting for a completion that will never arrive (L1).
+		std::atomic<bool> m_device_lost{false};
+		// The device's own loss flag, so check_device_status() sees the same state.
+		std::atomic<bool>* m_lost = nullptr;		// Feedback blocks capture this owner, not `this` (L3).
+		std::shared_ptr<feedback_owner> m_feedback;
 		MTL::Drawable* m_drawable = nullptr;
 	};
 }

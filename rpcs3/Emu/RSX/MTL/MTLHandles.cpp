@@ -63,6 +63,8 @@ namespace mtl
 
 		auto view = std::make_unique<texture>(m_resources);
 		view->m_image = this;
+		view->m_view_channels = channels;
+		view->m_view_channels_set = true;
 		view->assign(value()->newTextureView(pixel_format(), type,
 			NS::Range::Make(0, value()->mipmapLevelCount()),
 			NS::Range::Make(0, slices),
@@ -70,6 +72,52 @@ namespace mtl
 
 		texture* result = view.get();
 		m_views.emplace(remap.encoded, std::move(view));
+		return result;
+	}
+
+	texture* texture::get_format_view(MTL::PixelFormat format)
+	{
+		if (format == MTL::PixelFormat::PixelFormatInvalid || format == pixel_format())
+		{
+			return this;
+		}
+
+		if (m_format_view && m_format_view_format == format)
+		{
+			return m_format_view.get();
+		}
+
+		// The view keeps the channel map the unit asked for; a plain image uses
+		// the Metal identity.  The source view is the one the sampler was resolved
+		// against, so its type and slice extent are the right ones (T8).
+		const MTL::TextureSwizzleChannels channels = m_view_channels_set
+			? m_view_channels
+			: MTL::TextureSwizzleChannels::Make(MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen,
+				MTL::TextureSwizzleBlue, MTL::TextureSwizzleAlpha);
+
+		MTL::TextureType type = value()->textureType();
+		if (sample_count() > 1)
+		{
+			type = MTL::TextureType2DMultisample;
+		}
+
+		const NS::UInteger slices =
+			type == MTL::TextureTypeCube ? 6u :
+			type == MTL::TextureType3D ? value()->depth() :
+			value()->arrayLength();
+
+		auto view = std::make_unique<texture>(m_resources);
+		view->m_image = this;
+		view->m_view_channels = channels;
+		view->m_view_channels_set = true;
+		view->assign(value()->newTextureView(format, type,
+			NS::Range::Make(0, value()->mipmapLevelCount()),
+			NS::Range::Make(0, slices),
+			channels));
+
+		texture* result = view.get();
+		m_format_view_format = format;
+		m_format_view = std::move(view);
 		return result;
 	}
 

@@ -281,6 +281,10 @@ namespace mtl
 		properties2.emulate_depth_clip_only = false;
 		properties2.require_instanced_render = !!(m_prog.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS);
 		properties2.emulate_depth_range = !!(m_prog.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_RANGE);
+		// The RSX expects one vertex position from a shared edge regardless of which
+		// triangle computes it.  Apple's compiler may otherwise fuse the transform
+		// differently per draw or per pipeline (upstream #19815; C5).
+		properties2.require_explicit_invariance = true;
 
 		glsl::insert_glsl_legacy_function(OS, properties2);
 		glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_vulkan);
@@ -448,6 +452,7 @@ namespace mtl
 		properties2.emulate_depth_clip_only = false;
 		properties2.require_instanced_render = !!(m_prog.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS);
 		properties2.emulate_depth_range = false;
+		properties2.require_explicit_invariance = true;
 
 		glsl::insert_glsl_legacy_function(OS, properties2);
 		glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_vulkan);

@@ -79,10 +79,20 @@ namespace mtl
 		descriptor->setWidth(scaled_w);
 		descriptor->setHeight(scaled_h);
 		descriptor->setSampleCount(host_samples);
-		// PixelFormatView is required because a texture unit that samples this
-		// surface reads it through a swizzled view (MTLHandles.cpp, get_view), and
-		// the stencil read needs it too (MTLSurface.cpp, stencil_view).
-		descriptor->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead | MTL::TextureUsagePixelFormatView);
+		// A sampled surface reads through a view that keeps the pixel format and
+		// only changes the channel swizzle (MTLHandles.cpp, get_view), so the colour
+		// usage does not need PixelFormatView.  Apple disables lossless compression
+		// when the flag is set (C20).  The one view that does change the layout is
+		// the stencil half of a combined depth-stencil surface, so only such a
+		// surface carries the bit (MTLSurface.cpp, stencil_view).
+		MTL::TextureUsage usage = MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead;
+
+		if (m_depth && rsx::is_depth_stencil_format(get_surface_depth_format()))
+		{
+			usage |= MTL::TextureUsagePixelFormatView;
+		}
+
+		descriptor->setUsage(usage);
 		assign(m_resources->new_texture(descriptor, MTL::StorageModePrivate));
 
 		// The resolved image persists and stays samplable (HLD-02 §2.2).
@@ -330,15 +340,26 @@ namespace mtl
 				stencil_init_flags = source->stencil_init_flags;
 			}
 
-			encoder->copyFromTexture(source->get_surface(rsx::surface_access::transfer_read)->value(), 0, 0,
-				MTL::Origin::Make(src.x1, src.y1, 0),
-				MTL::Size::Make(src.x2 - src.x1, src.y2 - src.y1, 1),
-				target->value(), 0, 0,
-				MTL::Origin::Make(dst.x1, dst.y1, 0));
+			// The two surfaces can hold the same guest bytes under different host
+			// formats: a depth target later read as colour, or a colour target
+			// aliasing a depth surface.  One typeless route covers every case
+			// (T6).
+			command_recorder::typeless_region src_region{};
+			src_region.image = source->get_surface(rsx::surface_access::transfer_read)->value();
+			src_region.rect = src;
+			src_region.depth = source->is_depth_surface();
+			src_region.depth_format = source->get_surface_depth_format();
+
+			command_recorder::typeless_region dst_region{};
+			dst_region.image = target->value();
+			dst_region.rect = dst;
+			dst_region.depth = m_depth;
+			dst_region.depth_format = get_surface_depth_format();
+
+			copied = cmd.copy_typeless(cmd, src_region, dst_region) || copied;
 
 			optimize_copy = optimize_copy && !covers;
 			newest_tag = source->last_use_tag;
-			copied = true;
 		}
 
 		// The copies landed in the target image, and the next encoder samples or
@@ -446,6 +467,12 @@ namespace mtl
 		{
 			const u32 plane_pitch = width() * 4;
 			MTL::Buffer* staging = m_resources->new_buffer(plane_pitch * height(), MTL::StorageModeShared);
+			if (!staging)
+			{
+				rsx_log.error("Metal 4: the depth background staging buffer could not be created");
+				return;
+			}
+
 			decode_depth_plane(staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
 				width(), height(), rsx_pitch, get_bpp(), depth_format);
 
@@ -458,6 +485,34 @@ namespace mtl
 
 			if (rsx::is_depth_stencil_format(depth_format))
 			{
+				// The stencil plane is a separate aspect, so it is a second upload
+				// (T7).  Both are blits in this encoder, and Metal 4 tracks no
+				// hazards, so the depth copy is ordered before the stencil copy.
+				const u32 stencil_pitch = width();
+				MTL::Buffer* stencil_staging = m_resources->new_buffer(static_cast<u64>(stencil_pitch) * height(), MTL::StorageModeShared);
+				if (!stencil_staging)
+				{
+					rsx_log.error("Metal 4: the stencil background staging buffer could not be created");
+					return;
+				}
+
+				decode_stencil_plane(stencil_staging->contents(), static_cast<const u8*>(m_resources->guest_buffer()->contents()) + base_addr,
+					width(), height(), rsx_pitch, get_bpp(), stencil_pitch);
+
+				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false }))
+				{
+					rsx_log.error("Metal 4: the stencil background barrier was refused");
+					cmd.resources().defer_release(stencil_staging);
+					return;
+				}
+
+				encoder->copyFromBuffer(stencil_staging, 0, stencil_pitch, stencil_pitch * height(),
+					MTL::Size::Make(width(), height(), 1),
+					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0),
+					get_depth_plane_option(target->value()->pixelFormat(), true));
+
+				cmd.resources().defer_release(stencil_staging);
+
 				stencil_init_flags |= (1 << 9);
 			}
 		}
@@ -487,11 +542,41 @@ namespace mtl
 		}
 		else
 		{
-			// The guest address is the offset into the guest window (HLD-02 §3.5).
-			encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr,
-				rsx_pitch, rsx_pitch * get_surface_height<rsx::surface_metrics::samples>(),
-				MTL::Size::Make(width(), height(), 1),
-				target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+			const u32 element_size = guest_endian_element_size(get_bpp());
+
+			if (element_size)
+			{
+				// The guest window is big-endian and holds the surface planes back
+				// to back.  A GPU swap in the staging buffer avoids dispatching on
+				// guest memory, and avoids touching the window from the CPU (T2).
+				const u32 guest_height = get_surface_height<rsx::surface_metrics::samples>();
+				const u64 staging_size = static_cast<u64>(rsx_pitch) * guest_height;
+				MTL::Buffer* staging = m_resources->new_buffer(staging_size, MTL::StorageModeShared);
+
+				if (!staging)
+				{
+					rsx_log.error("Metal 4: the surface background staging buffer could not be created");
+					return;
+				}
+
+				encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr, staging, 0, staging_size);
+
+				cmd.swap_bytes(encoder, staging, 0, staging_size, element_size);
+
+				encoder->copyFromBuffer(staging, 0, rsx_pitch, staging_size,
+					MTL::Size::Make(width(), height(), 1),
+					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+
+				cmd.resources().defer_release(staging);
+			}
+			else
+			{
+				// The guest address is the offset into the guest window (HLD-02 §3.5).
+				encoder->copyFromBuffer(m_resources->guest_buffer(), base_addr,
+					rsx_pitch, rsx_pitch * get_surface_height<rsx::surface_metrics::samples>(),
+					MTL::Size::Make(width(), height(), 1),
+					target->value(), 0, 0, MTL::Origin::Make(0, 0, 0));
+			}
 		}
 
 		if (sample_count() > 1)
@@ -749,6 +834,13 @@ namespace mtl
 			// Without an encoder-scope edge the buffer copy may observe rows the
 			// texture copy has not written yet (S1).
 			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
+
+			// The guest stores its words big-endian, so the scratch is exchanged
+			// before it reaches guest memory, on the GPU (T2).
+			if (const u32 element_size = guest_endian_element_size(bpp))
+			{
+				cmd.swap_bytes(encoder, scratch, 0, span, element_size);
+			}
 
 			// A buffer-to-buffer blit needs four-byte aligned offsets and length.
 			// When the guest range is aligned the copy stays in the command stream

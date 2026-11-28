@@ -600,7 +600,25 @@ namespace mtl
 		{
 			if (dirty)
 			{
-				upload(cached->second, desc->get_data(), desc->w, desc->h, 1, false);
+				// Up to three frames are in flight, and a dirty image is rewritten
+				// by the CPU.  Writing into the cached texture would race a slot
+				// that still samples it, so the update goes to a new object and the
+				// old one is released once the current slot retires (L5).
+				resources.defer_release(cached->second);
+
+				MTL::Texture* replacement = make_texture(resources, desc->get_data(), desc->w, desc->h, 1, false);
+
+				if (!replacement)
+				{
+					// The update failed; keep the old object rather than dropping
+					// the image from the cache.
+					m_temp_cache.erase(cached);
+					m_temp_owner.erase(key);
+					return nullptr;
+				}
+
+				resources.make_persistent(replacement);
+				cached->second = replacement;
 			}
 
 			return cached->second;

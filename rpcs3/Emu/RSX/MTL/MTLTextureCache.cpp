@@ -670,7 +670,15 @@ namespace mtl
 		const u32 transfer_height = region.height;
 		const u32 transfer_x = region.x;
 		const u32 transfer_y = region.y;
-		ensure(transfer_width && transfer_height);
+
+		// A trimmed region can be empty: the section's confirmed range may not
+		// intersect the rectangle at all.  There is nothing to copy to guest memory,
+		// and asserting here aborts a title that simply flushed an empty section
+		// (C12).
+		if (!transfer_width || !transfer_height)
+		{
+			return;
+		}
 
 		const u32 staging_size = std::max<u32>(rsx_pitch * height, static_cast<u32>(get_section_size()));
 		if (!m_staging || m_staging->value()->length() < staging_size)
@@ -1052,67 +1060,41 @@ namespace mtl
 			if (src_format != dst_format)
 			{
 				// Metal's texture copy needs one pixel format on both sides.  A
-				// typeless copy is a bit copy, so stage it through a buffer: the two
-				// blits preserve the guest words, and the destination view names the
-				// new format.  The texel counts differ when the two views of the same
-				// memory have different texel widths, which the buffer's byte extent
-				// absorbs (VKTextureCache.cpp:495-520).  A block-compressed format has
-				// no per-texel width, so it cannot take this route.
-				if (!src_texel || !dst_texel)
+				// typeless copy is a bit copy (or a depth conversion), so the
+				// recorder picks the route: buffer round trip for two colour
+				// formats, a compute conversion for depth ↔ colour (T6).  A
+				// block-compressed format has no per-texel width, so it cannot
+				// take either route.
+				const auto depth_format_of = [](texture* image, MTL::PixelFormat format)
 				{
-					rsx_log.error("Metal 4: typeless texture copy between formats %u and %u has no texel size",
-						static_cast<u32>(src_format), static_cast<u32>(dst_format));
-					continue;
-				}
+					if (is_depth_format(format))
+					{
+						if (auto* surf = dynamic_cast<surface*>(image))
+						{
+							return surf->get_surface_depth_format();
+						}
+					}
 
-				const u32 convert_w = (src_w * src_texel) / dst_texel;
+					return rsx::surface_depth_format2::z24s8_uint;
+				};
 
-				if (convert_w != slice.dst_w || src_h != slice.dst_h)
-				{
-					// The two sides do not describe the same bytes, so no bit copy
-					// exists; a resample across layouts is not a copy.
-					rsx_log.error("Metal 4: typeless texture copy from format %u to %u has no bit-preserving route",
-						static_cast<u32>(src_format), static_cast<u32>(dst_format));
-					continue;
-				}
+				command_recorder::typeless_region src_region{};
+				src_region.image = slice.src->value();
+				src_region.rect = areai{ static_cast<s32>(src_x), static_cast<s32>(src_y),
+					static_cast<s32>(src_x + src_w), static_cast<s32>(src_y + src_h) };
+				src_region.depth = is_depth_format(src_format);
+				src_region.depth_format = depth_format_of(slice.src, src_format);
 
-				if (!encoder && !(encoder = cmd.open_compute()))
-				{
-					return;
-				}
+				command_recorder::typeless_region dst_region{};
+				dst_region.image = dst_image->value();
+				dst_region.rect = areai{ static_cast<s32>(slice.dst_x), static_cast<s32>(slice.dst_y),
+					static_cast<s32>(slice.dst_x + slice.dst_w), static_cast<s32>(slice.dst_y + slice.dst_h) };
+				dst_region.level = slice.level;
+				dst_region.slice = static_cast<u32>(dst_slice);
+				dst_region.depth = is_depth_format(dst_format);
+				dst_region.depth_format = depth_format_of(dst_image, dst_format);
 
-				// A 256-byte row keeps the blit inside Apple's alignment rule for
-				// every texel size this backend creates.
-				const u32 row_bytes = utils::align(static_cast<u32>(src_w) * src_texel, 256u);
-				const u32 image_bytes = row_bytes * src_h;
-
-				MTL::Buffer* staging = cmd.resources().new_buffer(utils::align<u64>(image_bytes, 0x1000), MTL::StorageModeShared);
-				if (!staging)
-				{
-					rsx_log.error("Metal 4: typeless texture copy staging allocation failed");
-					continue;
-				}
-
-				encoder->copyFromTexture(slice.src->value(), 0, 0,
-					MTL::Origin::Make(src_x, src_y, 0),
-					MTL::Size::Make(src_w, src_h, 1),
-					staging, 0, row_bytes, image_bytes);
-
-				// The staging buffer is in an untracked heap, so the second blit
-				// needs an explicit edge after the first one.
-				if (!emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit }))
-				{
-					rsx_log.error("Metal 4: typeless texture copy barrier was refused");
-					cmd.resources().defer_release(staging);
-					continue;
-				}
-
-				encoder->copyFromBuffer(staging, 0, row_bytes, image_bytes,
-					MTL::Size::Make(convert_w, src_h, 1),
-					dst_image->value(), dst_slice, slice.level,
-					MTL::Origin::Make(slice.dst_x, slice.dst_y, dst_z));
-
-				cmd.resources().defer_release(staging);
+				cmd.copy_typeless(cmd, src_region, dst_region);
 				continue;
 			}
 
@@ -1191,7 +1173,9 @@ namespace mtl
 		}
 		// EXCISE-END bind-cyclic-latch
 
-		if (!desc->image_handle)
+		texture* image = desc->image_handle;
+
+		if (!image)
 		{
 			// TODO(excise): level 2; which deferred materialisation the unit took.
 			MTL_PROBE_HISTOGRAM(2, "texture bind deferred op", static_cast<u32>(desc->external_subresource_desc.op), "deferred op");
@@ -1207,7 +1191,7 @@ namespace mtl
 			// copy or gather (`sampled_image_descriptor::validate`, texture_cache.h:570).
 			// Materialize it before the render pass opens; the copy encoder is a
 			// queue-form producer, and the caller records its write below.
-			texture* image = create_temporary_subresource(cmd, desc->external_subresource_desc);
+			image = create_temporary_subresource(cmd, desc->external_subresource_desc);
 			if (!image)
 			{
 				// TODO(excise): level 2; a legal descriptor produced no image.
@@ -1228,11 +1212,29 @@ namespace mtl
 				probe::deferred_dump = { image->value(), desc->ref_address,
 					static_cast<u32>(desc->external_subresource_desc.op) };
 			}
-
-			return { image->resource_id(), sampler->gpuResourceID() };
 		}
 
-		return { desc->image_handle->resource_id(), sampler->gpuResourceID() };
+		// A gamma texture can fetch through an sRGB view, so the hardware expands
+		// the value and the shader does not (VKDraw.cpp:383-397; GLDraw.cpp:391-408).
+		// The decision lives in format_ex: the shader's control word is built from
+		// it after this resolve, and texture_bind has no room for a flag (T8).
+		if (desc->upload_context == rsx::texture_upload_context::shader_read &&
+			desc->format_ex.hw_SRGB_possible())
+		{
+			const MTL::PixelFormat srgb_format = to_srgb(image->pixel_format());
+
+			if (srgb_format != MTL::PixelFormat::PixelFormatInvalid && srgb_format != image->pixel_format())
+			{
+				if (texture* view = image->get_format_view(srgb_format))
+				{
+					image = view;
+					desc->format_ex.texel_remap_control &= ~rsx::texture_control_bits::GAMMA_CTRL_MASK;
+					desc->format_ex.host_features |= rsx::RSX_HOST_FORMAT_FEATURE_SRGB;
+				}
+			}
+		}
+
+		return { image->resource_id(), sampler->gpuResourceID() };
 	}
 }
 

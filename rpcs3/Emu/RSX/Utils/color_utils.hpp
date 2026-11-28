@@ -39,6 +39,13 @@ namespace rsx
 		FF_GAMMA_BIT,
 		FF_16BIT_CHANNELS_BIT,
 
+		// Metal has three sampler border colours, so a guest colour that is not
+		// one of them is returned by the shader, one bit per axis (T11).  Other
+		// backends take a custom border colour and never set these.
+		BORDER_S,
+		BORDER_T,
+		BORDER_R,
+
 		// Meta
 		GAMMA_CTRL_MASK = (1 << GAMMA_R) | (1 << GAMMA_G) | (1 << GAMMA_B) | (1 << GAMMA_A),
 		GAMMA_RGB_MASK = (1 << GAMMA_R) | (1 << GAMMA_G) | (1 << GAMMA_B),

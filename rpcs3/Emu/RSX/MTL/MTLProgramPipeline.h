@@ -189,6 +189,15 @@ namespace mtl
 			const std::function<bool()>& stop = {});
 		bool shutdown();
 
+		// True when no job is queued or in flight.  A rotation may retire a
+		// compiler only then, because a job holds the compiler it was submitted
+		// to (C29).
+		bool idle() const;
+
+		// Pipelines published so far.  The rotation threshold counts them, so a
+		// session that compiles slowly still rotates on the time bound.
+		u32 published_total() const;
+
 		// Run one compiler call synchronously, serialized with the link worker.
 		// Metal 4's compiler is not re-entrant with the pipeline-data-set
 		// serializer (L18), and the interpreter's first use has no other way to

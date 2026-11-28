@@ -473,10 +473,10 @@ kernel void fsr_rcas_kernel(texture2d<float, access::read> source [[texture(@FSR
 		MTL4::LibraryDescriptor* descriptor = MTL4::LibraryDescriptor::alloc()->init();
 		descriptor->setSource(NS::String::string(source.c_str(), NS::UTF8StringEncoding));
 
-		// The same maths mode every RSX pipeline gets, so the user's "disable fast
-		// math" setting reaches the filter too (MTLShader.cpp:224-226).
+		// The upscaler is small and bandwidth-bound, so it takes the precise mode
+		// unconditionally instead of inheriting the pipeline maths setting (U1).
 		MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
-		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
+		options->setMathMode(MTL::MathModeSafe);
 		descriptor->setOptions(options);
 
 		NS::Error* error = nullptr;

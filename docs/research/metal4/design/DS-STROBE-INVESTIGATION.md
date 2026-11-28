@@ -133,11 +133,12 @@ to dump it.
 
 ## 1. Position as of 2026-11-26
 
-* **Tree.** `metal4-dev`, committed and pushed to `origin/metal4-dev` on
-  2026-11-26. The F60/F61/F62 fixes, the instrumentation bounds, the DS
-  document and the two new `RSXProducer*` headers are in that commit.
-  `release/metal4` remains one squashed commit with no docs and no
-  instrumentation; never force-push `origin/metal4`.
+* **Tree.** `metal4-dev`, pushed to `origin/metal4-dev` on 2026-11-26. The
+  code/fix commit is `3af46b3a9` (the doc and probe-corpus cleanup notes follow
+  it). The F60/F61/F62 fixes, the instrumentation bounds, the DS document and
+  the two new `RSXProducer*` headers are in that commit. `release/metal4`
+  remains one squashed commit with no docs and no instrumentation; never
+  force-push `origin/metal4`.
 * **Binary.** `build-tests/bin/rpcs3.app` rebuilt after the fixes;
   `rpcs3_test` green (689/689, 2 disabled); `.metal4-release-scrub.py check`
   clean (653 units excised, 0 needs-review, 0 residuals, 0 orphans, 0 empty
@@ -420,14 +421,24 @@ that would test it.
 
 | Path | What is in it |
 |---|---|
-| `build/probe/run-20261124-132656-ds24d/` | **Current run** (`$(cat build/probe/.last-run)`). `stage.log` 24 677 lines, `fix.log` 133 898, `watch.log` 78 011, `stage-nv308a.log` 4 096, `fill.log` 8 192, `mtl-probe.log` 102 690, `dumps/` 12 864 files (`host-present-*` 623, `host-world-target-*` 87, `frame-*`, `fp-*`, `host-sample-*`, `host-tape-*`). The present stream is the only complete final image; `build/probe/present-analysis.json` ranks all 623 frames. Exit 134 at teardown, data intact. |
-| `build/probe/run-20261123-223946-ds24c/` | The first run with a live PPU hook (`v10-kusa`, F43): 5285 stores across all hooked layers, none in a defect quad (E15). Baseline for the `ds24d` deltas. |
-| `build/probe/run-20261118-132833-ds24b/` ... `-135546-ds24b/` | The four producer-census runs (oracle on, world reached). `dumps/frame-6637-m9-manifest.txt` (header `present 6628`) is the complete 293-draw manifest of one frame (F36); the `host-sample-*` files are the per-frame bound-texture dumps. |
-| `build/probe/run-20261119-095732-ds24b/` | The blit/partial-store-hook run: zero `nv3089-host`, `nv0039-host`, `stage-partial` (E14). |
-| `build/probe/launch-ds24d.sh` | The launcher and every probe switch in one place. Copy it for the `literal-provenance`, `freeze-fc` and `freeze-present` runs. |
+| `build/probe/run-20261125-231354-ds24e-skip38/` | **Latest run** (`build/probe/.last-run`): 232 presents 3261–3816, classes `stable 125 / absent 78 / floor-white 22 / flash 7 / blur-left 0`. Meant to skip `fp38`, but id 38 was not compiled, so it is a baseline (§11 2026-11-26). Kept: `host-present-*`, `frame-*` manifests, `fp-*` text/ucode, `mtl-probe.log`, the analysis JSON. |
+| `build/probe/run-20261125-195520-ds24d/` | The F64/F65 reference: 96 presents 4685–4780, the decoded post chain, and the persistent-blur crops. Kept: presents, manifests, the cited `sample-47-*`, `fp-*`, logs. |
+| `build/probe/run-20261124-132656-ds24d/` | The §0.2 symptom corpus: 623 presents including the frames cited there, plus manifests, logs and the `host-sample-*-addrc07a0000` set behind F40. |
+| `build/probe/launch-ds24d.sh`, `launch-ds24e.sh` | The launchers and every probe switch in one place. `launch-ds24e.sh <ids>` sets `MTL_PROBE_SKIP_FP`; `none` is a baseline. |
 | `build/probe/summarize-stage.py`, `build/probe/classify-present.py` | The two scorers: store/defect join, and present-frame classification. The `build/probe/mine-*.txt` files are mined outputs. |
 | `docs/research/metal4/design/CAPTURE-DESIGN.md` | What a capture should contain, by design. |
 | `docs/research/metal4/design/EXPERIMENT-metal4-semantics.mm` | The Metal 4 semantics harness behind F7. |
+
+**Pruned 2026-11-26 for space (24 GB → 4.1 GB).** The raw directories for
+`run-20261123-223946-ds24c` (the live-PPU-hook positive control behind E15),
+`run-20261124-145124-ds24d` (the 335-frame classification run),
+`run-20261124-132203/144357/144950-ds24d` (partial captures) and
+`run-20261125-230336-ds24e-c4260000` were deleted. In the three kept runs every
+`.bin` except `host-present-*`, `fp-*`, `sample-47-*` and
+`host-sample-*-addrc07a0000-*` was deleted, keeping all `*.txt` manifests and
+`*.log`. Conclusions drawn from the deleted dumps live in §4/§5/§11; those
+entries are now the evidence. Anything that needs a deleted dump must be
+re-captured, not re-read.
 
 The dated artifacts removed on 2026-11-24 are superseded by this file. They were
 `DS-SUMMARY-VERIFICATION-2026-11-17`, `F12-CAPTURE-HISTORY-2026-11-18`,
@@ -892,6 +903,13 @@ the id). As a baseline, this run does repeat the white-floor, flash and absent
 classes on the F60–F62 binary; that is consistent with F61/F62 not producing
 those classes, but it is weak evidence because there is no pixel-matched
 before/after window.
+
+**Housekeeping.** The fixes, the consolidated document and the two
+`RSXProducer*` headers were committed as `3af46b3a9` and pushed to
+`origin/metal4-dev` (fast-forward, no force). The probe corpus was then pruned
+from 24 GB to 4.1 GB: six superseded run directories were deleted, and in the
+three kept runs only the present stream, manifests, logs, `fp-*` artifacts, the
+F40 `host-sample-*-addrc07a0000` set and `sample-47-*` were retained. See §7.
 
 ### 2026-11-25 (latest) — the blur is persistent, the post chain is named, and the origin scan no longer crashes teardown
 

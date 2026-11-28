@@ -8,17 +8,22 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/cache_utils.hpp"
 #include "Emu/system_config.h"
+#include "rpcs3_version.h"
 #include "util/logs.hpp"
 #include "util/vm.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <string>
 #include <sys/sysctl.h>
+#include <vector>
 
 namespace mtl
 {
+	std::atomic<bool> g_abandoned_worker{false};
+
 	// The text of a framework error, with the domain and code, because a failure
 	// can carry an error object whose description is empty.
 	static std::string archive_error_text(NS::Error* error)
@@ -67,8 +72,14 @@ namespace mtl
 
 	std::unique_ptr<device> device::create()
 	{
+		// init creates many autoreleased framework objects on the RSX thread, which
+		// has no pool of its own (L6).
+		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 		auto dev = std::unique_ptr<device>(new device());
-		if (!dev->init())
+		const bool ok = dev->init();
+		pool->release();
+
+		if (!ok)
 		{
 			return nullptr;
 		}
@@ -83,6 +94,39 @@ namespace mtl
 			NS::NotificationCenter::defaultCenter()->removeObserver(m_removal_observer);
 			m_removal_observer = nullptr;
 		}
+
+		// Release in dependency order: the task options name the archive, the
+		// compiler names the serializer, and the guest window is a view of the
+		// device's address space (L6).
+		auto release = [](auto*& object)
+		{
+			if (object)
+			{
+				object->release();
+				object = nullptr;
+			}
+		};
+
+		release(m_task_options);
+		release(m_archive);
+
+		// The aliases name the current generation, so only the generations are
+		// released (C29).
+		m_compiler = nullptr;
+		m_serializer = nullptr;
+
+		for (archive_generation& generation : m_generations)
+		{
+			release(generation.serializer);
+			release(generation.compiler);
+		}
+
+		m_generations.clear();
+
+		release(m_window.buffer);
+		m_window.gpu_address = 0;
+		release(m_queue);
+		release(m_device);
 	}
 
 	// TODO(excise): whole-unit; level 1; one warning for each user setting this backend does not
@@ -195,19 +239,24 @@ namespace mtl
 			die("MTL4 command queue creation failed");
 		}
 
-		// The L3 driver pipeline cache (HLD-07 §4.2).  The archive path carries the
-		// GPU and the OS version, because an archive is a device slice (06 §2.4).
+		// The L3 driver pipeline cache (HLD-07 §4.2).  The prefix carries the GPU,
+		// the OS version and every input that changes the generated code, because
+		// an archive is a device slice and a stale one silently runs old binaries
+		// (06 §2.4; C14).  Each session and each flush writes its own file, so a
+		// crash loses at most the pipelines compiled since the last flush (C29).
 		if (const std::string cache_root = rpcs3::cache::get_ppu_cache();
 			!g_cfg.video.disable_on_disk_shader_cache && !cache_root.empty())
 		{
-			m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u.bin",
-			cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major());
+			m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-g%u-m%u-%s-",
+				cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(),
+				MTL_GENERATOR_VERSION, g_cfg.video.disable_msl_fast_math.get() ? 1u : 0u,
+				rpcs3::get_commit_and_hash().second);
 
 		// EXCISE-BEGIN archive-diagnostic-suffix
 		// TODO(excise): diagnostic.  A switch that changes a shader (the
 			// alpha-test compile-out, MTLFragmentProgram.cpp) must not write its
 			// programs into the archive a normal run loads, or the change would
-			// outlive the diagnostic.  Such a run gets its own file.
+			// outlive the diagnostic.  Such a run gets its own prefix.
 			std::string diagnostic_suffix;
 
 			if (probe::variant("no-alpha-test"))
@@ -236,28 +285,37 @@ namespace mtl
 
 			if (!diagnostic_suffix.empty())
 			{
-				m_archive_path = fmt::format("%sshaders_cache/metal/archive-%llx-%u%s.bin",
-					cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(), diagnostic_suffix);
+				m_archive_prefix = fmt::format("%sshaders_cache/metal/archive-%llx-%u-g%u-m%u-%s%s-",
+					cache_root, static_cast<unsigned long long>(m_device->registryID()), macos_major(),
+					MTL_GENERATOR_VERSION, g_cfg.video.disable_msl_fast_math.get() ? 1u : 0u,
+					rpcs3::get_commit_and_hash().second, diagnostic_suffix);
 			}
 			// EXCISE-END archive-diagnostic-suffix
+
+			m_session_stamp = fmt::format("%llu", static_cast<unsigned long long>(std::time(nullptr)));
+
+			// Two compilers may coexist only where W11 is fixed (macOS 27).
+			m_rotation_enabled = macos_major() >= 27;
 		}
 
 		MTL4::CompilerDescriptor* descriptor = MTL4::CompilerDescriptor::alloc()->init();
 
 		// The serializer is what records the compiled pipelines.  It is created on
 		// a cold start too, or nothing would ever be written.
-		if (!m_archive_path.empty())
+		archive_generation generation;
+
+		if (!m_archive_prefix.empty())
 		{
 			MTL4::PipelineDataSetSerializerDescriptor* serializer_descriptor = MTL4::PipelineDataSetSerializerDescriptor::alloc()->init();
 			// CaptureBinaries alone.  The archive holds binaries, and asking for
 			// the descriptors as well makes the flush fail with no error at all
 			// (HLD-07 §4.2).
 			serializer_descriptor->setConfiguration(MTL4::PipelineDataSetSerializerConfigurationCaptureBinaries);
-			m_serializer = m_device->newPipelineDataSetSerializer(serializer_descriptor);
+			generation.serializer = m_device->newPipelineDataSetSerializer(serializer_descriptor);
 
-			if (m_serializer)
+			if (generation.serializer)
 			{
-				descriptor->setPipelineDataSetSerializer(m_serializer);
+				descriptor->setPipelineDataSetSerializer(generation.serializer);
 			}
 			else
 			{
@@ -267,11 +325,16 @@ namespace mtl
 
 		// One compiler per device (docs/research/metal4/06 §2.5; workaround W11:
 		// concurrent MTL4Compiler instances corrupt the heap on macOS 26).
-		m_compiler = m_device->newCompiler(descriptor, nullptr);
-		if (!m_compiler)
+		generation.compiler = m_device->newCompiler(descriptor, nullptr);
+		if (!generation.compiler)
 		{
 			die("MTL4 compiler creation failed");
 		}
+
+		m_generations.push_back(generation);
+		m_compiler = generation.compiler;
+		m_serializer = generation.serializer;
+		m_next_rotation = std::chrono::steady_clock::now() + std::chrono::minutes(5);
 
 		open_pipeline_archive();
 
@@ -293,65 +356,238 @@ namespace mtl
 
 	bool device::open_pipeline_archive()
 	{
-		if (m_archive_path.empty())
+		if (m_archive_prefix.empty())
 		{
 			// TODO(excise): level 2; the on-disk shader cache is off.
 			MTL_PROBE_LATCH(2, "session/archive off");
 			return false;
 		}
 
+		// Load every archive of this device, OS and code generation, newest first,
+		// so a crash only loses the last flush (C29).  The session that wrote an
+		// archive may have been killed, so nothing beyond the file name is assumed.
+		const std::filesystem::path directory = std::filesystem::path(m_archive_prefix).parent_path();
+		const std::string file_prefix = std::filesystem::path(m_archive_prefix).filename().string();
+
+		struct archive_file
+		{
+			std::string path;
+			std::filesystem::file_time_type time;
+		};
+
+		std::vector<archive_file> files;
 		std::error_code error_code;
-		if (!std::filesystem::exists(m_archive_path, error_code))
+
+		for (const auto& entry : std::filesystem::directory_iterator(directory, error_code))
+		{
+			if (!entry.is_regular_file(error_code))
+			{
+				continue;
+			}
+
+			const std::string name = entry.path().filename().string();
+
+			if (name.size() <= file_prefix.size() || name.compare(0, file_prefix.size(), file_prefix) != 0 ||
+				entry.path().extension() != ".bin")
+			{
+				continue;
+			}
+
+			files.push_back({ entry.path().string(), entry.last_write_time(error_code) });
+		}
+
+		if (files.empty())
 		{
 			// TODO(excise): level 2; a cold start, so the archive has no shaders.
 			MTL_PROBE_LATCH(2, "session/archive absent");
 			return false;
 		}
 
-		NS::Error* error = nullptr;
-		m_archive = m_device->newArchive(NS::URL::fileURLWithPath(NS::String::string(m_archive_path.c_str(), NS::UTF8StringEncoding)), &error);
-		if (!m_archive)
+		std::sort(files.begin(), files.end(), [](const archive_file& a, const archive_file& b)
 		{
-			// A rejected archive is a cold start, not a failure (HLD-07 §7).
-			// TODO(excise): level 2; the archive was rejected.
-			MTL_PROBE_LATCH(2, "session/archive rejected");
-			rsx_log.error("Metal: the pipeline archive %s was rejected: %s", m_archive_path, archive_error_text(error));
+			return a.time > b.time;
+		});
+
+		// Keep the newest eight; older ones are compacted away.  Every archive that
+		// is kept is loaded, so compaction never loses a pipeline the run needs.
+		constexpr usz keep = 8;
+		std::vector<MTL4::Archive*> archives;
+
+		// The URL and array objects are autoreleased; the RSX thread has no pool.
+		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+		for (usz index = 0; index < files.size(); ++index)
+		{
+			if (index >= keep)
+			{
+				std::filesystem::remove(files[index].path, error_code);
+				continue;
+			}
+
+			NS::Error* error = nullptr;
+			MTL4::Archive* archive = m_device->newArchive(
+				NS::URL::fileURLWithPath(NS::String::string(files[index].path.c_str(), NS::UTF8StringEncoding)), &error);
+
+			if (!archive)
+			{
+				// A rejected archive is a cold start, not a failure (HLD-07 §7).
+				// TODO(excise): level 2; the archive was rejected.
+				MTL_PROBE_LATCH(2, "session/archive rejected");
+				rsx_log.error("Metal: the pipeline archive %s was rejected: %s", files[index].path, archive_error_text(error));
+				continue;
+			}
+
+			archives.push_back(archive);
+		}
+
+		if (archives.empty())
+		{
+			pool->release();
 			return false;
 		}
 
 		m_task_options = MTL4::CompilerTaskOptions::alloc()->init();
-		m_task_options->setLookupArchives(NS::Array::array(m_archive));
+		m_task_options->setLookupArchives(NS::Array::array(
+			reinterpret_cast<const NS::Object* const*>(archives.data()), archives.size()));
+
+		// The array retains each archive; drop the +1 that newArchive returned.
+		for (MTL4::Archive* archive : archives)
+		{
+			archive->release();
+		}
+
 		// TODO(excise): level 2; a warm start, so the archive supplies shaders.
 		MTL_PROBE_LATCH(2, "session/archive loaded");
-		rsx_log.notice("Metal: pipeline archive loaded from %s", m_archive_path);
+		rsx_log.notice("Metal: %zu pipeline archive(s) loaded, newest %s", archives.size(), files.front().path);
+		pool->release();
 		return true;
 	}
 
-	void device::flush_pipeline_archive()
+	bool device::flush_generation(archive_generation& generation)
 	{
-		if (!m_serializer || m_archive_path.empty())
+		if (!generation.serializer || generation.flushed || m_archive_prefix.empty())
 		{
-			return;
+			return false;
 		}
 
 		// TODO(excise): level 4; block timer.
 		MTL_PERF_SCOPE(4, "archive/flush");
 
+		// The flush builds URLs, strings and error objects on the RSX thread, which
+		// has no autorelease pool (L6).
+		NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+		const std::string path = fmt::format("%s%s-%u.bin", m_archive_prefix, m_session_stamp, m_flush_index);
+
 		std::error_code error_code;
-		std::filesystem::create_directories(std::filesystem::path(m_archive_path).parent_path(), error_code);
+		std::filesystem::create_directories(std::filesystem::path(path).parent_path(), error_code);
 
 		NS::Error* error = nullptr;
-		if (!m_serializer->serializeAsArchiveAndFlushToURL(NS::URL::fileURLWithPath(NS::String::string(m_archive_path.c_str(), NS::UTF8StringEncoding)), &error))
+		if (!generation.serializer->serializeAsArchiveAndFlushToURL(
+			NS::URL::fileURLWithPath(NS::String::string(path.c_str(), NS::UTF8StringEncoding)), &error))
 		{
 			// The flush is destructive, so a second call reports "nothing to
-			// serialize"; this path must stay the only one (HLD-07 §4.2).
-			rsx_log.error("Metal: the pipeline archive %s was not written: %s", m_archive_path, archive_error_text(error));
+			// serialize"; each generation is therefore written once (HLD-07 §4.2).
+			rsx_log.error("Metal: the pipeline archive %s was not written: %s", path, archive_error_text(error));
+			pool->release();
+			return false;
+		}
+
+		pool->release();
+
+		generation.flushed = true;
+		++m_flush_index;
+
+		// TODO(excise): level 2; the archive was written.
+		MTL_PROBE_LATCH(2, "session/archive written");
+		rsx_log.notice("Metal: pipeline archive written to %s", path);
+		return true;
+	}
+
+	void device::flush_pipeline_archive()
+	{
+		// Every generation that has not been retired yet is written, including
+		// generation zero, which only reaches the disk here (C29).
+		for (archive_generation& generation : m_generations)
+		{
+			flush_generation(generation);
+		}
+	}
+
+	void device::maybe_rotate_archive(u64 compiled_pipelines, bool jobs_idle)
+	{
+		if (!m_rotation_enabled || !jobs_idle || m_generations.empty())
+		{
 			return;
 		}
 
-		// TODO(excise): level 2; the archive was written at exit.
-		MTL_PROBE_LATCH(2, "session/archive written");
-		rsx_log.notice("Metal: pipeline archive written to %s", m_archive_path);
+		const bool count_reached = compiled_pipelines >= m_pipelines_at_rotation + 256;
+		const bool time_reached = std::chrono::steady_clock::now() >= m_next_rotation;
+
+		if (!count_reached && !time_reached)
+		{
+			return;
+		}
+
+		// A new serializer and compiler record the next window.  Generation zero is
+		// never retired: the interpreter and the fixed pipelines hold it for the
+		// whole session, so flushing it here would race their compiles.
+		archive_generation next;
+
+		if (!m_archive_prefix.empty())
+		{
+			MTL4::PipelineDataSetSerializerDescriptor* serializer_descriptor = MTL4::PipelineDataSetSerializerDescriptor::alloc()->init();
+			serializer_descriptor->setConfiguration(MTL4::PipelineDataSetSerializerConfigurationCaptureBinaries);
+			next.serializer = m_device->newPipelineDataSetSerializer(serializer_descriptor);
+		}
+
+		MTL4::CompilerDescriptor* descriptor = MTL4::CompilerDescriptor::alloc()->init();
+
+		if (next.serializer)
+		{
+			descriptor->setPipelineDataSetSerializer(next.serializer);
+		}
+
+		next.compiler = m_device->newCompiler(descriptor, nullptr);
+
+		if (!next.compiler)
+		{
+			rsx_log.error("Metal: archive rotation could not create a compiler; keeping the current one");
+			return;
+		}
+
+		// Retire the current generation.  It is idle, so no link can still be using
+		// its compiler; its serializer is written now, which is the crash-safe
+		// window (C29).  The index is captured before the push, because the vector
+		// may reallocate and a reference would dangle.
+		const u32 retired_index = m_current_generation;
+		m_generations.push_back(next);
+		m_current_generation = static_cast<u32>(m_generations.size()) - 1;
+		m_compiler = next.compiler;
+		m_serializer = next.serializer;
+		m_pipelines_at_rotation = compiled_pipelines;
+		m_next_rotation = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+
+		// Generation zero is the interpreter's; only later generations are
+		// retired, flushed and released.  The release bounds the memory a long
+		// session would otherwise keep in dead compilers.
+		if (retired_index != 0)
+		{
+			archive_generation& retired = m_generations[retired_index];
+			flush_generation(retired);
+
+			if (retired.serializer)
+			{
+				retired.serializer->release();
+				retired.serializer = nullptr;
+			}
+
+			if (retired.compiler)
+			{
+				retired.compiler->release();
+				retired.compiler = nullptr;
+			}
+		}
 	}
 
 	void device::import_guest_window()

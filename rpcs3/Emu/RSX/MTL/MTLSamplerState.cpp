@@ -6,6 +6,7 @@
 #include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Utils/algorithm.hpp"
 #include "Emu/RSX/rsx_methods.h"
+#include "MTLFormats.h"
 
 #include "util/fnv_hash.hpp"
 
@@ -208,7 +209,40 @@ namespace mtl
 
 		// The SNORM expansion is part of the RSX border colour
 		// (RSXTexture.cpp:376-378; VKDraw.cpp:412-413).
-		state.border_color = get_closest_border_color(texture.remapped_border_color(texture.argb_signed() != 0));
+		const color4f border = texture.remapped_border_color(texture.argb_signed() != 0);
+		state.border_color = get_closest_border_color(border);
+
+		// Metal has three border colours; a guest colour that is not one of them
+		// is returned by the shader instead (T11).  The sampler clamps to the
+		// edge on the axes the shader tests, so the fetch itself is valid.
+		if (rsx::is_border_clamped_texture(texture))
+		{
+			const bool preset =
+				(border.r == 0.0f && border.g == 0.0f && border.b == 0.0f && (border.a == 0.0f || border.a == 1.0f)) ||
+				(border.r == 1.0f && border.g == 1.0f && border.b == 1.0f && border.a == 1.0f);
+
+			if (!preset)
+			{
+				state.border_value = border;
+
+				if (texture.wrap_s() == rsx::texture_wrap_mode::border)
+				{
+					state.border_axis_mask |= (1u << rsx::texture_control_bits::BORDER_S);
+				}
+
+				if (texture.dimension() != rsx::texture_dimension::dimension1d &&
+					texture.wrap_t() == rsx::texture_wrap_mode::border)
+				{
+					state.border_axis_mask |= (1u << rsx::texture_control_bits::BORDER_T);
+				}
+
+				if (texture.dimension() == rsx::texture_dimension::dimension3d &&
+					texture.wrap_r() == rsx::texture_wrap_mode::border)
+				{
+					state.border_axis_mask |= (1u << rsx::texture_control_bits::BORDER_R);
+				}
+			}
+		}
 
 		// The comparison reference is SET_TEXTURE_ADDRESS.zfunc.
 		state.compare = texture.zfunc();
@@ -217,10 +251,14 @@ namespace mtl
 		// The shader re-expands signed channels and applies gamma, and the depth
 		// pack is decoded after the fetch.  Linear filtering runs before that
 		// work, so it would filter the undecoded value (VKDraw.cpp:419-437).
+		// A gamma texture whose host format has an sRGB view is the exception: the
+		// hardware expands it, so it filters like any other colour texture (T8).
 		const rsx::texture_format_ex format_ex = texture.format_ex();
+		const u32 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+		const bool gamma_in_shader = format_ex.hw_SRGB_possible() && !guest_format_has_srgb_host(format);
 		state.force_nearest = state.depth_compare ||
 			(format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0 ||
-			format_ex.hw_SRGB_possible();
+			gamma_in_shader;
 
 		return state;
 	}
@@ -233,11 +271,16 @@ namespace mtl
 		sampler_state state = capture_sampler(texture);
 
 		// A vertex fetch has no derivatives, so Vulkan and OpenGL force nearest and
-		// do not sample the mip chain (VKDraw.cpp:606-619).
-		state.min_filter = rsx::texture_minify_filter::nearest;
+		// do not filter across the mip chain (VKDraw.cpp:606-619).  Vulkan still
+		// selects a mip with MIPMAP_MODE_NEAREST, not "no mipmapping", so the Metal
+		// minify mode must carry the nearest mip selection: a plain `nearest` maps
+		// to SamplerMipFilterNotMipmapped, whose samples all come from level 0
+		// (MTLSampler.h:32) and make the LOD range inert (T9).
+		state.min_filter = rsx::texture_minify_filter::nearest_nearest;
 		state.mag_filter = rsx::texture_magnify_filter::nearest;
-		state.min_lod = 0.0f;
-		state.max_lod = 0.0f;
+		const f32 max_level = static_cast<f32>(std::max<u32>(texture.get_exact_mipmap_count(), 1) - 1);
+		state.min_lod = std::min(texture.min_lod(), max_level);
+		state.max_lod = std::min(texture.max_lod(), max_level);
 		state.lod_bias = 0.0f;
 
 		// CELL_GCM_TEXTURE_UN selects unnormalized coordinates.  Metal requires
@@ -274,9 +317,12 @@ namespace mtl
 		// buffer, so the descriptor has to allow it (C11).
 		descriptor->setSupportArgumentBuffers(true);
 
-		descriptor->setSAddressMode(get_address_mode(state.wrap_s));
-		descriptor->setTAddressMode(get_address_mode(state.wrap_t));
-		descriptor->setRAddressMode(get_address_mode(state.wrap_r));
+		descriptor->setSAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_S))
+			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_s));
+		descriptor->setTAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_T))
+			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_t));
+		descriptor->setRAddressMode((state.border_axis_mask & (1u << rsx::texture_control_bits::BORDER_R))
+			? MTL::SamplerAddressModeClampToEdge : get_address_mode(state.wrap_r));
 		if (state.force_nearest)
 		{
 			// The filter must not run on the stored value; the shader decodes it.
@@ -325,6 +371,7 @@ namespace mtl
 			&& a.max_aniso == b.max_aniso
 			&& a.unnormalized_coords == b.unnormalized_coords
 			&& a.border_color == b.border_color
+			&& a.border_axis_mask == b.border_axis_mask
 			&& a.depth_compare == b.depth_compare
 			&& a.compare == b.compare
 			&& a.force_nearest == b.force_nearest;
@@ -342,6 +389,7 @@ namespace mtl
 		hash = rpcs3::hash64(hash, static_cast<u16>(state.min_filter));
 		hash = rpcs3::hash64(hash, static_cast<u16>(state.mag_filter));
 		hash = rpcs3::hash64(hash, static_cast<u32>(state.border_color));
+		hash = rpcs3::hash64(hash, state.border_axis_mask);
 		hash = rpcs3::hash64(hash, static_cast<u16>(state.compare));
 		hash = rpcs3::hash64(hash, static_cast<u8>(state.depth_compare));
 		hash = rpcs3::hash64(hash, static_cast<u8>(state.force_nearest));

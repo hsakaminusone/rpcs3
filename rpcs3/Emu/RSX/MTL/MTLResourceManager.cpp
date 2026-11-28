@@ -27,13 +27,45 @@ namespace mtl
 
 	void heap_pool::shutdown()
 	{
+		garbage_collect();
+
 		for (const block& entry : m_blocks)
 		{
-			entry.heap->release();
+			if (entry.heap)
+			{
+				entry.heap->release();
+			}
 		}
 
 		m_blocks.clear();
 		m_device = nullptr;
+	}
+
+	void heap_pool::garbage_collect()
+	{
+		if (m_empty_heaps.empty())
+		{
+			return;
+		}
+
+		// The removal reaches the set before the object goes, so the set never names
+		// a released heap (L7).
+		if (m_residency)
+		{
+			for (MTL::Heap* heap : m_empty_heaps)
+			{
+				m_residency->remove(heap);
+			}
+
+			m_residency->flush();
+		}
+
+		for (MTL::Heap* heap : m_empty_heaps)
+		{
+			heap->release();
+		}
+
+		m_empty_heaps.clear();
 	}
 
 	void heap_pool::set_residency(residency_manager* residency)
@@ -83,8 +115,24 @@ namespace mtl
 			}
 
 			offset = 0;
+
+			// A retired dedicated heap leaves its entry behind so the block indices
+			// already handed out stay valid; the entry is reused here (L7).
+			for (usz index = 0; index < m_blocks.size(); ++index)
+			{
+				block& entry = m_blocks[index];
+
+				if (!entry.heap && entry.dedicated)
+				{
+					entry.heap = dedicated;
+					entry.free_spans.clear();
+					block_index = static_cast<u32>(index);
+					return dedicated;
+				}
+			}
+
 			block_index = static_cast<u32>(m_blocks.size());
-			m_blocks.push_back({ dedicated, {} });
+			m_blocks.push_back({ dedicated, {}, true });
 			return dedicated;
 		}
 
@@ -149,7 +197,15 @@ namespace mtl
 			return;
 		}
 
-		std::vector<std::pair<u64, u64>>& spans = m_blocks[block_index].free_spans;
+		block& entry = m_blocks[block_index];
+
+		if (!entry.heap)
+		{
+			// The dedicated heap has already been retired.
+			return;
+		}
+
+		std::vector<std::pair<u64, u64>>& spans = entry.free_spans;
 		const auto at = std::lower_bound(spans.begin(), spans.end(), offset,
 			[](const std::pair<u64, u64>& span, u64 value) { return span.first < value; });
 
@@ -170,6 +226,17 @@ namespace mtl
 				previous->second += span->second;
 				spans.erase(span);
 			}
+		}
+
+		// A dedicated heap holds one span, so a free that returns the whole heap
+		// leaves it empty.  It is retired once the ring reaches a safe point; the
+		// entry stays behind so the block indices already handed out keep naming
+		// their heap (L7).
+		if (entry.dedicated && spans.size() == 1 && spans[0].first == 0 && spans[0].second == entry.heap->size())
+		{
+			m_empty_heaps.push_back(entry.heap);
+			entry.heap = nullptr;
+			spans.clear();
 		}
 	}
 
@@ -234,11 +301,19 @@ namespace mtl
 
 	void residency_manager::flush()
 	{
-		if (!m_dirty || !m_persistent)
+		if (!m_persistent || (!m_dirty && m_removals.empty()))
 		{
 			return;
 		}
 
+		// Additions and removals travel in one commit, so a frame that releases a
+		// heap and allocates another costs one driver call (L7).
+		for (MTL::Allocation* allocation : m_removals)
+		{
+			m_persistent->removeAllocation(allocation);
+		}
+
+		m_removals.clear();
 		m_persistent->commit();
 		m_dirty = false;
 	}
@@ -257,8 +332,10 @@ namespace mtl
 			return;
 		}
 
-		m_persistent->removeAllocation(allocation);
-		m_persistent->commit();
+		// The set retains what it names, so the owner may be released before the
+		// removal reaches the set at the next flush (L7).
+		m_removals.push_back(allocation);
+		m_dirty = true;
 	}
 
 	bool residency_manager::is_persistent(MTL::Allocation* allocation) const
@@ -596,6 +673,11 @@ namespace mtl
 		{
 			release_list(list);
 		}
+
+		// A dedicated heap whose only span was freed above is retired here, at a
+		// point where nothing in flight can still reach it (L7).
+		m_shared.garbage_collect();
+		m_private.garbage_collect();
 	}
 
 	void resource_manager::release_list(std::vector<MTL::Allocation*>& list)

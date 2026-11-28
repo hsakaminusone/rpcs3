@@ -1793,6 +1793,15 @@ namespace mtl
 	{
 		// TODO(excise): level 1; block timer.
 		MTL_PERF_SCOPE(1, "init");
+
+		if (g_abandoned_worker.load(std::memory_order_acquire))
+		{
+			// A previous session's link worker could not be stopped and still owns
+			// a compiler.  Creating a second one beside it is undefined on this
+			// driver (L6, W11), so the backend refuses to start again.
+			die("Metal 4 cannot start after an abandoned shader worker; restart RPCS3");
+		}
+
 		m_device = device::create();
 		if (!m_device)
 		{
@@ -1944,7 +1953,18 @@ namespace mtl
 			// The ring drains first: a frame that is still in flight refers to the
 			// drawable's residency set, so dropping the layer's set before the drain
 			// can fault the GPU and lose the very commit feedback the drain waits for.
-			m_frame_resources->recorder.shutdown();
+			if (!m_frame_resources->recorder.shutdown())
+			{
+				// L2: the drain failed, so the recorder's allocators, buffers and
+				// every ring they read may still run.  Freeing any of it is
+				// undefined; leak the backend instead.
+				MTL_PROBE_LATCH(1, "session/ring did not drain");
+				rsx_log.error("Metal 4: GPU work still in flight at shutdown; leaking the backend to stay safe");
+				m_frame_resources.release();
+				m_device.release();
+				destroy_frame_context();
+				return;
+			}
 			// The GPU has drained at this point, so the interpreter's pipeline
 			// states and libraries can go with the frame resources.
 			m_frame_resources->interpreter.shutdown();
@@ -1972,6 +1992,23 @@ namespace mtl
 		destroy_frame_context();
 	}
 
+	void MTLGSRender::note_draw_dropped(const char* ring)
+	{
+		++m_draws_skipped;
+		++m_ring_drops;
+
+		// A ring that cannot grow drops every draw until the frame ends, so one
+		// line per frame names the first failure and the total stays in the
+		// counter for the overlay (C9).
+		if (!m_ring_drop_reported)
+		{
+			m_ring_drop_reported = true;
+			const u32 slot = m_frame_resources ? m_frame_resources->recorder.slot() : 0;
+			rsx_log.error("Metal 4: %s ring exhausted on slot %u, draw dropped (%llu so far)",
+				ring, slot, static_cast<unsigned long long>(m_ring_drops));
+		}
+	}
+
 	void MTLGSRender::open_frame()
 	{
 		// TODO(excise): level 1; block timer.
@@ -1983,11 +2020,20 @@ namespace mtl
 
 		// The ring's slot is only reusable after its previous frame has completed,
 		// so begin_frame waits on the commit feedback before it resets the
-		// allocator (HLD-04 §3.2).
-		// A slot whose previous commit never reported is abandoned, and its command
-		// buffer may still write.  The query gate must not treat that work as done
-		// (Q3), so it receives the same result the recorder computed.
+		// allocator (HLD-04 §3.2).  A timeout is device loss: recording stops and
+		// the query gate never treats the abandoned work as done (L1).
 		const bool reported = m_frame_resources->recorder.begin_frame();
+
+		if (!reported)
+		{
+			// L1: the slot did not complete.  Recording stops; the core observes
+			// the device loss through check_device_status().
+			return;
+		}
+
+		// A new frame may grow the rings that the previous one exhausted (C9).
+		m_ring_drop_reported = false;
+
 		const u32 slot = m_frame_resources->recorder.slot();
 		m_frame_resources->output.on_slot_complete(slot);
 		m_frame_resources->zcull_control.on_slot_complete(slot, reported);
@@ -2007,6 +2053,15 @@ namespace mtl
 		m_frame_resources->transform_constants_valid = false;
 		m_frame_resources->fragment_constants_valid = false;
 		m_frame_open = true;
+
+		// A rotation happens only here: the frame boundary is the one point where
+		// no draw is mid-encode and the job registry can be idle.  A retired
+		// generation is flushed to its own file, so a crash loses at most the
+		// pipelines compiled since the previous boundary (C29).
+		if (m_device && m_frame_resources->jobs.idle())
+		{
+			m_device->maybe_rotate_archive(m_frame_resources->jobs.published_total(), true);
+		}
 
 #if MTL_DEBUG_LOGS
 		diagnostic_frame_opened();
@@ -4160,9 +4215,19 @@ namespace mtl
 			}
 
 			bool deferred = false;
+
+			// A clamped coordinate transform already keeps the coordinate inside
+			// the subresource, so the hardware border is never reached and the
+			// clamp fields carry the region, not a border colour (T11).
+			sampler_state sampler_capture = capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i));
+			if (descriptor->texcoord_xform.clamp)
+			{
+				sampler_capture.border_axis_mask = 0;
+			}
+
 			frame.fragment_textures[i] = frame.textures.resolve_texture_bind(
 				frame.recorder, descriptor,
-				frame.samplers.get(capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i))), deferred);
+				frame.samplers.get(sampler_capture), deferred);
 
 #if MTL_DEBUG_LOGS
 			// TODO(excise): level 5; the feedback witness.  The shared cache sets
@@ -6226,6 +6291,7 @@ namespace mtl
 
 		if (!context || !params || !fragment || !sampler || !stipple || !vs_params)
 		{
+			note_draw_dropped("draw-constants");
 			return;
 		}
 
@@ -6238,6 +6304,34 @@ namespace mtl
 
 		RSX(m_ctx)->GRAPH_frontend().fill_fragment_state_buffer(fragment, m_ctx->program.fragment_program);
 		m_ctx->program.fragment_program.texture_params.write_to(sampler, m_ctx->program.fp_metadata.referenced_textures_mask);
+
+		// A border colour Metal cannot express in a sampler travels with the unit's
+		// texture parameters and the shader returns it (T11).  The clamp fields are
+		// free here because a clamped coordinate transform took the hardware path.
+		for (u32 i = 0, refs = m_ctx->program.fp_metadata.referenced_textures_mask; refs; refs >>= 1, ++i)
+		{
+			if (!(refs & 1))
+			{
+				continue;
+			}
+
+			const sampler_state border = capture_fragment_sampler(*m_ctx->register_state, static_cast<u8>(i));
+			if (!border.border_axis_mask)
+			{
+				continue;
+			}
+
+			if (m_fs_sampler_descriptors[i] && m_fs_sampler_descriptors[i]->texcoord_xform.clamp)
+			{
+				continue;
+			}
+
+			sampler[i].clamp_min[0] = border.border_value.r;
+			sampler[i].clamp_min[1] = border.border_value.g;
+			sampler[i].clamp_max[0] = border.border_value.b;
+			sampler[i].clamp_max[1] = border.border_value.a;
+			sampler[i].control |= border.border_axis_mask;
+		}
 		std::memcpy(stipple, m_ctx->register_state->polygon_stipple_pattern(), stipple_pattern_block_count * sizeof(vec4_block));
 
 		// The block beside the pattern carries the two pieces of rasteriser state
@@ -6265,6 +6359,7 @@ namespace mtl
 			vec4_block* block = frame.constants.alloc_transform_constants();
 			if (!block)
 			{
+				note_draw_dropped("transform-constants");
 				return;
 			}
 
@@ -6322,6 +6417,7 @@ namespace mtl
 			vec4_block* constants = frame.constants.alloc_fragment_constants(static_cast<u32>(fragment_constant_count));
 			if (!constants)
 			{
+				note_draw_dropped("fragment-constants");
 				return;
 			}
 
@@ -7520,6 +7616,7 @@ namespace mtl
 			blend_values* blend = frame.constants.alloc_blend_values();
 			if (!blend)
 			{
+				note_draw_dropped("blend-values");
 				return;
 			}
 
@@ -7862,13 +7959,24 @@ namespace mtl
 
 				for (const auto& range : draw_call.get_subranges())
 				{
-					const u32 count = ::get_index_count(draw_call.primitive, range.count);
 					const u32 byte_offset = index_offset * type_size;
 
 					// Metal 4 has no separate index-buffer offset: the address is the
 					// buffer base and the seventh argument is baseVertex.  Advance the
 					// address and shrink the declared length instead (VKDraw.cpp:1242).
 					if (byte_offset >= input.index_length)
+					{
+						break;
+					}
+
+					// The subrange comes from the guest, so it can name more indices
+					// than the index buffer still holds.  Apple's GPU is not robust to
+					// an out-of-bounds 16-bit index read (KosmicKrisp WA13), so clamp
+					// the draw to the bytes that remain (C31).
+					const u32 remaining = (input.index_length - byte_offset) / type_size;
+					const u32 count = std::min(::get_index_count(draw_call.primitive, range.count), remaining);
+
+					if (!count)
 					{
 						break;
 					}
@@ -8989,7 +9097,7 @@ namespace mtl
 		// A guest waiting on a label waits on a write that is still being recorded, so
 		// the frame commits here.  The commit does not wait: the guest's own wait is
 		// the wait, and the slot comes back on the next encoder (HLD-04 §4.3).
-		if (m_frame_open && m_frame_resources->recorder.label_writes_pending())
+		if (m_frame_open && (m_frame_resources->recorder.label_writes_pending() || m_frame_resources->recorder.label_commit_due()))
 		{
 			// TODO(excise): level 2; a guest wait that made the frame commit.
 			MTL_PROBE_LATCH(2, "sync/semaphore wait/label commit");
@@ -9156,14 +9264,15 @@ namespace mtl
 
 		if (m_frame_open && m_frame_resources->recorder.write_label(address, value))
 		{
-			// A back-end release is waited on by the guest without an RSX
-			// acquire, and the next encoder boundary may never arrive while the
-			// FIFO is parked.  Submit the batch now, without waiting, as VK does
-			// with its label command buffer (VKGSRender.cpp:1744-1759); the slot
-			// comes back at the next encoder.
+			// A back-end release is waited on by the guest without an RSX acquire.
+			// Committing here would close the open pass (tile store, then reload of
+			// every attachment), so the commit is deferred to the next pass
+			// boundary.  The deadline covers a parked FIFO that never reaches one
+			// (A2).
 			if (type == NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE)
 			{
-				m_frame_resources->recorder.commit_pending_labels();
+				m_frame_resources->recorder.request_label_commit();
+				m_label_commit_deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(150);
 			}
 
 			return true;
@@ -9245,6 +9354,17 @@ namespace mtl
 
 				request.processed = true;
 			}
+		}
+
+		// A back-end release whose label never reached a pass boundary because the
+		// FIFO parked must still become visible: the guest is waiting on it (A2).
+		if (m_frame_open && m_frame_resources &&
+			m_frame_resources->recorder.label_commit_due() &&
+			std::chrono::steady_clock::now() >= m_label_commit_deadline)
+		{
+			// TODO(excise): level 2; a parked FIFO that forced a label commit.
+			MTL_PROBE_LATCH(2, "sync/label commit deadline");
+			m_frame_resources->recorder.commit_pending_labels();
 		}
 
 		// The thread owns the flips, the invalidations and the native-UI path; the

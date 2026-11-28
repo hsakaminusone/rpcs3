@@ -200,7 +200,9 @@ namespace mtl
 		}
 
 		MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
-		descriptor->setTextureType(MTL::TextureType2D);
+		// A multisample image must be a multisample texture type: Metal rejects a
+		// TextureType2D descriptor with sampleCount > 1 at creation (T10).
+		descriptor->setTextureType(samples > 1 ? MTL::TextureType2DMultisample : MTL::TextureType2D);
 		descriptor->setPixelFormat(MTL::PixelFormatDepth32Float);
 		descriptor->setWidth(std::max<u16>(m_width, 1));
 		descriptor->setHeight(std::max<u16>(m_height, 1));

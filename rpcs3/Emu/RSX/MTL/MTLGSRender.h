@@ -6,6 +6,7 @@
 
 #include "Emu/RSX/Core/RSXRenderBackend.h"
 
+#include <chrono>
 #include <memory>
 
 // The present source and the CPU-upload scratch images are the only metal-cpp
@@ -137,6 +138,20 @@ namespace mtl
 		// The frame's command buffer is open.  A frame opens lazily on its first
 		// pass and closes at the flip, which submits it.
 		bool m_frame_open = false;
+
+		// A back-end semaphore release wants its label committed soon, but not at
+		// the cost of splitting an open pass.  The recorder commits at the next
+		// pass boundary, and this deadline covers a parked FIFO that never reaches
+		// one (A2).
+		std::chrono::steady_clock::time_point m_label_commit_deadline{};
+
+		// A ring allocation that fails drops the draw.  The count is cumulative and
+		// the log is once per frame, because a full ring drops every draw that
+		// follows it (C9).
+		u64 m_draws_skipped = 0;
+		u64 m_ring_drops = 0;
+		bool m_ring_drop_reported = false;
+		void note_draw_dropped(const char* ring);
 	};
 }
 

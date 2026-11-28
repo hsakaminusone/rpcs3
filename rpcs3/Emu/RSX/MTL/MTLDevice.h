@@ -3,7 +3,10 @@
 #include "util/types.hpp"
 #include "MTLAvailability.h"
 #include <atomic>
+#include <chrono>
 #include <memory>
+#include <string>
+#include <vector>
 
 // Metal 4 backend port surface (docs/research/metal4/08 §2; HLD-01 §3.1).
 #ifdef RSX_ENABLE_METAL4
@@ -43,6 +46,15 @@ namespace mtl
 		bool valid() const { return buffer != nullptr; }
 	};
 
+	// Set when a shader-job shutdown timed out and the link worker could not be
+	// stopped.  The worker still holds a compiler and program addresses, so a
+	// later init must not create a second device beside it (L6).
+	extern std::atomic<bool> g_abandoned_worker;
+
+	// Bump on any change to the MSL/GLSL the backend emits, so a stale archive is
+	// never loaded for a build that generates different code (C14).
+	constexpr u32 MTL_GENERATOR_VERSION = 1;
+
 	// One MTL::Device + one MTL4::CommandQueue + one MTL4::Compiler
 	// (HLD-01 §3.4; one compiler per device, KosmicKrisp workaround W11).
 	class device
@@ -58,12 +70,21 @@ namespace mtl
 		MTL4::CompilerTaskOptions* pipeline_task_options() const { return m_task_options; }
 		const features& f() const { return m_features; }
 		const guest_window& window() const { return m_window; }
+		std::atomic<bool>& lost_flag() { return m_lost; }
 		const std::atomic<bool>& lost_flag() const { return m_lost; }
 
 		// Write the captured pipelines to the archive of this device and OS
 		// (HLD-07 §4.2).  Safe to call once, at teardown; a no-op when the
 		// on-disk shader cache is off or nothing was captured.
 		void flush_pipeline_archive();
+
+		// Crash-safe archive rotation (C29).  A crash loses at most the pipelines
+		// compiled since the last rotation, because each retired generation is
+		// flushed to its own session file.  Called at a frame boundary with the
+		// shader-job count and whether the registry is idle; a compiler is never
+		// swapped under an in-flight link.  Generation zero is never retired: the
+		// interpreter holds it for the whole session.
+		void maybe_rotate_archive(u64 compiled_pipelines, bool jobs_idle);
 
 		// The 16-bool contract struct (RSXThread.h:80-98), Metal 4 plan
 		// (docs/research/metal4/10 §2.2): 7 free, 4 work-to-land, 4 forced false,
@@ -83,15 +104,43 @@ namespace mtl
 		bool open_pipeline_archive();
 		void import_guest_window();
 
-		// The L3 archive path, empty when the on-disk shader cache is off or the
-		// PPU cache has no root.  Keyed by GPU and OS, because an archive is a
-		// device slice (06 §2.4).
-		std::string m_archive_path;
+		// One compiler and the serializer it records into.  A rotation retires a
+		// generation only when no job can still use it (C29).
+		struct archive_generation
+		{
+			MTL4::Compiler* compiler = nullptr;
+			MTL4::PipelineDataSetSerializer* serializer = nullptr;
+			bool flushed = false;
+		};
+
+		// Write one generation's captured pipelines to a new session file.  A
+		// generation is written once; the flush is destructive.
+		bool flush_generation(archive_generation& generation);
+
+		// The archive directory entry prefix, empty when the on-disk shader cache
+		// is off or the PPU cache has no root.  Keyed by GPU, OS and generator
+		// inputs, because an archive is a device slice (06 §2.4; C14).
+		std::string m_archive_prefix;
+		// This session's stamp, so a flush lands in a new file rather than
+		// overwriting an earlier one.
+		std::string m_session_stamp;
+		u32 m_flush_index = 0;
 
 		MTL::Device* m_device = nullptr;
 		MTL4::CommandQueue* m_queue = nullptr;
+		// The generation new work uses.  Generation zero stays current until the
+		// first rotation and is never retired, because the interpreter holds it.
+		std::vector<archive_generation> m_generations;
+		u32 m_current_generation = 0;
+		std::chrono::steady_clock::time_point m_next_rotation{};
+		u64 m_pipelines_at_rotation = 0;
+		bool m_rotation_enabled = false;
+
+		// Aliases of the current generation, kept so the hot accessors stay one
+		// load.  They are reassigned only on the RSX thread.
 		MTL4::Compiler* m_compiler = nullptr;
 		MTL4::PipelineDataSetSerializer* m_serializer = nullptr;
+
 		MTL4::Archive* m_archive = nullptr;
 		MTL4::CompilerTaskOptions* m_task_options = nullptr;
 		features m_features{};

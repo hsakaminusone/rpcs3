@@ -260,6 +260,9 @@ namespace mtl
 		// GUI setting still selects Safe (no substitution at all).
 		MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
 		options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
+		// Keep the shared-edge vertex position identical to the value another draw
+		// computes for the same guest input (C5).
+		options->setPreserveInvariance(true);
 		descriptor->setOptions(options);
 
 		MTL::Library* library = compiler->newLibrary(descriptor, error);
@@ -320,6 +323,7 @@ namespace mtl
 
 		owner->options = MTL::CompileOptions::alloc()->init();
 		owner->options->setMathMode(g_cfg.video.disable_msl_fast_math.get() ? MTL::MathModeSafe : MTL::MathModeRelaxed);
+		owner->options->setPreserveInvariance(true);
 		owner->descriptor->setOptions(owner->options);
 		owner->handler = std::move(handler);
 

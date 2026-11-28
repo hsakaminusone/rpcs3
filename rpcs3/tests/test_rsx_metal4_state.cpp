@@ -31,6 +31,7 @@
 #include "Emu/RSX/Program/program_util.h"
 #include "Emu/RSX/Utils/rsx_utils.h"
 #include "Emu/RSX/rsx_methods.h"
+#include "util/endian.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2107,7 +2108,16 @@ TEST(MTLFormatsDepthPlane, DecodesTheGuestDepthPack)
 	{
 		const u32 bpp = rsx::get_format_block_size_in_bytes(entry.format);
 		u8 src[8]{};
-		std::memcpy(src, &entry.raw, bpp);
+
+		// The guest plane is big-endian; store the word the way the console does.
+		if (bpp == 4)
+		{
+			write_to_ptr<be_t<u32>>(src, 0, entry.raw);
+		}
+		else
+		{
+			write_to_ptr<be_t<u16>>(src, 0, static_cast<u16>(entry.raw));
+		}
 
 		u8 dst[4]{};
 		mtl::decode_depth_plane(dst, src, 1, 1, bpp, bpp, entry.format);
@@ -2155,17 +2165,16 @@ TEST(MTLFormatsDepthPlane, EncodesTheGuestDepthPack)
 	{
 		const u32 bpp = rsx::get_format_block_size_in_bytes(entry.format);
 
-		// The guest word the hardware holds.
+		// The guest word the hardware holds, in the guest's big-endian order.
 		u8 guest[8]{};
 		if (bpp == 4)
 		{
 			const u32 word = (entry.raw << 8) | entry.stencil;
-			std::memcpy(guest, &word, 4);
+			write_to_ptr<be_t<u32>>(guest, 0, word);
 		}
 		else
 		{
-			const u16 word = static_cast<u16>(entry.raw);
-			std::memcpy(guest, &word, 2);
+			write_to_ptr<be_t<u16>>(guest, 0, static_cast<u16>(entry.raw));
 		}
 
 		// The upload's decode, which is what the read-back has to invert.
@@ -2189,16 +2198,17 @@ TEST(MTLFormatsDepthPlane, EncodesZeroWhenNoStencilPlaneIsNamed)
 	// word must then be zero rather than whatever the buffer already held
 	// (REVIEW-FINDINGS.md B16: the stencil plane is not written today).  The guest
 	// word holds the stencil in bits 7:0 and the depth in bits 31:8
-	// (rsx_decode.h:3404, clear_z24 is bf_decoder<8, 24>), so the zero byte is first.
+	// (rsx_decode.h:3404, clear_z24 is bf_decoder<8, 24>), and the guest word is
+	// big-endian, so the zero byte is last in memory.
 	const f32 depth = 1.0f;
 	u8 packed[4] = { 0xEE, 0xEE, 0xEE, 0xEE };
 
 	mtl::encode_depth_plane(packed, &depth, 1, 1, 4, 4, rsx::surface_depth_format2::z24s8_uint);
 
-	EXPECT_EQ(packed[0], 0x00u);
+	EXPECT_EQ(packed[0], 0xFFu);
 	EXPECT_EQ(packed[1], 0xFFu);
 	EXPECT_EQ(packed[2], 0xFFu);
-	EXPECT_EQ(packed[3], 0xFFu);
+	EXPECT_EQ(packed[3], 0x00u);
 }
 
 // =============================================================================
@@ -2291,7 +2301,7 @@ TEST(MTLFormatsTexelSize, AnUncompressedFormatNamesItsTexel)
 		{ MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB, 4 },
 		{ MTL::PixelFormat::PixelFormatDepth32Float, 4 },
 		{ MTL::PixelFormat::PixelFormatRGBA16Float, 8 },
-		{ MTL::PixelFormat::PixelFormatDepth32Float_Stencil8, 8 },
+		{ MTL::PixelFormat::PixelFormatDepth32Float_Stencil8, 4 },
 		{ MTL::PixelFormat::PixelFormatRGBA32Float, 16 },
 	};
 
@@ -2300,6 +2310,55 @@ TEST(MTLFormatsTexelSize, AnUncompressedFormatNamesItsTexel)
 		SCOPED_TRACE(static_cast<u32>(entry.format));
 		EXPECT_EQ(mtl::get_texel_size(entry.format), entry.size);
 	}
+
+	// The host texel of a Depth32Float_Stencil8 image is eight bytes even though
+	// the guest z24s8 texel is four (T6).
+	EXPECT_EQ(mtl::host_texel_size(MTL::PixelFormat::PixelFormatDepth32Float_Stencil8), 8u);
+	EXPECT_EQ(mtl::host_texel_size(MTL::PixelFormat::PixelFormatBGRA8Unorm), 4u);
+	EXPECT_EQ(mtl::depth_plane_texel_size(MTL::PixelFormat::PixelFormatDepth32Float_Stencil8), 4u);
+	EXPECT_EQ(mtl::depth_plane_texel_size(MTL::PixelFormat::PixelFormatDepth16Unorm), 2u);
+}
+
+TEST(MTLFormatsTexelSize, AGuestSurfaceSwapsTheChannelWord)
+{
+	// One byte needs no exchange; 2- and 8-byte texels exchange 16-bit words;
+	// 4- and 16-byte texels exchange 32-bit words (T2).
+	EXPECT_EQ(mtl::guest_endian_element_size(1), 0u);
+	EXPECT_EQ(mtl::guest_endian_element_size(2), 2u);
+	EXPECT_EQ(mtl::guest_endian_element_size(4), 4u);
+	EXPECT_EQ(mtl::guest_endian_element_size(8), 2u);
+	EXPECT_EQ(mtl::guest_endian_element_size(16), 4u);
+	EXPECT_EQ(mtl::guest_endian_element_size(3), 0u);
+}
+
+TEST(MTLFormatsSrgb, AGammaTextureHasAnSrgbViewOnlyWhenTheHostFormatDoes)
+{
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatR8Unorm), MTL::PixelFormat::PixelFormatR8Unorm_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatRG8Unorm), MTL::PixelFormat::PixelFormatRG8Unorm_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatRGBA8Unorm), MTL::PixelFormat::PixelFormatRGBA8Unorm_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatBGRA8Unorm), MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatBC1_RGBA), MTL::PixelFormat::PixelFormatBC1_RGBA_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatBC2_RGBA), MTL::PixelFormat::PixelFormatBC2_RGBA_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatBC3_RGBA), MTL::PixelFormat::PixelFormatBC3_RGBA_sRGB);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatRGBA16Float), MTL::PixelFormat::PixelFormatInvalid);
+	EXPECT_EQ(mtl::to_srgb(MTL::PixelFormat::PixelFormatDepth32Float_Stencil8), MTL::PixelFormat::PixelFormatInvalid);
+
+	// The 8-bit-channel guest formats reach an sRGB view, so the shader can stop
+	// expanding gamma (T8).
+	EXPECT_TRUE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_B8));
+	EXPECT_TRUE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_G8B8));
+	EXPECT_TRUE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_A8R8G8B8));
+	EXPECT_TRUE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_COMPRESSED_DXT1));
+
+	// The packed 16-bit guest formats keep a packed Metal format, which has no
+	// sRGB counterpart, so their gamma fetch stays in the shader.
+#if defined(__APPLE__) && !defined(ARCH_X64)
+	EXPECT_FALSE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_R5G6B5));
+	EXPECT_FALSE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_A1R5G5B5));
+	EXPECT_FALSE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_A4R4G4B4));
+#endif
+	EXPECT_FALSE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_Y16_X16));
+	EXPECT_FALSE(mtl::guest_format_has_srgb_host(CELL_GCM_TEXTURE_DEPTH24_D8));
 }
 
 TEST(MTLFormatsTexelSize, ACompressedBlockIsNotATexel)

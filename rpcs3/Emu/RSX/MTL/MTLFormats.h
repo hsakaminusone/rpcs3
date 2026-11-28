@@ -35,9 +35,33 @@ namespace mtl
 	// (REVIEW-FINDINGS.md, B15).  A texture that is not combined takes no option.
 	MTL::BlitOption get_depth_plane_option(MTL::PixelFormat format, bool stencil_plane);
 
-	// The byte size of one uncompressed host texel.  Zero for a compressed or
-	// unknown format, so a bit-preserving copy can reject a layout it cannot name.
+	// The sRGB view format of an 8-bit colour format, or PixelFormatInvalid when
+	// the format has no sRGB counterpart (T8).
+	MTL::PixelFormat to_srgb(MTL::PixelFormat format);
+
+	// The byte size of one guest texel of a texture in this format.  A
+	// Depth32Float_Stencil8 image is a host 8-byte texel but a guest z24s8
+	// 4-byte texel, and transfer arithmetic works in the guest grid (T6).  Zero
+	// for a compressed or unknown format, so a bit-preserving copy can reject a
+	// layout it cannot name.
 	u32 get_texel_size(MTL::PixelFormat format);
+
+	// The size of one texel as the host stores it.  It differs from
+	// get_texel_size only where the host substitution is wider than the guest
+	// format (T6).
+	u32 host_texel_size(MTL::PixelFormat format);
+
+	// The bytes one depth plane texel occupies in a blit staging buffer: the
+	// depth aspect of Depth32Float_Stencil8 is four bytes, not the eight of the
+	// combined texel.
+	u32 depth_plane_texel_size(MTL::PixelFormat format);
+
+	// The size of one guest word in a surface of `bpp` bytes per texel, for the
+	// GPU byte swap (T2).  The guest is big-endian, so a 2-byte surface swaps
+	// 16-bit words, an 8-byte surface (four 16-bit channels) also swaps 16-bit
+	// words, and a 4- or 16-byte surface swaps 32-bit words.  One byte needs no
+	// swap, so zero tells the caller to copy straight through.
+	u32 guest_endian_element_size(u32 bpp);
 
 	// True for the depth formats this backend creates.  Metal has no colour view of
 	// a depth image (EXPERIMENT-blit-and-attachments.mm, probe G), so a render pass
@@ -47,6 +71,11 @@ namespace mtl
 	// True when the guest depth pack differs from the Metal depth plane, so the
 	// guest words cannot be copied as-is (REVIEW-FINDINGS.md, B8).
 	bool depth_format_needs_decode(rsx::surface_depth_format2 format);
+
+	// True when the guest texture format maps to a Metal colour format with an
+	// sRGB view.  The packed 16-bit formats keep a Metal packed format, which has
+	// no sRGB counterpart, so their gamma fetch stays a shader operation (T8).
+	bool guest_format_has_srgb_host(u32 gcm_format);
 
 	// Map a sampled depth texture format to the surface depth format whose guest
 	// pack the upload plane decode understands.  False for a colour or compressed

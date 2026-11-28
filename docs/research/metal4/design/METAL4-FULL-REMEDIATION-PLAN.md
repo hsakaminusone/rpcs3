@@ -59,13 +59,13 @@ T3/R5.
 
 | ID | Work | Design |
 |---|---|---|
-| T2 | Big-endian surface upload/readback | Add `bswap32` and `bswap16x2` compute kernels to the internal library. Upload: guest → staging, encoder barrier, swap, barrier, staging → texture. Readback: texture → scratch, barrier, swap, barrier, scratch → guest. CPU decode/encode paths use `be_t<u16>/be_t<u32>`. Framebuffer `create` sets `pack_unpack_swap_bytes` from `get_compatible_gcm_format`. |
-| T6 | Typeless inheritance | One `copy_typeless(cmd, src, dst, src_rect, dst_rect)` with three routes: same format → `copyFromTexture`; same byte width, colour↔colour → buffer round trip; depth↔colour → conversion kernel (D32F+S8 ↔ z24s8). `get_texel_size(Depth32Float_Stencil8)` returns the guest 4 bytes for transfer arithmetic; a separate `host_texel_size` is used where real host bytes matter. |
-| T7 | Stencil upload | Decode the low byte of each byte-swapped guest depth word into a `u8` stencil plane, then `copyFromBuffer(..., StencilFromDepthStencil)` after the depth copy, with an encoder barrier between them. |
-| T8 | sRGB views | `to_srgb()` for BGRA8/RGBA8/BC1/BC2/BC3. Bind an sRGB view when `hw_SRGB_possible()`, clear the texture gamma bits in the fragment texture-control word, and stop forcing nearest for gamma and depth-compare. |
-| T9 | Vertex-texture LOD | Keep nearest filters and zero bias; set `min_lod`/`max_lod` as the fragment path does. |
+| T2 | Big-endian surface upload/readback | Add `bswap16` and `bswap32` compute kernels to the internal library (`command_recorder::swap_bytes`). Upload: guest → staging, encoder barrier, swap, barrier, staging → texture. Readback: texture → scratch, barrier, swap, barrier, scratch → guest. The element width follows the channel width, not the texel width: bpp 2/8 swap 16-bit words, bpp 4/16 swap 32-bit words, bpp 1 needs none. CPU decode/encode paths use `be_t<u16>/be_t<u32>`. `pack_unpack_swap_bytes` is not used: only Vulkan and OpenGL read it. |
+| T6 | Typeless inheritance | One `copy_typeless(src, dst)` in `command_recorder` with three routes: same format → `copyFromTexture`; equal guest texel size, colour↔colour → buffer round trip; depth↔colour → conversion kernel (D32F+S8 ↔ z24s8). `get_texel_size(Depth32Float_Stencil8)` returns the guest 4 bytes for transfer arithmetic; a separate `host_texel_size` is used where real host bytes matter. |
+| T7 | Stencil upload | Decode the low byte of each guest depth word into a `u8` stencil plane, then `copyFromBuffer(..., StencilFromDepthStencil)` after the depth copy, with an encoder barrier between them. |
+| T8 | sRGB views | `to_srgb()` for R8/RG8/RGBA8/BGRA8/BC1/BC2/BC3. Bind an sRGB view when `hw_SRGB_possible()` and the host format has one, clear the texture gamma bits in the fragment texture-control word, and stop forcing nearest for a gamma texture that takes the view. Depth-compare and packed 16-bit gamma still force nearest. |
+| T9 | Vertex-texture LOD | A plain `nearest` maps to `SamplerMipFilterNotMipmapped`, so use `nearest_nearest` and set `min_lod`/`max_lod` as the fragment path does, with zero bias. |
 | T10 | MSAA scratch type | `TextureType2DMultisample` when `sampleCount > 1`. |
-| T11 | Border colours | Non-preset borders use clamp-to-edge plus a shader border test behind a pipeline key bit; presets stay hardware. |
+| T11 | Border colours | Non-preset borders clamp to the edge and the shader returns the colour from the texture parameters, one control bit per axis; the three presets stay on the hardware sampler. A clamped coordinate transform keeps the hardware path. |
 | C20 | Drop `PixelFormatView` | Remove from ordinary sampled and colour textures; keep it only on the depth-stencil stencil view and SNORM↔UNORM views. |
 | C12 | Readback trim | Return early when the trimmed region is empty instead of `ensure`. |
 | C31 | Index clamp | Clamp the subrange count to the remaining index bytes. |

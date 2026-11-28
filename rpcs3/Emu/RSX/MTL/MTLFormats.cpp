@@ -6,6 +6,7 @@
 #include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
 
+#include "util/endian.hpp"
 #include "util/logs.hpp"
 
 #include <algorithm>
@@ -218,6 +219,34 @@ namespace mtl
 		return stencil_plane ? MTL::BlitOptionStencilFromDepthStencil : MTL::BlitOptionDepthFromDepthStencil;
 	}
 
+	MTL::PixelFormat to_srgb(MTL::PixelFormat format)
+	{
+		switch (format)
+		{
+		case MTL::PixelFormat::PixelFormatR8Unorm:
+			return MTL::PixelFormat::PixelFormatR8Unorm_sRGB;
+		case MTL::PixelFormat::PixelFormatRG8Unorm:
+			return MTL::PixelFormat::PixelFormatRG8Unorm_sRGB;
+		case MTL::PixelFormat::PixelFormatRGBA8Unorm:
+			return MTL::PixelFormat::PixelFormatRGBA8Unorm_sRGB;
+		case MTL::PixelFormat::PixelFormatBGRA8Unorm:
+			return MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
+		case MTL::PixelFormat::PixelFormatBC1_RGBA:
+			return MTL::PixelFormat::PixelFormatBC1_RGBA_sRGB;
+		case MTL::PixelFormat::PixelFormatBC2_RGBA:
+			return MTL::PixelFormat::PixelFormatBC2_RGBA_sRGB;
+		case MTL::PixelFormat::PixelFormatBC3_RGBA:
+			return MTL::PixelFormat::PixelFormatBC3_RGBA_sRGB;
+		default:
+			return MTL::PixelFormat::PixelFormatInvalid;
+		}
+	}
+
+	bool guest_format_has_srgb_host(u32 gcm_format)
+	{
+		return to_srgb(get_texture_format(gcm_format)) != MTL::PixelFormat::PixelFormatInvalid;
+	}
+
 	u32 get_texel_size(MTL::PixelFormat format)
 	{
 		// Only the formats this backend creates are listed.  A compressed block is
@@ -245,10 +274,57 @@ namespace mtl
 		case MTL::PixelFormat::PixelFormatDepth32Float:
 			return 4;
 		case MTL::PixelFormat::PixelFormatRGBA16Float:
-		case MTL::PixelFormat::PixelFormatDepth32Float_Stencil8:
 			return 8;
+		case MTL::PixelFormat::PixelFormatDepth32Float_Stencil8:
+			// A guest z24s8 is four bytes; the stencil is a separate plane (T6).
+			return 4;
 		case MTL::PixelFormat::PixelFormatRGBA32Float:
 			return 16;
+		default:
+			return 0;
+		}
+	}
+
+	u32 host_texel_size(MTL::PixelFormat format)
+	{
+		if (format == MTL::PixelFormat::PixelFormatDepth32Float_Stencil8)
+		{
+			return 8;
+		}
+
+		return get_texel_size(format);
+	}
+
+	u32 depth_plane_texel_size(MTL::PixelFormat format)
+	{
+		switch (format)
+		{
+		case MTL::PixelFormat::PixelFormatDepth16Unorm:
+			return 2;
+		case MTL::PixelFormat::PixelFormatDepth32Float:
+		case MTL::PixelFormat::PixelFormatDepth32Float_Stencil8:
+			return 4;
+		default:
+			return 0;
+		}
+	}
+
+	u32 guest_endian_element_size(u32 bpp)
+	{
+		// The guest is big-endian.  A 2-byte surface is one 16-bit word, an
+		// 8-byte surface is four 16-bit channels and a 16-byte surface is four
+		// 32-bit channels, so the word that must be exchanged follows the
+		// channel width rather than the texel width (T2).
+		switch (bpp)
+		{
+		case 1:
+			return 0; // one byte: the byte order is the byte itself
+		case 2:
+		case 8:
+			return 2;
+		case 4:
+		case 16:
+			return 4;
 		default:
 			return 0;
 		}
@@ -307,7 +383,9 @@ namespace mtl
 		{
 			for (u32 x = 0; x < width; ++x)
 			{
-				const u32 word = src_bpp == 4 ? read_from_ptr_unsafe<u32>(src_row, x * 4) : read_from_ptr_unsafe<u16>(src_row, x * 2);
+				// The guest plane is big-endian, so the word is read as one guest
+				// element and re-interpreted as a native value (T2).
+				const u32 word = src_bpp == 4 ? static_cast<u32>(read_from_ptr_unsafe<be_t<u32>>(src_row, x * 4)) : static_cast<u32>(read_from_ptr_unsafe<be_t<u16>>(src_row, x * 2));
 				const f32 value = rsx::get_depth_clear_value(format, src_bpp == 4 ? (word >> 8) : (word & 0xFFFF));
 				std::memcpy(dst_row + x * 4, &value, sizeof(value));
 			}
@@ -329,7 +407,7 @@ namespace mtl
 				// Only the z24s8 packs carry a stencil byte, and both store it in the
 				// low byte of the 32-bit word (the float form keeps it in the low
 				// mantissa bits, which is the same byte).
-				const u32 word = src_bpp == 4 ? read_from_ptr_unsafe<u32>(src_row, x * 4) : 0u;
+				const u32 word = src_bpp == 4 ? static_cast<u32>(read_from_ptr_unsafe<be_t<u32>>(src_row, x * 4)) : 0u;
 				dst_row[x] = static_cast<u8>(word);
 			}
 
@@ -416,11 +494,11 @@ namespace mtl
 				if (dst_bpp == 4)
 				{
 					const u32 stencil = stencil_row ? stencil_row[x] : 0;
-					write_to_ptr_unsafe<u32>(dst_row, x * 4, (depth << 8) | stencil);
+					write_to_ptr_unsafe<be_t<u32>>(dst_row, x * 4, (depth << 8) | stencil);
 				}
 				else
 				{
-					write_to_ptr_unsafe<u16>(dst_row, x * 2, static_cast<u16>(depth));
+					write_to_ptr_unsafe<be_t<u16>>(dst_row, x * 2, static_cast<u16>(depth));
 				}
 			}
 
@@ -491,7 +569,7 @@ namespace mtl
 		{
 			for (u32 x = 0; x < width; ++x)
 			{
-				const u16 value = read_from_ptr_unsafe<u16>(src_row, x * 2);
+				const u16 value = static_cast<u16>(read_from_ptr_unsafe<be_t<u16>>(src_row, x * 2));
 				write_to_ptr_unsafe<u16>(dst_row, x * 2, r5g6b5 ? permute_r5g6b5(value) : x1r5g5b5_to_host(value));
 			}
 
@@ -518,7 +596,7 @@ namespace mtl
 			for (u32 x = 0; x < width; ++x)
 			{
 				const u16 value = read_from_ptr_unsafe<u16>(src_row, x * 2);
-				write_to_ptr_unsafe<u16>(dst_row, x * 2, r5g6b5 ? permute_r5g6b5(value) : x1r5g5b5_to_guest(value));
+				write_to_ptr_unsafe<be_t<u16>>(dst_row, x * 2, r5g6b5 ? permute_r5g6b5(value) : x1r5g5b5_to_guest(value));
 			}
 
 			src_row += width * 2;
