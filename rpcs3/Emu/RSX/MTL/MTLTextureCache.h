@@ -10,6 +10,7 @@
 #ifdef RSX_ENABLE_METAL4
 
 #include "../Common/texture_cache.h"
+#include "../Common/TextureUtils.h"
 
 #include "util/logs.hpp"
 
@@ -191,6 +192,13 @@ namespace mtl
 			set_gcm_format(surf->get_gcm_format());
 			create(w, h, depth, mipmaps, image, rsx_pitch, managed);
 			format = surf->pixel_format();
+
+			// T2: mirror VK's framebuffer section flag.  The Metal uploader does
+			// not read this field today, but setting it keeps the section's
+			// contract identical to VK's, so a future shared flush path cannot
+			// silently swap (or fail to swap) this surface.
+			pack_unpack_swap_bytes = surf->is_depth_surface() ||
+			                         rsx::get_compatible_gcm_format(surf->get_surface_color_format()).second;
 		}
 
 		void set_dimensions(u32 width, u32 height, u32 /*depth*/, u32 pitch)

@@ -16,6 +16,7 @@
 #include "Emu/RSX/Core/RSXContext.h"
 #include "Emu/RSX/Core/RSXRendererFactory.h"
 #include "Emu/RSX/Core/RSXVertexTypes.h"
+#include "Emu/RSX/Common/TextureUtils.h"
 #include "Emu/RSX/MTL/MTLGSRender.h"
 
 // The Metal 4 backend state contract, GPU-free.
@@ -2329,6 +2330,33 @@ TEST(MTLFormatsTexelSize, AGuestSurfaceSwapsTheChannelWord)
 	EXPECT_EQ(mtl::guest_endian_element_size(8), 2u);
 	EXPECT_EQ(mtl::guest_endian_element_size(16), 4u);
 	EXPECT_EQ(mtl::guest_endian_element_size(3), 0u);
+}
+
+TEST(MTLFormatsEndian, SwapFlagMatchesTheSharedFormatTable)
+{
+	// T2: the GPU swap is chosen from the same flag VK uses, never from the
+	// texel width alone.  A format that the table says not to swap must not be
+	// exchanged even when its texel is more than one byte.
+	const rsx::surface_color_format formats[] =
+		{
+			rsx::surface_color_format::r5g6b5,
+			rsx::surface_color_format::x1r5g5b5_o1r5g5b5,
+			rsx::surface_color_format::a8r8g8b8,
+			rsx::surface_color_format::a8b8g8r8,
+			rsx::surface_color_format::g8b8,
+			rsx::surface_color_format::w16z16y16x16,
+			rsx::surface_color_format::w32z32y32x32,
+			rsx::surface_color_format::x32,
+			rsx::surface_color_format::b8,
+		};
+
+	for (const auto format : formats)
+	{
+		const auto [gcm_format, swap] = rsx::get_compatible_gcm_format(format);
+		EXPECT_NE(gcm_format, 0u);
+		EXPECT_EQ(mtl::guest_endian_element_size(rsx::get_format_block_size_in_bytes(format)) != 0, swap)
+			<< "surface format " << static_cast<u32>(format);
+	}
 }
 
 TEST(MTLFormatsSrgb, AGammaTextureHasAnSrgbViewOnlyWhenTheHostFormatDoes)

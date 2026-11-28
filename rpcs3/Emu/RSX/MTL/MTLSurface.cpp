@@ -644,7 +644,12 @@ namespace mtl
 		}
 		else
 		{
-			const u32 element_size = guest_endian_element_size(get_bpp());
+			// T2: the guest word is exchanged only when the surface format's own
+			// swap flag says so, exactly as VK does.  A depth surface is always
+			// stored big-endian by the guest.  The word width still follows the
+			// channel width, not the texel width.
+			const bool needs_swap = m_depth || rsx::get_compatible_gcm_format(get_surface_color_format()).second;
+			const u32 element_size = needs_swap ? guest_endian_element_size(get_bpp()) : 0;
 
 			if (element_size)
 			{
@@ -932,11 +937,15 @@ namespace mtl
 			// texture copy has not written yet (S1).
 			emit_barrier(encoder, barrier_spec{ MTL::StageBlit, MTL::StageBlit, MTL4::VisibilityOptionDevice, false });
 
-			// The guest stores its words big-endian, so the scratch is exchanged
-			// before it reaches guest memory, on the GPU (T2).
-			if (const u32 element_size = guest_endian_element_size(bpp))
+			// T2: swap only when this surface format's guest words are big-endian,
+			// as the shared format table says.  Depth is always swapped.
+			const bool needs_swap = m_depth || rsx::get_compatible_gcm_format(color_format).second;
+			if (needs_swap)
 			{
-				cmd.swap_bytes(encoder, scratch, 0, span, element_size);
+				if (const u32 element_size = guest_endian_element_size(bpp))
+				{
+					cmd.swap_bytes(encoder, scratch, 0, span, element_size);
+				}
 			}
 
 			// A buffer-to-buffer blit needs four-byte aligned offsets and length.
